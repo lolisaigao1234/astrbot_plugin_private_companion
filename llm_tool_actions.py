@@ -6327,6 +6327,7 @@ class LlmToolActionsMixin:
         snapshot_caption = "；".join(
             part
             for part in (
+                f"图片画面：{_single_line(lookup.get('description'), 200)}" if lookup.get("description") else "",
                 f"图库标签：{'、'.join(tags[:8])}" if tags else "",
                 f"表达需求：{need}" if need else "",
                 f"选图依据：{match_reason}" if match_reason else "",
@@ -7253,6 +7254,7 @@ class LlmToolActionsMixin:
         snapshot_caption = "；".join(
             part
             for part in (
+                f"图片画面：{_single_line(lookup.get('description'), 200)}" if lookup.get("description") else "",
                 f"图库标签：{'、'.join(tags[:8])}" if tags else "",
                 f"表达需求：{need}" if need else "",
                 f"选图依据：{match_reason}" if match_reason else "",
@@ -7355,7 +7357,8 @@ class LlmToolActionsMixin:
             "confidence": _safe_float(lookup.get("confidence"), 0.0, 0.0, 1.0),
             "image_description": _single_line(
                 (vision_review or {}).get("description")
-                or getattr(self, "_reaction_vision_description_cache", {}).get(_single_line(lookup.get("asset_id"), 64)),
+                or getattr(self, "_reaction_vision_description_cache", {}).get(_single_line(lookup.get("asset_id"), 64))
+                or lookup.get("description"),
                 300,
             ),
             "delivery": _single_line(delivery.get("destination"), 40),
