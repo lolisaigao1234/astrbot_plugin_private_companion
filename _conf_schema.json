@@ -12970,6 +12970,16 @@
           "reaction_expression_embedding_enabled": true
         }
       },
+      "reaction_expression_vision_verify_mode": {
+        "description": "发送前视觉复核表情包",
+        "type": "string",
+        "options": ["off", "embedding", "always"],
+        "hint": "发送前让视觉模型看一眼选中的表情包：embedding=仅当命中完全依赖向量相似度时复核；always=每次都复核；off=关闭。复核结果会随工具返回给聊天模型，不贴合则不发送。主动消息的低延迟路径不复核。",
+        "default": "embedding",
+        "condition": {
+          "enable_reaction_expression_experiment": true
+        }
+      },
       "reaction_expression_embedding_backfill_enabled": {
         "description": "后台补齐表情向量",
         "type": "bool",
