@@ -3886,7 +3886,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                     title="当前主动消息必须遵循的人格",
                     source="proactive_message",
                     content=(
-                        f"{self._truncate_proactive_context(persona, 2600)}\n"
+                        f"{self._truncate_proactive_context(persona, 12000)}\n"
                         "这份人格约束最终说话者的身份、性格、关系站位、称呼和措辞。"
                         "日程、记忆、主动动机及工具结果只能提供本轮内容，不能覆盖或改写人格。"
                     ),
@@ -7065,7 +7065,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
         persona_context = (
             "(Creative-share compact review: use the proactive voice and excerpt rule below; do not restate the full persona.)"
             if reason == "creative_share"
-            else self._truncate_proactive_context(persona, 2600)
+            else self._truncate_proactive_context(persona, 12000)
         ) if persona else "(No explicit persona was resolved. Preserve the candidate instead of inventing a new voice.)"
         creative_excerpt_section = (
             self._creative_share_excerpt_prompt_section()
@@ -8248,7 +8248,7 @@ class ProactiveMessageMixin(FinalResponsePersistenceMixin):
                 topic=review_topic,
                 action_context=review_action_context,
                 intent_hint=intent_hint,
-                persona=(self._truncate_proactive_context(persona, 2600) if persona else ""),
+                persona=(self._truncate_proactive_context(persona, 12000) if persona else ""),
                 proactive_voice=proactive_voice,
                 expression_voice=expression_voice,
                 recipient_identity=recipient_identity,
