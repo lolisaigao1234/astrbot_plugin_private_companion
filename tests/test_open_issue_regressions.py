@@ -52,6 +52,28 @@ class _ReviewHarness(UserMemoryMixin):
 
 
 class OpenIssueRegressionTests(unittest.IsolatedAsyncioTestCase):
+    def test_inline_base64_quote_image_is_preserved_without_text_expansion(self):
+        harness = ForwardMessageMixin()
+        payload = "A" * 1_500_000
+        source = f"base64://{payload}"
+
+        info = harness._extract_reply_rich_card_info(
+            {"type": "quote", "content": f"引用的图片：{source}"}
+        )
+
+        self.assertEqual(1, len(info["images"]))
+        self.assertTrue(info["images"][0].startswith("base64://"))
+        self.assertFalse(any(text.startswith("base64://") for text in info["texts"]))
+
+    def test_inline_data_image_is_detected_as_image(self):
+        source = "data:image/png;base64,AAAA"
+
+        info = ForwardMessageMixin()._extract_reply_rich_card_info(
+            {"type": "quote", "content": source}
+        )
+
+        self.assertEqual([source], info["images"])
+
     def test_qq_image_hosts_are_recognized_without_accepting_lookalikes(self):
         harness = ForwardMessageMixin()
         image_urls = (

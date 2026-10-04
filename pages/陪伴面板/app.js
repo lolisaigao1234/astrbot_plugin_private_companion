@@ -207,7 +207,7 @@ const state = {
   reactionLibraryScope: "all",
   reactionLibraryAnalysis: "all",
   reactionLibraryPage: 1,
-  reactionLibraryPageSize: 48,
+  reactionLibraryPageSize: 24,
   reactionLibrarySelected: new Set(),
   reactionLibraryEditorId: "",
   reactionLibraryImageData: new Map(),
@@ -34071,7 +34071,7 @@ async function loadReactionLibrary(force = false) {
   const requestSeq = ++state.reactionLibraryRequestSeq;
   state.reactionLibraryLoading = true;
   state.reactionLibraryError = "";
-  if (state.activeTab === "experimental" && state.experimentalSubpage === "enable_reaction_expression_experiment") {
+  if (state.activeTab === "experimental" && state.experimentalSubpage === "reaction-library") {
     renderExperimentalPage();
   }
   const params = new URLSearchParams({
@@ -34080,7 +34080,7 @@ async function loadReactionLibrary(force = false) {
     scope: state.reactionLibraryScope || "all",
     analysis: state.reactionLibraryAnalysis || "all",
     page: String(state.reactionLibraryPage || 1),
-    page_size: String(state.reactionLibraryPageSize || 48),
+    page_size: String(state.reactionLibraryPageSize || 24),
   });
   try {
     const data = await fetchJson(`/reaction_library/list?${params.toString()}`);
@@ -34095,7 +34095,7 @@ async function loadReactionLibrary(force = false) {
   } finally {
     if (requestSeq === state.reactionLibraryRequestSeq) {
       state.reactionLibraryLoading = false;
-      if (state.activeTab === "experimental" && state.experimentalSubpage === "enable_reaction_expression_experiment") {
+      if (state.activeTab === "experimental" && state.experimentalSubpage === "reaction-library") {
         renderExperimentalPage();
       }
       scheduleReactionLibraryPoll();
@@ -34109,7 +34109,7 @@ function scheduleReactionLibraryPoll() {
   const pending = Number(state.reactionLibrary?.summary?.analysis_pending || 0);
   if (!pending) return;
   state.reactionLibraryPollTimer = window.setTimeout(() => {
-    if (state.activeTab === "experimental" && state.experimentalSubpage === "enable_reaction_expression_experiment") {
+    if (state.activeTab === "experimental" && state.experimentalSubpage === "reaction-library") {
       loadReactionLibrary(true).catch(() => {});
     }
   }, 1800);
@@ -34248,7 +34248,7 @@ function renderReactionLibraryWorkspace() {
   const total = Math.max(0, Number(library.total || 0));
   const page = Math.max(1, Number(library.page || 1));
   const pages = Math.max(1, Number(library.pages || 1));
-  const pageSize = Math.max(1, Number(library.page_size || state.reactionLibraryPageSize || 48));
+  const pageSize = Math.max(1, Number(library.page_size || state.reactionLibraryPageSize || 24));
   const pageStart = total ? (page - 1) * pageSize + 1 : 0;
   const pageEnd = Math.min(total, page * pageSize);
   const pager = pages > 1 ? `
@@ -34489,7 +34489,7 @@ function bindReactionLibraryActions() {
   root.querySelectorAll("[data-reaction-page]").forEach((button) => button.addEventListener("click", () => {
     state.reactionLibraryPage = Math.max(1, Number(button.dataset.reactionPage || 1));
     state.reactionLibraryEditorId = "";
-    loadReactionLibrary(true).then(() => $("#reactionLibraryWorkspace")?.scrollIntoView({ block: "start", behavior: "auto" })).catch(() => {});
+    loadReactionLibrary(true).catch(() => {});
   }));
   root.querySelector("[data-reaction-select-page]")?.addEventListener("click", () => {
     const visibleIds = reactionLibraryItems().map((item) => String(item.id || "")).filter(Boolean);
@@ -35733,7 +35733,20 @@ function renderExperimentalPage() {
   const root = $("#experimentalRoot");
   if (!root) return;
   const subpage = state.experimentalSubpage || "";
-  if (subpage && visibleExperimentalFeatureKeys().includes(subpage)) {
+  if (subpage === "reaction-library") {
+    root.innerHTML = `<div class="subpage reaction-library-subpage">
+      <nav class="exp-breadcrumb"><button type="button" data-reaction-library-back>← 返回表情表达</button><span>/ 素材库</span></nav>
+      ${renderReactionLibraryWorkspace()}
+    </div>`;
+    root.querySelector("[data-reaction-library-back]")?.addEventListener("click", () => {
+      state.reactionLibraryEditorId = "";
+      root.querySelector("#reactionImportDialog")?.close();
+      window.clearTimeout(state.reactionLibraryPollTimer);
+      state.experimentalSubpage = "enable_reaction_expression_experiment";
+      renderExperimentalPage();
+    });
+    bindReactionLibraryActions();
+  } else if (subpage && visibleExperimentalFeatureKeys().includes(subpage)) {
     root.innerHTML = renderExperimentalSubpage(subpage);
     bindExperimentalSubpageActions(subpage);
     if (subpage === "enable_experimental_bluetooth_wakeup" && !state.realityTouch && !state.realityTouchLoading) {
@@ -35912,7 +35925,6 @@ function renderExperimentalSubpage(key) {
   const visualHtml = renderExperimentalTheoryVisual(key);
   const heroHtml = renderExperimentalHero(key, enabled);
   const matrixHtml = renderExperimentalTheoryMatrix(key);
-  const reactionLibraryHtml = key === "enable_reaction_expression_experiment" ? renderReactionLibraryWorkspace() : "";
   return `
     <div class="subpage experimental-subpage ${enabled ? "on" : "off"}">
       <nav class="exp-breadcrumb">
@@ -35922,7 +35934,7 @@ function renderExperimentalSubpage(key) {
       <div class="exp-subpage-toolbar">
         <button type="button" class="exp-toolbar-back" data-exp-back>← 返回总览</button>
         <div class="exp-toolbar-jumps">
-          ${key === "enable_reaction_expression_experiment" ? '<button type="button" data-scroll-target="reactionLibraryWorkspace">素材库</button>' : ""}
+          ${key === "enable_reaction_expression_experiment" ? '<button type="button" data-reaction-library-open>素材库</button>' : ""}
           <button type="button" data-scroll-target="experimentalSettings">参数配置</button>
           <button type="button" data-scroll-target="experimentalRuntime">运行状态</button>
         </div>
@@ -35950,7 +35962,6 @@ function renderExperimentalSubpage(key) {
         ${settingsHtml}
         ${runtimeHtml}
       </div>
-      ${reactionLibraryHtml}
       <details class="exp-evidence">
         <summary><span>原理与行为依据</span><small>理论口径、效果链和完整说明</small></summary>
         <div class="exp-evidence-body">
@@ -39147,7 +39158,12 @@ function bindRealityTouchActions(root) {
 function bindExperimentalSubpageActions(key) {
   const root = $("#experimentalRoot");
   if (!root) return;
-  if (key === "enable_reaction_expression_experiment") bindReactionLibraryActions();
+  if (key === "enable_reaction_expression_experiment") {
+    root.querySelector("[data-reaction-library-open]")?.addEventListener("click", () => {
+      state.experimentalSubpage = "reaction-library";
+      renderExperimentalPage();
+    });
+  }
   if (key === "enable_experimental_bluetooth_wakeup") bindRealityTouchActions(root);
   root.querySelectorAll("[data-exp-back]").forEach((button) => {
     button.addEventListener("click", () => {

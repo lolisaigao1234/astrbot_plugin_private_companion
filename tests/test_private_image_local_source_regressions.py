@@ -5,6 +5,7 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock
 from unittest.mock import patch
 
 from astrbot_plugin_private_companion.private_image import PrivateImageMixin
@@ -80,6 +81,38 @@ class PrivateImageLocalSourceRegressionTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual([str(image.resolve())], prepared)
             self.assertTrue(harness._private_image_source_to_model_url(uri).startswith("data:image/png;base64,"))
+
+    async def test_inline_image_sources_bypass_local_path_resolution(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            harness = _ImageHarness(Path(temporary))
+            self.assertIsNone(harness._private_image_local_path_from_source("https://example.com/image"))
+            harness._private_image_local_path_from_source = lambda _source: self.fail(
+                "inline image sources must not be interpreted as filesystem paths"
+            )
+
+            prepared = await harness._prepare_private_image_sources_for_model(
+                ["base64://AAAA", "data:image/png;base64,BBBB"]
+            )
+
+            self.assertEqual(
+                ["base64://AAAA", "data:image/png;base64,BBBB"], prepared
+            )
+
+    async def test_unreadable_path_probe_does_not_hide_later_valid_image(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            harness = _ImageHarness(Path(temporary))
+            broken = Mock()
+            broken.exists.side_effect = OSError("path probe failed")
+            valid = Mock()
+            valid.exists.return_value = True
+            valid.is_file.return_value = True
+            valid.resolve.return_value = Path(temporary) / "valid.png"
+            harness._private_image_local_path_from_source = Mock(side_effect=[broken, valid])
+            harness._private_image_local_path_is_allowed = Mock(return_value=True)
+
+            refs = harness._private_image_sources_for_astrbot_request(["broken", "valid"])
+
+            self.assertEqual([str(valid.resolve.return_value)], refs)
 
     async def test_context_caption_waits_for_visual_budget_not_legacy_eight_seconds(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

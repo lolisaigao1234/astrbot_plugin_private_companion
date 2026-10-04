@@ -459,5 +459,41 @@ class ExpressionAdminScopeTests(unittest.TestCase):
         self.assertEqual(0, self.harness.saved)
 
 
+class ExpressionAdminBatchRevisionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_batch_actions_validate_each_family_against_batch_snapshot(self):
+        for action in ("batch_approve_rule_groups", "batch_reject_rule_groups"):
+            with self.subTest(action=action):
+                harness = Harness()
+                profile = bind_expression_profile({
+                    "pending_rules": [
+                        _rule("style-a", "family-a", harness.resolved_context),
+                        _rule("style-b", "family-b", harness.resolved_context),
+                    ],
+                }, harness.resolved_context)
+                owner = {"user_id": "person-a", "expression_profile": profile}
+                harness.data = {"users": {"person-a": owner}, "groups": {}}
+                GLOBALS["request"].payload = {
+                    "source_type": "private",
+                    "source_id": "person-a",
+                    "expression_action": action,
+                    "items": [
+                        {
+                            "source_type": "private",
+                            "source_id": "person-a",
+                            "rule_family_id": family,
+                            "expected_scope_revision": profile["scope_revision"],
+                            "expected_item_revisions": {rule_id: 1},
+                        }
+                        for family, rule_id in (("family-a", "style-a"), ("family-b", "style-b"))
+                    ],
+                }
+
+                result = await harness.update_expression_library()
+
+                self.assertTrue(result["ok"], result)
+                self.assertEqual(2, result["data"]["batch"]["succeeded"])
+                self.assertEqual(0, result["data"]["batch"]["skipped"])
+
+
 if __name__ == "__main__":
     unittest.main()

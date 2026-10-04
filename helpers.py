@@ -45,6 +45,27 @@ def _now_ts() -> float:
     return time.time()
 
 
+def _strip_terminal_sentence_period(value: Any) -> str:
+    """Remove a final full stop while preserving stronger sentence endings."""
+    source = str(value or "")
+    if not source:
+        return ""
+    match = re.fullmatch(
+        r"(?s)(.*?)([”’\"'）)\]】》」』]*)(\s*)",
+        source,
+    )
+    if match is None:
+        return source
+    body, closers, trailing = match.groups()
+    while body.endswith("。"):
+        body = body[:-1]
+    if body.endswith(".") and not body.endswith(".."):
+        body = body[:-1]
+        while body.endswith("。"):
+            body = body[:-1]
+    return f"{body}{closers}{trailing}"
+
+
 def _normalize_timezone_name(timezone_name: Any, default: str = "Asia/Shanghai") -> str:
     candidate = str(timezone_name or "").strip() or default
     try:

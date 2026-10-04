@@ -297,6 +297,8 @@ class PrivateImageMixin:
         text = str(source or "").strip().strip('"')
         if not text:
             return None
+        if text.lower().startswith(("base64://", "data:", "http://", "https://")):
+            return None
         if text.lower().startswith("file:"):
             try:
                 parsed = urlsplit(text)
@@ -537,6 +539,10 @@ class PrivateImageMixin:
         prepared: list[str] = []
         now_ms = int(_now_ts() * 1000)
         for index, source in enumerate([str(item).strip() for item in (image_sources or []) if str(item or "").strip()][:12], 1):
+            if source.startswith(("base64://", "data:")):
+                if self._private_image_source_to_model_url(source) and source not in prepared:
+                    prepared.append(source)
+                continue
             if re.match(r"^https?://", source, flags=re.I):
                 persisted = await self._persist_private_remote_image_source(
                     source,
@@ -612,7 +618,10 @@ class PrivateImageMixin:
             path = self._private_image_local_path_from_source(text)
             if path is None:
                 continue
-            if not path.exists() or not path.is_file() or not self._private_image_local_path_is_allowed(path):
+            try:
+                if not path.exists() or not path.is_file() or not self._private_image_local_path_is_allowed(path):
+                    continue
+            except OSError:
                 continue
             ref = str(path.resolve())
             if ref not in refs:
@@ -630,7 +639,10 @@ class PrivateImageMixin:
         path = self._private_image_local_path_from_source(text)
         if path is None:
             return ""
-        if not path.exists() or not path.is_file():
+        try:
+            if not path.exists() or not path.is_file():
+                return ""
+        except OSError:
             return ""
         if not self._private_image_local_path_is_allowed(path):
             return ""

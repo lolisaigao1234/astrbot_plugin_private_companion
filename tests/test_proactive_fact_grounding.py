@@ -7,6 +7,7 @@ import unittest
 
 from astrbot_plugin_private_companion.proactive_message import ProactiveMessageMixin
 from astrbot_plugin_private_companion.user_memory import UserMemoryMixin
+from astrbot_plugin_private_companion.helpers import _strip_terminal_sentence_period
 
 
 class _FactGroundingHarness(ProactiveMessageMixin):
@@ -131,6 +132,13 @@ class ProactiveFactGroundingTests(unittest.TestCase):
     def setUp(self) -> None:
         self.harness = _FactGroundingHarness()
 
+    def test_terminal_period_is_removed_but_other_endings_are_preserved(self) -> None:
+        self.assertEqual(_strip_terminal_sentence_period("明天提醒你。"), "明天提醒你")
+        self.assertEqual(_strip_terminal_sentence_period('明天提醒你。”'), '明天提醒你”')
+        self.assertEqual(_strip_terminal_sentence_period("明天提醒你."), "明天提醒你")
+        self.assertEqual(_strip_terminal_sentence_period("明天提醒你……"), "明天提醒你……")
+        self.assertEqual(_strip_terminal_sentence_period("明天提醒你？"), "明天提醒你？")
+
     def test_meal_care_removes_unverified_story_but_keeps_soft_question(self) -> None:
         decision = self.harness._unverified_proactive_fact_decision(
             "测试用户～ 刚刚刷到汉堡的视频，突然觉得你昨天吃的那个汉堡，"
@@ -209,6 +217,21 @@ class ProactiveFactGroundingTests(unittest.TestCase):
 
         self.assertEqual(decision["decision"], "drop")
         self.assertTrue(decision["hard"])
+
+    def test_future_reminder_promise_without_current_execution_is_dropped(self) -> None:
+        decision = self.harness._local_proactive_send_decision(
+            {"nickname": "宜"},
+            "宜，明天起早上告诉你当天的课，课前十五分钟也提醒你。",
+            reason="open_loop_followup",
+            action="message",
+            motive="延续课程提醒约定",
+            topic="课程提醒",
+            action_context="文字",
+        )
+
+        self.assertEqual(decision["decision"], "drop")
+        self.assertTrue(decision["hard"])
+        self.assertIn("执行凭证", decision["reason"])
 
     def test_bilibili_claim_with_reddit_link_is_dropped_even_without_review(self) -> None:
         decision = self.harness._local_proactive_send_decision(

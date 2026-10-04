@@ -140,6 +140,7 @@ from .helpers import (
     _single_line,
     _strip_internal_message_blocks,
     _strip_outbound_control_blocks,
+    _strip_terminal_sentence_period,
     _today_key,
     _resolve_timezone_setting,
 )
@@ -2879,7 +2880,7 @@ class PrivateCompanionPlugin(
                     if marker is not None and not isinstance(marker, dict):
                         return {"ok": False, "message": "人格重置恢复记录损坏", "code": "persona_reset_saga_invalid"}
                     clean_operation = _single_line(operation_id, 120)
-                    if isinstance(marker, dict):
+                    if isinstance(marker, dict) and marker:
                         marker_operation = _single_line(marker.get("operation_id"), 120)
                         if (
                             marker.get("state") != "confirmed"
@@ -14062,8 +14063,6 @@ class PrivateCompanionPlugin(
                     endpoint["base_url"] = f"{normalized_root.rstrip('/')}/image_generation"
         if endpoint["platform"] == "auto" and ("token.sensenova.cn" in base_lower or model_lower in {"senova-u1-fast", "sensenova-u1-fast"}):
             endpoint["platform"] = "sensenova"
-        if endpoint["platform"] == "sensenova" and model_lower == "senova-u1-fast":
-            endpoint["model"] = "sensenova-u1-fast"
         return endpoint
 
     def _normalize_external_image_api_endpoints(self, value: Any) -> list[dict[str, Any]]:
@@ -19985,6 +19984,11 @@ class PrivateCompanionPlugin(
                     stats["rewritten"] = _safe_int(stats.get("rewritten"), 0, 0) + 1
                     stats["last_rewritten_at"] = self._environment_now().strftime("%Y-%m-%d %H:%M")
                     self._save_data_sync(sections={"users"})
+
+            period_stripped_text = _strip_terminal_sentence_period(working_text)
+            if period_stripped_text != working_text:
+                working_text = period_stripped_text
+                resp.completion_text = working_text
 
             async with self._data_lock:
                 live_user_for_duplicate = self._get_user(user_id)

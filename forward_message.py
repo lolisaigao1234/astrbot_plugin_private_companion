@@ -1908,17 +1908,33 @@ class ForwardMessageMixin:
         seen_values: set[str] = set()
 
         def normalize_card_text(value: Any) -> str:
-            text = html.unescape(str(value or "")).strip()
+            text = str(value or "").strip()
+            if text.lower().startswith(("base64://", "data:image/")):
+                return text
+            text = html.unescape(text)
             text = text.replace("\\/", "/")
             text = text.replace("\\u0026", "&").replace("\\u003d", "=").replace("\\u003f", "?")
             text = text.replace("\\\\", "\\")
             return text
 
+        def inline_image_source(value: Any) -> str:
+            raw = str(value or "").strip()
+            lowered = raw.lower()
+            positions = [position for marker in ("base64://", "data:image/") if (position := lowered.find(marker)) >= 0]
+            if not positions:
+                return ""
+            source = raw[min(positions):].strip()
+            return source.rstrip(" \t\r\n\"'`)]}，。；")
+
         def looks_like_image_source(value: str) -> bool:
             text = normalize_card_text(value)
             if not text:
                 return False
-            if text.startswith(("http://", "https://", "file://", "data:")):
+            if text.startswith("base64://"):
+                return len(text) > len("base64://")
+            if text.startswith("data:"):
+                return text.startswith("data:image/") and "," in text
+            if text.startswith(("http://", "https://", "file://")):
                 lowered = text.lower()
                 if re.search(r"\.(?:png|jpe?g|gif|webp|bmp)(?:[?#].*)?$", text, re.I) or "/bfs/" in text or "image" in lowered:
                     return True
@@ -1932,6 +1948,9 @@ class ForwardMessageMixin:
             )
 
         def add_text(value: Any) -> None:
+            raw = str(value or "").strip()
+            if inline_image_source(raw):
+                return
             text = _single_line(normalize_card_text(value), 160)
             if text and text not in seen_values and not text.startswith(("http://", "https://")):
                 seen_values.add(text)
@@ -1968,6 +1987,10 @@ class ForwardMessageMixin:
                 return
             raw = str(value or "").strip()
             if not raw:
+                return
+            inline_source = inline_image_source(raw)
+            if inline_source:
+                add_image(inline_source)
                 return
             unescaped = normalize_card_text(raw)
             compact = unescaped.strip()
