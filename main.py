@@ -13591,6 +13591,8 @@ class PrivateCompanionPlugin(
                     metadata=conversation.metadata,
                 )
             )
+        elif conversation is not None:
+            sections.append(conversation)
         return sections
 
     def _format_proactive_voice_prompt(self) -> str:
