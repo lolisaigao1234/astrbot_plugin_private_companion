@@ -89,18 +89,12 @@ class LinkedConversations:
             conversation_persona_id=conversation.persona_id)
         services = await sp.get_async(scope="umo", scope_id=umo, key="session_service_config", default={}) or {}
         variables = await sp.session_get(umo, "session_variables", {})
-        # Profile configuration includes LLM, streaming, tools and plugin enablement.
-        # Store digests, never provider credentials or session-variable values.
-        # AstrBot fills max_context_tokens from model metadata during build; it
-        # is a derived cache, not the operator's provider selection.
-        def configured_provider(document):
-            return {key: value for key, value in document.items() if key != "max_context_tokens"}
-        profile = dict(cfg)
-        if "provider" in profile:
-            profile["provider"] = [configured_provider(document) for document in profile["provider"]]
-        return digest({"config": profile, "provider": configured_provider(provider.provider_config),
-            "model": provider.get_model(), "persona": selected[:3], "services": services,
-            "variables": variables})
+        # Only what AstrBot resolves per origin and that shapes the turn; the runner
+        # and the companion's enablement are required above. Digests only: never
+        # provider credentials or session-variable values.
+        return digest({"provider_settings": cfg.get("provider_settings"),
+            "provider": provider.provider_config.get("id"), "model": provider.get_model(),
+            "persona": selected[:3], "services": services, "variables": variables})
 
     async def manage(self, body):
         required = {"schema_version", "link_id", "expected_revision", "conversation_id",
@@ -180,7 +174,7 @@ class LinkedConversations:
                     source_platform = session.bridge.context.get_platform_inst(source.platform_id)
                     source_settings = await self.settings(origin(source), source_platform.meta().name, cid)
                     signatures.append(source_settings)
-                if len(set(signatures)) != 1 or (old and signatures[0] != old["settings"]):
+                if len(set(signatures)) != 1:
                     raise TaskError("linked_settings_mismatch", "align native model, persona and session settings before linking")
                 detached = {row["origin"]: row for row in (old or {}).get("detached", []) + (old or {}).get("members", [])}
                 if source is not None and origin(source) not in {row["origin"] for row in members}:
@@ -190,7 +184,7 @@ class LinkedConversations:
                     detached.pop(row["origin"], None)
                 record = {"schema_version": 1, "link_id": body["link_id"],
                     "revision": body["expected_revision"] + 1, "conversation_id": cid,
-                    "anchor": anchor, "members": members, "detached": list(detached.values()), "settings": signatures[0]}
+                    "anchor": anchor, "members": members, "detached": list(detached.values())}
                 # Persist before selection: an interrupted operation remains closed,
                 # rather than allowing an endpoint to continue in a silent fork.
                 with session.runtime.transaction():
@@ -284,11 +278,15 @@ class LinkedConversations:
         manager = self.session.bridge.context.conversation_manager
         # All members keep their own transport. An offline former anchor is
         # irrelevant: settings and the CID are stored independently of that client.
+        # Members are compared with each other on every turn, never with a value
+        # frozen at link time: a setting changed for all of them is followed.
+        signatures = set()
         for row in link["members"]:
             if await manager.get_curr_conversation_id(row["origin"]) != link["conversation_id"]:
                 raise TaskError("linked_selection_changed", "a linked endpoint selected another conversation")
-            if await self.settings(row["origin"], row["platform_name"], link["conversation_id"]) != link["settings"]:
-                raise TaskError("linked_settings_changed", "native model or session settings changed")
+            signatures.add(await self.settings(row["origin"], row["platform_name"], link["conversation_id"]))
+        if len(signatures) != 1:
+            raise TaskError("linked_settings_mismatch", "align native model, persona and session settings between the linked endpoints")
         selected_provider, selected_model = event.get_extra("selected_provider"), event.get_extra("selected_model")
         if selected_provider or selected_model:
             provider = await self.session.bridge.context.get_using_provider_async(umo=event.unified_msg_origin)

@@ -486,16 +486,39 @@ class LinkedConversationConcurrencyTests(LinkedReplyFixture, unittest.IsolatedAs
         self.assertEqual(self.manager.writes, [])
         self.assertEqual(self.contents(await self.history()), ["old", "old-reply"])
 
-    async def test_session_settings_drift_is_refused_before_model_work(self):
+    async def test_unrelated_config_edit_leaves_the_next_linked_turn_working(self):
+        from astrbot_host.linked_conversations import KEY
+        self.assertEqual((await self.link())["status"], "ok")
+        # A record written before the fingerprint left the document is still read.
+        records = self.controller.session.linked_conversations.records()
+        records["owner-dialogue"]["settings"] = "sha256:frozen-at-link-time"
+        self.controller.authority.write(KEY, records)
+        self.config["admins_id"].append("synthetic-admin")
+        self.config["platform_settings"]["id_whitelist"].append("synthetic:FriendMessage:1")
+        event = self.event_for(1)
+        await asyncio.wait_for(await self.dispatch(event), 15)
+        self.assertFalse(event.is_stopped())
+        self.assertEqual(self.contents(await self.history()), ["old", "old-reply", "B", "reply-B"])
+
+    async def test_member_settings_divergence_is_refused_until_the_members_agree_again(self):
         from astrbot.core import sp
         self.assertEqual((await self.link())["status"], "ok")
-        await sp.session_put(ORIGINS[1], "session_variables", {"synthetic-variable": "changed"})
+        for origin in ORIGINS:
+            self.addAsyncCleanup(sp.session_put, origin, "session_variables", {})
+        changed = {"synthetic-variable": "changed"}
+        await sp.session_put(ORIGINS[1], "session_variables", changed)
         event = self.event_for(1)
         await asyncio.wait_for(await self.dispatch(event), 10)
         self.assertTrue(event.is_stopped())
         self.assertEqual(self.calls, [])
         self.assertEqual(self.manager.writes, [])
-        await sp.session_put(ORIGINS[1], "session_variables", {})
+        # The same change on the other member is simply followed: no re-link.
+        await sp.session_put(ORIGINS[0], "session_variables", changed)
+        event = self.event_for(1, identifier="after-alignment")
+        await asyncio.wait_for(await self.dispatch(event), 15)
+        self.assertFalse(event.is_stopped())
+        self.assertEqual(self.contents(await self.history()), ["old", "old-reply", "B", "reply-B"])
+        self.assertEqual(self.controller.session.linked_conversations.get("owner-dialogue")["revision"], 1)
 
     async def test_links_require_local_runner_and_enabled_companion_hooks(self):
         saved = self.config["agent_runner"]["runner_type"]
