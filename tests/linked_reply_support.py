@@ -294,6 +294,16 @@ class LinkedReplyFixture(MultiFixture):
             while event.get_extra(EXTRA) is None:
                 await asyncio.sleep(.01)
 
+    async def held_at_permit(self, event):
+        """Dispatch a linked event behind a running turn: it queues and loads nothing."""
+        reads, calls = len(self.manager.reads), len(self.calls)
+        task = await self.dispatch(event)
+        await self.queued_for_permit(event)
+        # An admitted turn reads the conversation in the step after its permit.
+        await asyncio.sleep(.05)
+        self.assertEqual((len(self.manager.reads), len(self.calls)), (reads, calls))
+        return task
+
     async def history(self):
         conversation = await self.manager.get_conversation(ORIGINS[0], "conversation-a")
         return json.loads(conversation.history)
