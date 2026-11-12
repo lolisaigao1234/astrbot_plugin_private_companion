@@ -20,42 +20,6 @@ class LinkedConversationConcurrencyTests(LinkedReplyFixture, unittest.IsolatedAs
         self.assertEqual([write[0] for write in self.manager.writes], [ORIGINS[1], ORIGINS[0]])
         self.assertEqual(len(self.calls), 2)
 
-    async def test_gate_holds_from_preparation_through_final_save(self):
-        from astrbot.core.star.star_handler import EventType
-        from astrbot_host.linked_turn_gate import LinkedTurnGate
-
-        gate = LinkedTurnGate()
-        async def admit(event):
-            await gate.acquire("conversation-a", event)
-        self.register(EventType.AdapterMessageEvent, admit,
-            self.handlers[0].event_filters, priority=300000)
-        self.register(EventType.OnWaitingLLMRequestEvent, admit, priority=300000)
-        await self.manager.switch_conversation(ORIGINS[1], "conversation-a")
-        self.pause_after_response = self.manager.pause_save = True
-        event_a, event_b = self.event_for(0), self.event_for(1)
-        first = await self.dispatch(event_a)
-        await asyncio.wait_for(self.model_done.wait(), 10)
-        reads = len(self.manager.reads)
-        second = await self.dispatch(event_b)
-        await asyncio.sleep(.05)
-        self.assertEqual(len(self.manager.reads), reads)
-        self.assertEqual(len(self.calls), 1)
-        self.allow_model.set()
-        await asyncio.wait_for(self.manager.saving.wait(), 10)
-        await asyncio.sleep(.05)
-        self.assertEqual(len(self.calls), 1)
-        self.assertFalse(second.done())
-        self.manager.allow_save.set()
-        await asyncio.wait_for(asyncio.gather(first, second), 15)
-        await gate.drain()
-        self.assertEqual(self.contents(await self.history()),
-            ["old", "old-reply", "A", "reply-A", "B", "reply-B"])
-        self.assertEqual([w[0] for w in self.manager.writes], list(ORIGINS))
-        self.assertEqual(self.manager.tasks, [first, second])
-        self.assertEqual([p for p, _ in self.sent], ["qq-main", "qq-second"])
-        self.assertEqual((event_a.unified_msg_origin, event_b.unified_msg_origin), ORIGINS)
-        self.assertIn("reply-A", str(self.calls[1]["contexts"]))
-
     async def test_explicit_versioned_link_selects_existing_history_and_survives_restart(self):
         from astrbot_host.account_session_api import AccountSessionWebAPI
         from unittest.mock import patch
@@ -89,14 +53,22 @@ class LinkedConversationConcurrencyTests(LinkedReplyFixture, unittest.IsolatedAs
         second = await self.dispatch(b)
         await asyncio.sleep(.05)
         self.assertEqual(len(self.manager.reads), reads)
+        self.assertEqual(len(self.calls), 1)
         self.allow_model.set()
         await asyncio.wait_for(self.manager.saving.wait(), 10)
+        await asyncio.sleep(.05)
         self.assertEqual(len(self.calls), 1)
+        self.assertFalse(second.done())
         self.manager.allow_save.set()
         await asyncio.wait_for(asyncio.gather(first, second), 20)
         await self.controller.session.linked_conversations.gate.drain()
         self.assertEqual(self.contents(await self.history()),
             ["old", "old-reply", "A", "reply-A", "B", "reply-B"])
+        self.assertEqual([write[0] for write in self.manager.writes], list(ORIGINS))
+        self.assertEqual(self.manager.tasks, [first, second])
+        self.assertEqual([platform for platform, _ in self.sent], ["qq-main", "qq-second"])
+        self.assertEqual((a.unified_msg_origin, b.unified_msg_origin), ORIGINS)
+        self.assertIn("reply-A", str(self.calls[1]["contexts"]))
         from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA
         prepared = b.get_extra(CORE_REPLY_CONTEXT_EXTRA)["prepared"]
         self.assertEqual(prepared["source_endpoint"].unified_msg_origin, ORIGINS[1])
