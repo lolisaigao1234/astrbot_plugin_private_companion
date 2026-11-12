@@ -121,16 +121,13 @@ A's task finishes and proves that B stays blocked. Other cases cover streaming, 
 provider error/exception, send/save errors, stop, cancellation while waiting/running/saving,
 revision/settings drift, restart, revoked origins, busy timeout and unload/reload.
 
-Run SDK tests only with the isolated runner:
+Run these suites with an AstrBot SDK environment that uses a temporary data root, never an
+installed plugin or a live data directory:
 
 ```sh
-/home/ubuntu/scratch/companion-telegram/run-tests.sh /home/ubuntu/projects/companion-worktrees/t3 \
-  python -X utf8 -m unittest -q \
+python -X utf8 -m unittest -q \
   tests.test_linked_conversation tests.test_astrbot_linked_turn_contract \
   tests.test_core_reply_conversation_ownership tests.test_telegram_private_reply
 ```
 
 No network, installed plugin, deployment state or running AstrBot container is used.
-
-The [ticket validation report](ticket-3-validation.md) maps every acceptance criterion to its
-tests and records the exact commands, baseline failures and verification limits.
