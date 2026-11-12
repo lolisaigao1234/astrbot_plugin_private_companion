@@ -234,12 +234,18 @@ class LinkedOwnerTests(LinkedReplyFixture, unittest.IsolatedAsyncioTestCase):
         from companion_v2.model_gateway.core_observations import observations_for_role
         from companion_v2.memory.models import AtomRef
         from companion_v2.role_work.state.ownership import role_schedule_key
+        from companion_v2.role_work.journal.models import JournalContext, JournalDraft, JournalKey, JournalKind
         first = await self.turn(0, "I drink tea", "restart-before")
         saved = self.learn(first, "persistent-fact")
+        life, at = self.app.life_context, self.clock.now()
+        key = JournalKey(life.owner(first["context"]), JournalKind.DIARY, at.date().isoformat())
+        life.journal.save(JournalDraft(JournalContext(key, first["context"].scope, "UTC"), body="Persistent diary"),
+                          expected_revision=0, operation_id="persistent-diary")
         self.clock.advance(timedelta(seconds=2))
         self.assertEqual((await self.link())["status"], "ok")
         second = await self.turn(1, "Before restart", "restart-linked")
         await self.controller.terminate()
+        self.native.platforms.pop("qq-main")
         self.controller = self.make_controller()
         self.plugin.staging = self.controller
         result = await self.controller.start()
@@ -250,9 +256,12 @@ class LinkedOwnerTests(LinkedReplyFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second["context"].owner_scope, restored["context"].owner_scope)
         self.assertEqual(role_schedule_key(first["context"]), role_schedule_key(restored["context"]))
         self.assertEqual((await self.link(revision=1, members=["second"]))["status"], "ok")
-        self.native.platforms["qq-main"].client._wsr_api_clients.clear()
         detached = await self.turn(1, "Only this endpoint remains", "after-detach")
         self.assertEqual(require(self.app.memory.writer.read(detached["context"], AtomRef(saved["atom_id"], 1)))["object"], "tea")
+        archive = self.app.life_context.journal.get_for_audience(key, scope=detached["context"].scope,
+            recipient=detached["context"].actor.subject, observed_at=self.clock.now())
+        self.assertEqual(archive.draft.body, "Persistent diary")
+        self.assertEqual(archive.draft.context.scope.platform, "qq-main")
         self.assertEqual({row["source_channel"] for row in observations_for_role(self.app.runtime, detached["context"])},
                          {"qq-main", "qq-second"})
 

@@ -78,8 +78,9 @@ schedules or window budget accounts. Their owners are coupled to physical delive
 exact-scope accounting and need further work. Only role-state maintenance already has a
 shared schedule key. Exact-window diagnostic/legacy usage views also remain physical.
 The plugin's existing Dashboard log-buffer behavior is unchanged; the tagged input log
-is available through AstrBot's plugin logging. Startup still requires configured accounts
-to be online; independent offline startup is ticket #12.
+is available through AstrBot's plugin logging. Independent-channel startup permits the
+remaining endpoint to restart while the original platform is absent; the memory and
+archive still resolve through the stored anchor.
 
 ## Turn lifetime
 
