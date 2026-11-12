@@ -12,10 +12,10 @@ from companion_v2.adapters.astrbot.native import (
     account_number,
     bounded_native_lookup,
     configured_default_persona_id,
-    event_account_id,
+    event_account_id, event_native_client,
     event_peer_id,
     native_client_connected,
-    platform_client_matches,
+    platform_client_matches, private_event_supported,
     route_id,
     supported_platform_name,
 )
@@ -413,6 +413,10 @@ class SessionTopology:
         controller = self.controller
         if controller._terminated or not isinstance(event, controller.native_types.event):
             return
+        if not private_event_supported(event):
+            return
+        if event.platform_meta.name == "telegram" and controller.target_for_event(event) is None:
+            return
         route = session_route(event.unified_msg_origin)
         if route is None:
             return
@@ -426,7 +430,7 @@ class SessionTopology:
         if not supported_platform_name(meta.name):
             logger.debug("[CompanionV2] 跳过事件：平台 %s 不在支持名单", meta.name)
             return
-        if not platform_client_matches(platform, event.bot):
+        if not platform_client_matches(platform, event_native_client(event)):
             logger.debug(
                 "[CompanionV2] 跳过事件：事件携带的 bot(%s) 不是平台当前的 client",
                 type(getattr(event, "bot", None)).__name__,

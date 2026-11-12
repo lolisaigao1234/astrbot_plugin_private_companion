@@ -12,9 +12,9 @@ from companion_v2.adapters.astrbot.application import AstrBotCompanionHost
 from companion_v2.adapters.astrbot.memory_owner import memory_owner_provider
 from companion_v2.adapters.astrbot.memory_push import memory_push_provider
 from companion_v2.adapters.astrbot.native import (
-    NativeConversationInput, NativePrivateBridge, bounded_native_lookup, event_account_id,
+    NativeConversationInput, NativePrivateBridge, bounded_native_lookup, event_account_id, event_native_client,
     event_peer_id, native_client_connected, native_id, native_user_subject_id,
-    platform_client_matches,
+    platform_client_matches, private_event_supported,
     supported_platform_name,
 )
 from companion_v2.adapters.astrbot.group import NativeGroupBridge, _is_sticker_segment
@@ -154,6 +154,8 @@ class MultiPrivateBridge(NativePrivateBridge):
         try:
             if not isinstance(event, self.event_type):
                 raise TaskError("host_event_unsupported", "core reply requires a verified native event")
+            if not private_event_supported(event):
+                raise TaskError("host_scene_unsupported", "only native human private text is supported")
             message, session, meta = event.message_obj, event.session, event.platform_meta
             platform_id = meta.id
             if (getattr(getattr(message, "type", None), "value", None) != "FriendMessage"
@@ -163,12 +165,16 @@ class MultiPrivateBridge(NativePrivateBridge):
             sender, login = event_peer_id(event), event_account_id(event)
             account = self.accounts.get((platform_id, login))
             target = self.settings.private_target(platform_id, login, sender)
+            if meta.name == "telegram":
+                from companion_v2.adapters.astrbot.telegram import explicit_target
+                if not explicit_target(self.settings, target):
+                    raise TaskError("host_route_mismatch", "Telegram needs an exact independent private target")
             if (not supported_platform_name(meta.name) or session.platform_id != platform_id
                     or session.platform_name != platform_id or session.session_id != sender
                     or event.unified_msg_origin != self._umo(platform_id, sender)
                     or account is None or target is None or target.bot_id != account.bot_id):
                 raise TaskError("host_route_mismatch", "event fields do not identify one registered private route")
-            event_client = event.bot
+            event_client = event_native_client(event)
             platform = self.context.get_platform_inst(platform_id)
             if (platform is None or not platform_client_matches(platform, event_client)
                     or not native_client_connected(platform, login)):
@@ -178,14 +184,14 @@ class MultiPrivateBridge(NativePrivateBridge):
             at = datetime.fromtimestamp(event.created_at, timezone.utc)
             principal = AuthenticatedHostPrincipal(self.installation_id, self.host_id, platform_id,
                                                    sender, account.bot_id, login)
-            self.authority.ensure_actor(target)
-            actor = require(self.identities.resolve_authenticated(principal, observed_at=at))
             conversation_id, role, instruction = await self._role(account, sender)
             scope = ScopeRef(self.installation_id, platform_id, ScopeKind.PRIVATE, sender,
                              account.bot_id, login, conversation_id, sender)
             if not platform_client_matches(self.platform(scope), event_client):
                 raise TaskError("host_client_mismatch", "private host account changed during persona lookup")
             self.client(scope)
+            self.authority.ensure_actor(target)
+            actor = require(self.identities.resolve_authenticated(principal, observed_at=at))
             recipients = AudienceRef(scope, (actor.subject,))
             pieces = []
             for part in getattr(message, "message", ()):
@@ -214,6 +220,8 @@ class MultiPrivateBridge(NativePrivateBridge):
             return Outcome.failed("host_core_reply_capture_failed", "private route or persona could not be verified")
 
     async def capture(self, event):
+        if not private_event_supported(event):
+            return Outcome.failed("host_scene_unsupported", "only native human private text is supported")
         if getattr(getattr(event.message_obj, "type", None), "value", None) == "GroupMessage":
             return await self.groups.capture(event, allow_text_fallback=True)
         message, session, meta = event.message_obj, event.session, event.platform_meta
@@ -229,12 +237,16 @@ class MultiPrivateBridge(NativePrivateBridge):
                     or event.unified_msg_origin != f"{meta.id}:FriendMessage:{sender}"):
                 return await super().capture(event)
             target = self.settings.private_target(meta.id, login, sender)
+            if meta.name == "telegram":
+                from companion_v2.adapters.astrbot.telegram import explicit_target
+                if not explicit_target(self.settings, target):
+                    return Outcome.failed("host_route_mismatch", "Telegram needs an exact independent private target")
             if target is None:
                 return await super().capture(event)
             account = self.accounts.get((meta.id, login))
             platform = self.context.get_platform_inst(meta.id)
             if (account is None or account.bot_id != target.bot_id or platform is None
-                    or not platform_client_matches(platform, event.bot)
+                    or not platform_client_matches(platform, event_native_client(event))
                     or not native_client_connected(platform, login)):
                 raise TaskError("host_client_mismatch", "private event did not originate from its registered Bot account")
             self.authority.ensure_actor(target)
@@ -1117,7 +1129,7 @@ class MultiHostSession:
                     context = self._select_core_reply_context(target, captured)
                 self._validate_core_group_admission(group_admission, context, captured)
                 turn_id = "core-reply:" + digest([context.key, captured.event_id])
-                presence = self.application.presence
+                presence = (None if event.platform_meta.name == "telegram" else self.application.presence)
                 if presence is not None:
                     typing_context, typing_turn = context, turn_id
                     presence.begin_native_reply(context, turn_id)
@@ -1273,6 +1285,9 @@ class MultiHostSession:
                                     private_cooldown_seconds=-1, group_cooldown_seconds=-1,
                                                     extra_prompt=extra_prompt)
                             voice_policy = candidate
+                if event.platform_meta.name == "telegram":
+                    voice_policy = configured_voice_policy = None
+                    reaction_reply_enabled = False
                 from .fish_audio import provider_direction
                 voice_direction = await provider_direction(self.bridge.context, voice_policy, event.unified_msg_origin, channel)
                 source_future = None
@@ -1289,6 +1304,7 @@ class MultiHostSession:
                 prepared_ok = True
                 return Outcome.success({
                     "context": context,
+                    "platform_name": event.platform_meta.name,
                     "instruction": captured.instruction,
                     "prompt_instruction": prompt_instruction,
                     "stable_prompt_instruction": stable_prompt_instruction,
