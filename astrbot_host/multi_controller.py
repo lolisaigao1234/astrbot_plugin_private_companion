@@ -80,6 +80,7 @@ class AstrBotMultiController:
         self._storage_profile_root = None
         self._adopting_legacy_profile = False
         self.last_failure = None
+        self._waiting_accounts = {}
         self._termination_task = None
         self.poke_policy = PokePolicy()
         try:
@@ -190,18 +191,58 @@ class AstrBotMultiController:
         self.settings.require_ready()
         return self.settings
 
-    def startup_readiness(self):
-        """Return a retryable readiness code until every configured Bot is online."""
-        for account in self._settings().accounts:
+    def _account_states(self, settings=None):
+        """Each configured account's own readiness code; ``None`` means it can be served."""
+        states = {}
+        for account in (settings or self._settings()).accounts:
             platform = self.context.get_platform_inst(account.platform_id)
             if platform is None:
-                return "host_platform_unavailable"
-            meta = platform.meta()
-            if not supported_platform_name(meta.name) or meta.id != account.platform_id:
-                return "host_platform_changed"
-            if not native_client_connected(platform, account.self_id):
-                return "host_account_unavailable"
-        return None
+                code = "host_platform_unavailable"
+            else:
+                meta = platform.meta()
+                code = ("host_platform_changed"
+                        if not supported_platform_name(meta.name) or meta.id != account.platform_id else
+                        None if native_client_connected(platform, account.self_id) else
+                        "host_account_unavailable")
+            states[account] = code
+        return states
+
+    def startup_readiness(self):
+        """Return a retryable readiness code until one configured Bot is online.
+
+        Accounts are independent: the host starts with the ones that are
+        available and picks the others up later. A channel of the wrong kind is
+        a configuration error and refuses the start whatever else is online.
+        """
+        codes = tuple(self._account_states().values())
+        if "host_platform_changed" in codes:
+            return "host_platform_changed"
+        return codes[0] if codes and all(codes) else None
+
+    def _report_waiting_accounts(self):
+        """Log each account once when it becomes unavailable and once when it is back."""
+        waiting = {(account.platform_id, account.self_id): code
+                   for account, code in self._account_states().items() if code}
+        for key in sorted(waiting.keys() - self._waiting_accounts.keys()):
+            logger.warning("[CompanionV2] 账号暂不可用，其余账号照常运行，恢复后自动接入 platform=%s account=%s code=%s",
+                           *key, waiting[key])
+        for key in sorted(self._waiting_accounts.keys() - waiting.keys()):
+            logger.info("[CompanionV2] 账号已恢复并接入 platform=%s account=%s", *key)
+        self._waiting_accounts = waiting
+        return waiting
+
+    async def serve_available_accounts(self):
+        """Run the start-up work of accounts that became available while the host runs.
+
+        Returns whether every configured account is now served, so the start-up
+        retry loop knows when it has nothing left to wait for.
+        """
+        async with self._lifecycle_lock:
+            session = self.session
+            if self._terminated or session is None or session.application.state != "running":
+                return True
+            await session.bind_available_targets(late=True)
+            return not self._report_waiting_accounts()
 
     @property
     def profile_root(self):
@@ -620,16 +661,16 @@ class AstrBotMultiController:
             persona_snapshot_lookup=self.native_types.persona_snapshot_lookup,
             persona_selection_lookup=self.native_types.persona_selection_lookup)
         conversations = {}
-        for account in settings.accounts:
-            platform = self.context.get_platform_inst(account.platform_id)
-            if platform is None:
-                raise TaskError("host_platform_unavailable",
-                    f"配置的平台实例 {account.platform_id} 不在当前 AstrBot 中；请先在宿主平台设置里恢复它。")
-            client = bridge.platforms.get(account.platform_id, (None, None))[1]
-            if platform.get_client() is not client or not bridge.account_connected(account, client):
-                raise TaskError("host_account_unavailable",
-                    f"配置的 Bot 账号 {account.platform_id}:{account.self_id} 当前未连接 AstrBot；"
-                    "请确认这个账号已登录，再重试初始化。")
+        states = self._account_states(settings)
+        if states and all(states.values()):
+            # Nothing can be served yet. One available account is enough to go on;
+            # the others are skipped here and picked up when they appear.
+            account, code = next(iter(states.items()))
+            raise TaskError(code,
+                f"配置的平台实例 {account.platform_id} 不在当前 AstrBot 中；请先在宿主平台设置里恢复它。"
+                if code == "host_platform_unavailable" else
+                f"配置的 Bot 账号 {account.platform_id}:{account.self_id} 当前未连接 AstrBot；"
+                "请确认这个账号已登录，再重试初始化。")
         for target in (settings.all_targets if include_conversations else ()):
             account = bridge.accounts[(target.platform_id, target.account_id)]
             peer = target.participant_id if hasattr(target, "participant_id") else target.group_id
@@ -933,6 +974,8 @@ class AstrBotMultiController:
             core_target_id = core_target.target_id if core_target is not None else None
             for conversation in conversations.values():
                 target = conversation["target"]
+                if not self.authority.platform_known(target):
+                    continue
                 for role_id in conversation["role_ids"]:
                     role = SubjectRef(self.settings.installation_id, SubjectKind.BOT, role_id)
                     from companion_v2.foundation.refs import ScopeKind, ScopeRef
@@ -1220,6 +1263,7 @@ class AstrBotMultiController:
                 raise TaskError("host_session_changed", "the initialized host changed before it could resume")
             self._accepting, self.last_failure = True, None
             targets = len(self.settings.all_targets)
+            self._report_waiting_accounts()
         return Outcome.success({"state": "running", "targets": targets, "startup": result.unwrap()})
 
     def _startup_generations(self):
@@ -1662,6 +1706,11 @@ class AstrBotMultiController:
                 "failure_code": session.application.failure_code if session else None,
                 "failure_detail": session.application.failure_detail if session else None,
                 "targets": self.web_api.target_inventory(), "last_failure": self.last_failure,
+                # Each account's own state; one unavailable account is not the host being down.
+                "accounts": [{"platform_id": account.platform_id, "account_id": account.self_id,
+                              "available": code is None, "code": code}
+                             for account, code in (self._account_states(self.settings).items()
+                                                   if self.settings else ())],
                 # Why the store was or was not opened. ``restore_state.blocking`` is
                 # the startup gate; the detail names the journal and never contains
                 # credentials or snapshot bytes.

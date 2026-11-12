@@ -334,7 +334,7 @@ class TelegramPrivateReplyTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
 
 
 class TelegramQQCoexistenceTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
-    async def test_disconnected_or_removed_telegram_keeps_running_qq_but_startup_is_coupled(self):
+    async def test_disconnected_or_removed_telegram_keeps_running_qq_and_start_up_ready(self):
         from astrbot.core.platform.astr_message_event import AstrMessageEvent
         from tests.test_core_reply_pipeline import PipelineEvent
         platform = TelegramPlatform()
@@ -360,13 +360,13 @@ class TelegramQQCoexistenceTests(MultiFixture, unittest.IsolatedAsyncioTestCase)
         from companion_v2.role_work.state.ownership import role_owner
         self.assertNotEqual(role_owner(before["context"]), role_owner(telegram["context"]))
         platform.application.running = False
-        # Startup is deliberately still all-or-nothing in this contribution.
-        self.assertEqual(self.controller.startup_readiness(), "host_account_unavailable")
+        # Accounts start independently: the QQ accounts alone keep the host ready.
+        self.assertIsNone(self.controller.startup_readiness())
         after = (await self.controller.prepare_core_reply(qq)).unwrap()
         self.assertEqual(before["context"].key, after["context"].key)
         self.native.platforms.pop("tg-main")
         self.assertTrue((await self.controller.prepare_core_reply(qq)).is_success)
-        self.assertEqual(self.controller.startup_readiness(), "host_platform_unavailable")
+        self.assertIsNone(self.controller.startup_readiness())
 
 
 class TelegramAdapterBoundaryTests(unittest.IsolatedAsyncioTestCase):

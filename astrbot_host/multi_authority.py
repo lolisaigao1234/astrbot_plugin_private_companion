@@ -177,7 +177,8 @@ class MultiAuthority:
 
     def actor(self, target, participant_id=None):
         actor = require(self.identities.resolve_authenticated(self.principal(target, participant_id), observed_at=self.now()))
-        if actor.subject != self.subject(target, participant_id):
+        # While a channel is not loaded its bound participant stands as stored.
+        if self.platform_known(target) and actor.subject != self.subject(target, participant_id):
             raise TaskError("host_identity_changed", "the configured participant identity changed")
         return actor
 
@@ -192,12 +193,18 @@ class MultiAuthority:
             subject_id = "onebot-user:" + participant
         return SubjectRef(self.runtime.installation_id, SubjectKind.HUMAN, subject_id)
 
+    def platform_known(self, target):
+        """Whether the target's channel is loaded, so its user namespace is not a guess."""
+        return not callable(self.platform_name) or bool(self.platform_name(target.platform_id))
+
     def identity_id(self, target, participant_id=None):
         return "host-multi-person:" + digest(self.principal(target, participant_id))
 
     def ensure_actor(self, target, participant_id=None):
         identifier = self.identity_id(target, participant_id)
         if self.runtime.read_one("SELECT 1 FROM identity_bindings WHERE binding_id = ?", (identifier,)) is None:
+            if not self.platform_known(target):
+                raise TaskError("host_platform_unavailable", "the configured native platform has not loaded")
             self.identities.bind(binding_id=identifier, principal=self.principal(target, participant_id),
                 subject=self.subject(target, participant_id), valid_from=datetime.fromisoformat(self.require_manifest()["valid_from"]),
                 expected_revision=self.identities.revision)
@@ -241,7 +248,9 @@ class MultiAuthority:
                 identities[key] = value
             at = datetime.fromisoformat(old["valid_from"])
             for target in self.settings.targets:
-                if target.participant_id == "*":
+                # A channel that is not loaded cannot name its user namespace; its
+                # participant is bound by the first verified use after it appears.
+                if target.participant_id == "*" or not self.platform_known(target):
                     continue
                 principal = self.principal(target)
                 existing = self.identities.resolve_authenticated(principal, observed_at=at)

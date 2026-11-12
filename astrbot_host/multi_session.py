@@ -633,6 +633,7 @@ class MultiHostSession:
         self.core_reply_maintenance = CoreReplyMaintenance(self)
         self.core_reply_observations = None
         self._native_turns_recovered = False
+        self._started_targets = set()
         try:
             from .core_reply_observations import CoreReplyObservations
             self.core_reply_observations = CoreReplyObservations(self)
@@ -719,6 +720,41 @@ class MultiHostSession:
             found[target.target_id] = target
         return tuple(found.values())
 
+    async def bind_available_targets(self, *, late=False):
+        """Run the per-target start-up work for every target whose account is available.
+
+        A target whose account is unavailable is left out and stays due. A
+        ``late`` call comes from a host that is already running: it takes only
+        the targets that are still due, each exactly once, and keeps one
+        target's failure away from the accounts that are being served.
+        """
+        targets = [target for target in self.settings.primary_targets if target.participant_id != "*"]
+        targets.extend(self._prepared_wildcard_private_targets())
+        seen = set(self._started_targets) if late else set()
+        for target in targets:
+            if target.target_id in seen:
+                continue
+            seen.add(target.target_id)
+            if not self.bridge.account_connected(self.bridge.accounts[(target.platform_id, target.account_id)]):
+                continue
+            self._started_targets.add(target.target_id)
+            try:
+                context, instruction = await self.synchronize(target)
+            except TaskError as error:
+                if error.code in ("host_persona_unmapped", "host_persona_window_unbound"):
+                    # Leave this target unrouted until its V2 window persona is explicit.
+                    continue
+                if not late:
+                    raise
+                logger.warning("[CompanionV2] 账号上线后的窗口准备未完成，等它的下一条消息再绑定 target=%s code=%s",
+                               target.target_id, error.code)
+                continue
+            self.application.life_runtime.bind(context, instruction, guard=self.bridge.verify_role)
+            self.application.state_maintenance.bind(context, instruction, guard=self.bridge.verify_role)
+            self.application.contact_schedule.bind_context(context)
+            if self.application.presence is not None:
+                self.application.presence.bind(context)
+
     async def start(self, *, expected_task_generation, expected_model_generation):
         if self.core_reply_observations is not None and not self._native_turns_recovered:
             from companion_v2.conversation.native_turns import NativeConversationTurns
@@ -726,25 +762,7 @@ class MultiHostSession:
                 return NativeConversationTurns(self.runtime).interrupt_open(at=self.now())
             await asyncio.to_thread(interrupt_previous_runner)
             self._native_turns_recovered = True
-        targets = [target for target in self.settings.primary_targets if target.participant_id != "*"]
-        targets.extend(self._prepared_wildcard_private_targets())
-        seen = set()
-        for target in targets:
-            if target.target_id in seen:
-                continue
-            seen.add(target.target_id)
-            try:
-                context, instruction = await self.synchronize(target)
-            except TaskError as error:
-                if error.code in ("host_persona_unmapped", "host_persona_window_unbound"):
-                    # Leave this target unrouted until its V2 window persona is explicit.
-                    continue
-                raise
-            self.application.life_runtime.bind(context, instruction, guard=self.bridge.verify_role)
-            self.application.state_maintenance.bind(context, instruction, guard=self.bridge.verify_role)
-            self.application.contact_schedule.bind_context(context)
-            if self.application.presence is not None:
-                self.application.presence.bind(context)
+        await self.bind_available_targets()
         for model in self.models:
             model._current()
         if self.application.state != "new":
