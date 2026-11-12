@@ -151,12 +151,9 @@ class MultiPrivateBridge(NativePrivateBridge):
         return super().client(scope)
 
     def resolve_core_conversation_owner(self, source_target):
-        """Identity default for ordinary private replies.
-
-        Existing role/primary window links belong to capture() and retain their
-        current semantics. Conversation linking can supply an owner here later.
-        """
-        return source_target
+        """Resolve an explicit served conversation, keeping legacy window links separate."""
+        links = getattr(self, "linked_conversations", None)
+        return links.served(source_target) if links is not None else source_target
 
     async def capture_core_reply(self, event):
         """Authenticate a private route for AstrBot's reply path without reading attachments."""
@@ -193,7 +190,13 @@ class MultiPrivateBridge(NativePrivateBridge):
             at = datetime.fromtimestamp(event.created_at, timezone.utc)
             principal = AuthenticatedHostPrincipal(self.installation_id, self.host_id, platform_id,
                                                    sender, account.bot_id, login)
+            links = getattr(self, "linked_conversations", None)
+            if links is not None:
+                links.require_permit(event)
             owner = self.resolve_core_conversation_owner(target)
+            linked_owner = owner if isinstance(owner, NativeServedConversation) else None
+            if linked_owner is not None:
+                owner = target
             owner_platform, owner_login, owner_peer = owner.route_key
             owner_account = self.accounts[(owner_platform, owner_login)]
             conversation_id, role, instruction = await self._role(owner_account, owner_peer)
@@ -209,7 +212,7 @@ class MultiPrivateBridge(NativePrivateBridge):
                 principal, scope, target.target_id, self._umo(platform_id, sender), event_id, event_client)
             owner_scope = ScopeRef(self.installation_id, owner_platform, ScopeKind.PRIVATE,
                 owner_peer, owner.bot_id, owner_login, conversation_id, owner_peer)
-            conversation = NativeServedConversation(
+            conversation = linked_owner or NativeServedConversation(
                 owner.target_id, self._umo(owner_platform, owner_peer), owner_scope, role)
             pieces = []
             for part in getattr(message, "message", ()):
@@ -528,6 +531,9 @@ class MultiHostSession:
             persona_window_snapshot_lookup=persona_window_snapshot_lookup,
             persona_window_snapshot_update=persona_window_snapshot_update,
             file_settings=lambda scope, role: file_intake_settings(runtime, scope, role))
+        from .linked_conversations import LinkedConversations
+        self.linked_conversations = LinkedConversations(self)
+        self.bridge.linked_conversations = self.linked_conversations
         self.model = AstrBotTextProvider(native_context, bridge=self.bridge,
             binding=ProviderBinding("model.text", common.provider_id, native_types.version, provider_fingerprint),
             provider_id=common.provider_id, version=native_types.version, provider_type=native_types.provider_types,
@@ -1378,6 +1384,9 @@ class MultiHostSession:
                     "voice_provider_instruction": voice_direction,
                     "reaction_reply_enabled": reaction_reply_enabled,
                 }
+                from .linked_conversations import EXTRA
+                if event.get_extra(EXTRA) is not None:
+                    prepared["conversation_link"] = dict(event.get_extra(EXTRA))
                 if captured.source_endpoint is not None:
                     prepared["source_endpoint"] = captured.source_endpoint
                     prepared["conversation"] = captured.conversation
@@ -1439,6 +1448,11 @@ class MultiHostSession:
                                         "model replies are temporarily blocked in this group")
                 if not isinstance(prepared, Mapping):
                     raise TaskError("core_reply_context_invalid", "prepared core reply context is unavailable")
+                from .linked_conversations import EXTRA
+                if self.linked_conversations.for_origin(event.unified_msg_origin) is not None or prepared.get("conversation_link"):
+                    await self.linked_conversations.validate(event)
+                    if prepared.get("conversation_link") != event.get_extra(EXTRA):
+                        raise TaskError("linked_revision_changed", "prepared work belongs to an earlier link revision")
                 if prepared.get("target_id") != target.target_id:
                     raise TaskError("core_reply_target_changed", "core reply target changed after admission")
                 captured = require(await (
@@ -1589,6 +1603,7 @@ class MultiHostSession:
         return await sender.send(envelope)
 
     async def close(self, *, grace_seconds=0.5):
+        await self.linked_conversations.close()
         await self.core_reply_maintenance.close()
         from .core_reply_tools import close_core_reply_tools
         await close_core_reply_tools(self.application)
