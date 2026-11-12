@@ -835,6 +835,9 @@ class PrivateCompanionV2StagingPlugin(Star):
             return
         if target is None:
             return
+        links = getattr(getattr(self.staging, "session", None), "linked_conversations", None)
+        if links is not None and not await links.admit(self.staging, event):
+            return
         # AstrBot owns the persona and reply; V2 contributes optional background.
         event_ref = uuid4().hex
         origin_key = self._origin_key_for_event(event)
@@ -1357,6 +1360,48 @@ class PrivateCompanionV2StagingPlugin(Star):
         event.set_extra("selected_provider", match.provider_id)
         logger.info("[CompanionV2] 时段替换对话模型 event_ref=%s provider=%s rule=%s reason=%s",
                     prepared.get("event_ref"), match.provider_id, match.rule_id, match.reason)
+
+    @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE, priority=1000000)
+    async def guard_linked_companion_commands(self, event: AstrMessageEvent):
+        from .astrbot_host.linked_conversations import refuse_unavailable_link
+        if await refuse_unavailable_link(self.staging, event):
+            return
+        session = getattr(self.staging, "session", None)
+        links = getattr(session, "linked_conversations", None)
+        if links is None or (links.for_event(event) is None
+                             and event.unified_msg_origin not in links.gate.editing_origins):
+            return
+        # Default-deny parsed commands until the coherent lifecycle ticket.
+        # AstrBot's /stop remains a native, physical-origin operation.
+        handlers = event.get_extra("activated_handlers", ()) or ()
+        from .astrbot_host.event_routing import _is_command_filter
+        from .astrbot_host.reset_command import parse_reset_command
+        blocked = any(any(_is_command_filter(f) for f in handler.event_filters or ())
+                      and not (handler.handler_module_path == "astrbot.builtin_stars.builtin_commands.main"
+                               and handler.handler_name == "stop") for handler in handlers)
+        binding = getattr(self.staging, "handles_binding", None)
+        if (blocked or (callable(binding) and binding(event))
+                or parse_reset_command(str(getattr(event, "message_str", "") or "")) is not None):
+            event.stop_event()
+            from astrbot.core.message.message_event_result import MessageChain
+            await event.send(MessageChain().message("共享对话暂不支持会话切换、重置或配置指令。"))
+
+    @filter.on_llm_request(priority=1000000)
+    async def check_linked_companion_permit(self, event: AstrMessageEvent, req):
+        session = getattr(self.staging, "session", None)
+        links = getattr(session, "linked_conversations", None)
+        if links is not None:
+            await links.tripwire(event, req)
+
+    @filter.on_waiting_llm_request(priority=1000000)
+    async def admit_linked_companion_turn(self, event: AstrMessageEvent):
+        from .astrbot_host.linked_conversations import refuse_unavailable_link
+        if await refuse_unavailable_link(self.staging, event):
+            return
+        session = getattr(self.staging, "session", None)
+        links = getattr(session, "linked_conversations", None)
+        if links is not None:
+            await links.admit(self.staging, event)
 
     @filter.on_waiting_llm_request(priority=-1000000)
     async def observe_companion_core_waiting_llm_request(self, event: AstrMessageEvent):
