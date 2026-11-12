@@ -76,20 +76,27 @@ class LinkedOwnerTests(LinkedReplyFixture, unittest.IsolatedAsyncioTestCase):
         from astrbot_host.management_identity import dashboard_operator
         from companion_v2.role_work.state.ownership import role_schedule_key
         from tests.test_role_state import state_data
+        from companion_v2.storage.repositories import OperationRepository
+        operations = OperationRepository(self.app.runtime)
         first = await self.turn(0, "I feel rested", "body-before")
         operator = dashboard_operator(self.app.runtime, "synthetic-admin", at=self.clock.now())
-        self.app.role_state.write(first["context"], data=state_data(energy=54), expected_revision=0,
+        saved = self.app.role_state.write(first["context"], data=state_data(energy=54), expected_revision=0,
             operation_key="body-before-link", sources=(first["native_source_future"].result(),),
             operator=operator, reason="human_edit")
         self.assertEqual((await self.link())["status"], "ok")
         second = await self.turn(1, "How rested?", "body-after")
         body = self.app.role_state.read(second["context"], operator=operator)
         self.assertEqual(body["values"]["energy"], 54)
+        self.assertEqual(require(operations.get(saved["operation_id"])).operation.scope.platform,
+                         "qq-main")
         self.assertEqual(role_schedule_key(first["context"]), role_schedule_key(second["context"]))
-        self.app.role_state.write(second["context"], data=state_data(energy=61), expected_revision=1,
+        saved = self.app.role_state.write(second["context"], data=state_data(energy=61), expected_revision=1,
             operation_key="body-from-second", sources=(second["native_source_future"].result(),),
             operator=operator, reason="human_edit")
-        self.assertEqual(self.app.role_state.read(first["context"], operator=operator)["values"]["energy"], 61)
+        updated = self.app.role_state.read(first["context"], operator=operator)
+        self.assertEqual(updated["values"]["energy"], 61)
+        self.assertEqual(require(operations.get(saved["operation_id"])).operation.scope.platform,
+                         "qq-second")
 
     def grant(self, context, action):
         from companion_v2.identity_policy.models import AuthorizationTier
