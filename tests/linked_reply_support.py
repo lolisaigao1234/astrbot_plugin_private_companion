@@ -76,11 +76,11 @@ class SyntheticFailureTool(FunctionTool):
 
 
 class LinkedQQEvent(AiocqhttpMessageEvent):
-    def __init__(self, platform, at, text, identifier="7", group=None):
+    def __init__(self, platform, at, text, identifier="7", group=None, sender="200"):
         message = AstrBotMessage()
         message.type = MessageType.GROUP_MESSAGE if group else MessageType.FRIEND_MESSAGE
         message.self_id = "100" if platform.meta().id == "qq-main" else "101"
-        message.sender = MessageMember("200", "Synthetic owner")
+        message.sender = MessageMember(sender, "Synthetic owner")
         message.message_id, message.message, message.raw_message = identifier, [Plain(text)], {"post_type": "message"}
         if group:
             message.group_id = group
@@ -88,7 +88,7 @@ class LinkedQQEvent(AiocqhttpMessageEvent):
         meta = platform.meta()
         meta.support_streaming_message = False
         meta.support_proactive_message = False
-        super().__init__(text, message, meta, group or "200", platform.get_client())
+        super().__init__(text, message, meta, group or sender, platform.get_client())
         self.created_at = at.timestamp()
         self.stream_invocations = 0
         self.transport_chunks = []
@@ -274,9 +274,9 @@ class LinkedReplyFixture(MultiFixture):
             task.cancel()
         await asyncio.gather(*tuple(self.bus._pending_tasks), return_exceptions=True)
 
-    def event_for(self, index, text=None, identifier="7", group=None):
+    def event_for(self, index, text=None, identifier="7", group=None, sender="200"):
         return LinkedQQEvent(self.native.platforms[ORIGINS[index].split(":")[0]], self.clock.now(),
-            text or ("A" if index == 0 else "B"), identifier, group)
+            text or ("A" if index == 0 else "B"), identifier, group, sender)
 
     async def dispatch(self, event):
         await self.queue.put(event)

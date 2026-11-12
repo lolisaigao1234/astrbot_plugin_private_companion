@@ -314,9 +314,28 @@ class LinkedConversationConcurrencyTests(LinkedReplyFixture, unittest.IsolatedAs
         await asyncio.wait_for(await self.dispatch(linked), 10)
         self.assertTrue(linked.is_stopped())
         self.assertEqual(len(self.calls), 2)
-        # A new process has no in-memory index: the failed read stops nothing.
+        # A new process has no in-memory index: after the failed read, group chats
+        # and chats that are not companion targets are still answered by AstrBot.
         LinkedTurnGate.shared().linked_origins = None
-        await answered_by_astrbot(self.event_for(1, "cold", "cold-message"))
+        await answered_by_astrbot(self.event_for(1, "cold", "cold-group", group="300"))
+        await answered_by_astrbot(self.event_for(1, "cold", "cold-stranger", sender="201"))
+
+    async def test_cold_controller_with_an_unreadable_link_record_refuses_the_linked_turn(self):
+        from astrbot_host.linked_turn_gate import LinkedTurnGate
+        from companion_v2.storage.runtime import StorageRuntime
+        self.assertEqual((await self.link())["status"], "ok")
+        await self.controller.terminate()
+        self.controller = self.make_controller()
+        self.plugin.staging = self.controller
+        # A new process: no in-memory index, and the persisted record cannot be read.
+        LinkedTurnGate.shared().linked_origins = None
+        database = self.controller.profile_root / "runtime" / StorageRuntime.DATABASE_FILENAME
+        database.write_bytes(b"synthetic unreadable store")
+        event = self.event_for(1)
+        await asyncio.wait_for(await self.dispatch(event), 10)
+        self.assertTrue(event.is_stopped())
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.manager.writes, [])
 
     async def test_cold_controller_refuses_linked_native_turn_before_host_has_loaded(self):
         from astrbot_host.linked_turn_gate import LinkedTurnGate
