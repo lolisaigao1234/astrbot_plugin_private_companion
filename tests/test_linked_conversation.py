@@ -102,11 +102,26 @@ class LinkedConversationConcurrencyTests(LinkedReplyFixture, unittest.IsolatedAs
         self.assertEqual(prepared["source_endpoint"].unified_msg_origin, ORIGINS[1])
         self.assertEqual(prepared["conversation"].unified_msg_origin, ORIGINS[0])
         self.assertEqual(prepared["source_endpoint"].target_id, "second")
-        duplicate = self.event_for(1)
-        await (await self.dispatch(duplicate))
-        self.assertTrue(duplicate.is_stopped())
-        self.assertEqual(duplicate.get_extra("companion_linked_failure"), "linked_duplicate_delivery")
+        await (await self.dispatch(self.event_for(1)))
         self.assertEqual(len(self.manager.writes), 2)
+        self.assertEqual(len(self.calls), 2)
+
+    async def test_rapid_messages_from_one_linked_chat_merge_like_an_unlinked_chat(self):
+        self.reply_settings(private_debounce_enabled=True, private_debounce_min_ms=1000,
+            private_debounce_max_ms=2000, private_debounce_total_ms=6000)
+        async def burst(prefix):
+            first = await self.dispatch(self.event_for(1, "one", prefix + "one"))
+            await asyncio.sleep(.3)  # inside the first message's quiet window
+            second = await self.dispatch(self.event_for(1, "two", prefix + "two"))
+            await asyncio.wait_for(asyncio.gather(first, second), 30)
+        await burst("unlinked-")
+        independent = await self.manager.get_conversation(ORIGINS[1], "conversation-b")
+        unlinked = self.contents(json.loads(independent.history))[2:]
+        self.assertEqual(unlinked, ["one\ntwo", "reply-B"])
+        self.assertEqual((await self.link())["status"], "ok")
+        await burst("linked-")
+        await self.controller.session.linked_conversations.gate.drain()
+        self.assertEqual(self.contents(await self.history())[2:], unlinked)
         self.assertEqual(len(self.calls), 2)
 
     async def test_conversation_continues_after_original_endpoint_is_detached_and_offline(self):
@@ -224,15 +239,14 @@ class LinkedConversationConcurrencyTests(LinkedReplyFixture, unittest.IsolatedAs
         await asyncio.wait_for(self.model_done.wait(), 15)
         waiter_event = self.event_for(1)
         waiter = await self.dispatch(waiter_event)
-        await asyncio.sleep(.05)
+        await self.queued_for_permit(waiter_event)
         waiter.cancel()
         await asyncio.gather(waiter, return_exceptions=True)
         self.assertTrue(waiter_event.is_stopped())
         self.assertEqual(len(self.calls), 1)
         self.allow_model.set()
         await first
-        replay = self.event_for(1)
-        await asyncio.wait_for(await self.dispatch(replay), 15)
+        await asyncio.wait_for(await self.dispatch(self.event_for(1, identifier="next-message")), 15)
         await self.controller.session.linked_conversations.gate.drain()
         self.assertEqual(self.contents(await self.history()), ["old", "old-reply", "A", "reply-A", "B", "reply-B"])
 
@@ -361,7 +375,7 @@ class LinkedConversationConcurrencyTests(LinkedReplyFixture, unittest.IsolatedAs
         await asyncio.wait_for(self.model_done.wait(), 15)
         b = self.event_for(1)
         waiter = await self.dispatch(b)
-        await asyncio.sleep(.05)
+        await self.queued_for_permit(b)
         waiter.cancel()
         await asyncio.wait_for(asyncio.gather(waiter, return_exceptions=True), 5)
         self.assertTrue(b.is_stopped())
@@ -471,6 +485,10 @@ class LinkedConversationConcurrencyTests(LinkedReplyFixture, unittest.IsolatedAs
         event = self.event_for(1)
         await asyncio.wait_for(await self.dispatch(event), 10)
         self.assertTrue(event.is_stopped())
+        # Nor from the endpoint whose own selection the deletion cleared.
+        orphaned = self.event_for(0)
+        await asyncio.wait_for(await self.dispatch(orphaned), 10)
+        self.assertTrue(orphaned.is_stopped())
         self.assertEqual(self.calls, [])
         self.assertEqual(self.manager.writes, [])
         self.assertIsNone(await self.manager.get_curr_conversation_id(ORIGINS[0]))

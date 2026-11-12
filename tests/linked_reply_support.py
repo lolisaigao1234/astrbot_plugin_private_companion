@@ -199,14 +199,7 @@ class LinkedReplyFixture(MultiFixture):
             platform.client.send_private_msg = send
         self.controller = self.make_controller()
         self.app = await self.start_host()
-        from companion_v2.conversation.reply_settings import ReplyConfigurationOwner, configuration_fields, target_for
-        owner = ReplyConfigurationOwner(self.app.runtime)
-        common = self.controller.settings.common
-        fields = configuration_fields(common.segmentation, common.streaming, common.policy.part_gap_seconds)
-        for target_id in ("first", "second"):
-            target = target_for(self.controller.authority.context(target_id, "role-a"))
-            owner.write(target, fields, changes={"conversation.presentation.private_debounce_enabled": False},
-                reset=(), expected_revision=owner.read(target, fields).revision, observed_at=self.clock.now())
+        self.reply_settings(private_debounce_enabled=False)
         self.plugin = ENTRY.PrivateCompanionV2StagingPlugin.__new__(ENTRY.PrivateCompanionV2StagingPlugin)
         self.plugin.staging = self.controller
         core_context = Context.__new__(Context)
@@ -249,6 +242,17 @@ class LinkedReplyFixture(MultiFixture):
         self.dispatcher = asyncio.create_task(self.bus.dispatch())
         self.addAsyncCleanup(self.close_bus)
 
+    def reply_settings(self, **changes):
+        from companion_v2.conversation.reply_settings import ReplyConfigurationOwner, configuration_fields, target_for
+        owner = ReplyConfigurationOwner(self.app.runtime)
+        common = self.controller.settings.common
+        fields = configuration_fields(common.segmentation, common.streaming, common.policy.part_gap_seconds)
+        for target_id in ("first", "second"):
+            target = target_for(self.controller.authority.context(target_id, "role-a"))
+            owner.write(target, fields,
+                changes={"conversation.presentation." + name: value for name, value in changes.items()},
+                reset=(), expected_revision=owner.read(target, fields).revision, observed_at=self.clock.now())
+
     def register(self, kind, handler, filters=None, priority=0):
         metadata = StarHandlerMetadata(kind, NAME + "." + handler.__name__, handler.__name__, NAME,
             handler, filters or [], extras_configs={"priority": priority})
@@ -279,6 +283,13 @@ class LinkedReplyFixture(MultiFixture):
                     return task
             await asyncio.sleep(0)
         self.fail("EventBus did not create the pipeline task")
+
+    async def queued_for_permit(self, event):
+        # The stamp is written in the same step that starts waiting for the permit.
+        from astrbot_host.linked_conversations import EXTRA
+        async with asyncio.timeout(10):
+            while event.get_extra(EXTRA) is None:
+                await asyncio.sleep(.01)
 
     async def history(self):
         conversation = await self.manager.get_conversation(ORIGINS[0], "conversation-a")

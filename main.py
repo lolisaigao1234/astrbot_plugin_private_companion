@@ -835,9 +835,6 @@ class PrivateCompanionV2StagingPlugin(Star):
             return
         if target is None:
             return
-        links = getattr(getattr(self.staging, "session", None), "linked_conversations", None)
-        if links is not None and not await links.admit(self.staging, event):
-            return
         # AstrBot owns the persona and reply; V2 contributes optional background.
         event_ref = uuid4().hex
         origin_key = self._origin_key_for_event(event)
@@ -1123,6 +1120,12 @@ class PrivateCompanionV2StagingPlugin(Star):
                 getattr(event, "message_str", ""),
                 target=getattr(target, "target_id", ""),
             )
+        # Only the event that survived the duplicate check, follow-up fold and
+        # debounce takes the linked conversation permit, and never waits for a
+        # sibling message while holding it.
+        links = getattr(getattr(self.staging, "session", None), "linked_conversations", None)
+        if links is not None and not await links.admit(self.staging, event):
+            return
         try:
             prepare_kwargs = {"group_admission": group_admission}
             if core_reply_plan is not None:
