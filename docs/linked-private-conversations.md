@@ -74,9 +74,10 @@ and sends. The gate registry survives import retirement in its own process modul
 for admitted pipeline work, origin barriers and management operations before closing storage.
 
 Linked members must agree with each other, at creation and on every turn, on what AstrBot
-resolves per origin and that shapes the turn: the local agent runner, provider settings, the
-selected provider and model, the resolved and forced persona, the companion's enablement, and
-session services and variables. Nothing is frozen at link time: a setting changed for all
+resolves per origin and that shapes the turn: the local agent runner and its settings (history
+compression, fallback models, step and tool limits), provider settings, the selected provider and
+model, the resolved and forced persona, the companion's enablement, and session services and
+variables. Nothing is frozen at link time: a setting changed for all
 members is followed, a difference between members refuses turns until they agree again, and
 unrelated configuration (whitelist, admins, platforms, the provider list) is ignored.
 Event/handler model overrides that change the selected model are refused.
@@ -92,7 +93,9 @@ and cannot race first-link creation. Unlinked coordination and reply preparation
 Linked origins are indexed in memory. An event from any other origin, including every group
 event, returns from the companion's link hooks without reading the link record. While the host
 is not running, linked origins stay refused from that index; a new process reads the one record
-once, and if that read fails AstrBot's own replies continue.
+once. If that read fails, the exact private targets in the companion's configuration, the only
+chats that can be link members, are refused until the record can be read or the host runs; group
+chats and chats that are not companion targets keep AstrBot's own replies.
 
 ## Boundaries and follow-ups
 
@@ -133,9 +136,11 @@ nothing until A's save and the native barrier complete. Both turns are then stor
 and replies retain their physical origins. A stopped-yield test holds the native barrier after
 A's task finishes and proves that B stays blocked. Other cases cover streaming, tools/failure,
 provider error/exception, send/save errors, stop, cancellation while waiting/running/saving,
-revision drift, member settings divergence and recovery, an unrelated configuration edit,
-debounced rapid messages, a turn queued past 15 seconds, other plugins' commands, restart,
-revoked origins, a stopped host and unload/reload.
+revision drift, member settings divergence and recovery, members with different history limits,
+an unrelated configuration edit, debounced rapid messages, a turn queued past 15 seconds, other
+plugins' commands, restart, revoked origins, a stopped host, a new process whose link record
+cannot be read, and unload/reload. Each ordering case waits until the second turn is queued on
+the permit and checks that it loads no history, so it fails if the gate stops serializing.
 
 Run these suites with an AstrBot SDK environment that uses a temporary data root, never an
 installed plugin or a live data directory:
