@@ -20,13 +20,14 @@ from astrbot.core.pipeline.result_decorate import stage as decorate_module
 from astrbot.core.provider.entities import LLMResponse, ProviderRequest
 
 
-async def install_history(case):
+async def install_history(case, *windows):
     database = SQLiteDatabase(str(case.root / "astrbot-history.db"))
     await database.initialize()
     case.addAsyncCleanup(database.engine.dispose)
     manager = ConversationManager(database)
     case.native.conversation_manager = manager
-    await manager.new_conversation(f"tg-main:FriendMessage:5123456789012", persona_id="original")
+    for window in windows or ("tg-main:FriendMessage:5123456789012",):
+        await manager.new_conversation(window, persona_id="original")
     return manager
 
 
