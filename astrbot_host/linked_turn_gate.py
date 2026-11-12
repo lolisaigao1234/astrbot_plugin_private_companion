@@ -93,7 +93,8 @@ class LinkedTurnGate:
             await asyncio.gather(*(asyncio.shield(task) for task in owners), return_exceptions=True)
             # Let synchronous done callbacks start their barrier tasks.
             await asyncio.sleep(0)
-            await asyncio.gather(*(asyncio.shield(task) for task in tuple(self.cleanups)))
+            await asyncio.gather(*(asyncio.shield(task) for task in tuple(self.cleanups)),
+                                 return_exceptions=True)
 
 
 @asynccontextmanager
