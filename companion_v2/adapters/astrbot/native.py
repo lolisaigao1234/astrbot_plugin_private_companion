@@ -283,9 +283,13 @@ def native_client_connected(platform, account_id, client=None):
     if meta.name == "telegram":
         try:
             application = platform.application
+            # ``application.running`` is the SDK's public lifecycle flag. The two
+            # adapter-private flags only narrow it further (restart and shutdown
+            # windows); a host that renames them still answers on the public one.
             return (str(meta.id) == str(account_id) and platform.get_client() is client
                     and application.bot is client and application.running is True
-                    and platform._application_started is True and not platform._terminating
+                    and getattr(platform, "_application_started", True) is True
+                    and not getattr(platform, "_terminating", False)
                     and type(client.id) is int and client.id > 0)
         except (AttributeError, RuntimeError, TypeError, ValueError):
             return False
