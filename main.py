@@ -510,6 +510,9 @@ class PrivateCompanionV2StagingPlugin(Star):
         if readiness is not None:
             self._note_startup_failure("readiness", readiness)
             return True
+        if self._host_serving():
+            # Already serving: only accounts that were unavailable are left to pick up.
+            return await self.staging.serve_available_accounts()
 
         initialized_profile = False
         if self.staging.session is None:
@@ -545,7 +548,8 @@ class PrivateCompanionV2StagingPlugin(Star):
         self._startup_failure_key = None
         logger.info("[CompanionV2] staging profile %s并开始接收入站消息",
                     "已自动初始化" if initialized_profile else "已加载")
-        return True
+        # An account that is still unavailable keeps this retry loop alive.
+        return await self.staging.serve_available_accounts()
 
     @staticmethod
     def _retry_startup_failure(code: str) -> bool:
@@ -575,12 +579,13 @@ class PrivateCompanionV2StagingPlugin(Star):
             logger.warning("[CompanionV2] 保存的运行档暂不能启动 code=%s error_type=%s detail=%s",
                            code, error_type or "unknown", detail or "unavailable")
 
+    def _host_serving(self) -> bool:
+        session = self.staging.session
+        return bool(self.staging._accepting and session is not None
+                    and session.application.state == "running")
+
     def _schedule_host_start(self) -> None:
         if self.staging._terminated:
-            return
-        session = self.staging.session
-        if (self.staging._accepting and session is not None
-                and session.application.state == "running"):
             return
         task = self._host_start_task
         if task is None or task.done():
@@ -603,7 +608,7 @@ class PrivateCompanionV2StagingPlugin(Star):
                 return
             if finished:
                 return
-            if not warned and loop.time() - started_at >= 30:
+            if not warned and not self._host_serving() and loop.time() - started_at >= 30:
                 logger.warning("[CompanionV2] 运行档尚未进入接收状态，恢复任务仍在运行并会自动重试")
                 warned = True
             await asyncio.sleep(delay)
