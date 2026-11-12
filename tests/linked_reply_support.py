@@ -18,7 +18,7 @@ from astrbot.core.config.default import DEFAULT_CONFIG
 from astrbot.core.conversation_mgr import ConversationManager
 from astrbot.core.db.sqlite import SQLiteDatabase
 from astrbot.core.event_bus import EventBus
-from astrbot.core.message.components import Plain
+from astrbot.core.message.components import At, Plain
 from astrbot.core.persona_mgr import PersonaManager
 from astrbot.core.pipeline.context import PipelineContext
 from astrbot.core.pipeline.scheduler import PipelineScheduler
@@ -76,16 +76,19 @@ class SyntheticFailureTool(FunctionTool):
 
 
 class LinkedQQEvent(AiocqhttpMessageEvent):
-    def __init__(self, platform, at, text, identifier="7", participant="200"):
+    def __init__(self, platform, at, text, identifier="7", participant="200", group=None):
         message = AstrBotMessage()
-        message.type = MessageType.FRIEND_MESSAGE
+        message.type = MessageType.GROUP_MESSAGE if group else MessageType.FRIEND_MESSAGE
         message.self_id = "100" if platform.meta().id == "qq-main" else "101"
         message.sender = MessageMember(participant, "Synthetic owner")
         message.message_id, message.message, message.raw_message = identifier, [Plain(text)], {"post_type": "message"}
+        if group:
+            message.group_id = group
+            message.message.insert(0, At(qq=message.self_id))
         meta = platform.meta()
         meta.support_streaming_message = False
         meta.support_proactive_message = False
-        super().__init__(text, message, meta, participant, platform.get_client())
+        super().__init__(text, message, meta, group or participant, platform.get_client())
         self.created_at = at.timestamp()
         self.stream_invocations = 0
         self.transport_chunks = []
@@ -198,17 +201,10 @@ class LinkedReplyFixture(MultiFixture):
                     raise OSError("synthetic send error")
                 self.sent.append((_platform_id, kwargs))
                 return {"message_id": len(self.sent)}
-            platform.client.send_private_msg = send
+            platform.client.send_private_msg = platform.client.send_group_msg = send
         self.controller = self.make_controller()
         self.app = await self.start_host()
-        from companion_v2.conversation.reply_settings import ReplyConfigurationOwner, configuration_fields, target_for
-        owner = ReplyConfigurationOwner(self.app.runtime)
-        common = self.controller.settings.common
-        fields = configuration_fields(common.segmentation, common.streaming, common.policy.part_gap_seconds)
-        for target_id in ("first", "second"):
-            target = target_for(self.controller.authority.context(target_id, "role-a"))
-            owner.write(target, fields, changes={"conversation.presentation.private_debounce_enabled": False},
-                reset=(), expected_revision=owner.read(target, fields).revision, observed_at=self.clock.now())
+        self.reply_settings(private_debounce_enabled=False)
         self.plugin = ENTRY.PrivateCompanionV2StagingPlugin.__new__(ENTRY.PrivateCompanionV2StagingPlugin)
         self.plugin.staging = self.controller
         core_context = Context.__new__(Context)
@@ -251,6 +247,17 @@ class LinkedReplyFixture(MultiFixture):
         self.dispatcher = asyncio.create_task(self.bus.dispatch())
         self.addAsyncCleanup(self.close_bus)
 
+    def reply_settings(self, **changes):
+        from companion_v2.conversation.reply_settings import ReplyConfigurationOwner, configuration_fields, target_for
+        owner = ReplyConfigurationOwner(self.app.runtime)
+        common = self.controller.settings.common
+        fields = configuration_fields(common.segmentation, common.streaming, common.policy.part_gap_seconds)
+        for target_id in ("first", "second"):
+            target = target_for(self.controller.authority.context(target_id, "role-a"))
+            owner.write(target, fields,
+                changes={"conversation.presentation." + name: value for name, value in changes.items()},
+                reset=(), expected_revision=owner.read(target, fields).revision, observed_at=self.clock.now())
+
     def register(self, kind, handler, filters=None, priority=0):
         metadata = StarHandlerMetadata(kind, NAME + "." + handler.__name__, handler.__name__, NAME,
             handler, filters or [], extras_configs={"priority": priority})
@@ -269,9 +276,10 @@ class LinkedReplyFixture(MultiFixture):
             task.cancel()
         await asyncio.gather(*tuple(self.bus._pending_tasks), return_exceptions=True)
 
-    def event_for(self, index, text=None, identifier="7"):
+    def event_for(self, index, text=None, identifier="7", group=None):
         return LinkedQQEvent(self.native.platforms[self.origins[index].split(":")[0]], self.clock.now(),
-            text or ("A" if index == 0 else "B"), identifier, self.origins[index].split(":")[-1])
+            text or ("A" if index == 0 else "B"), identifier,
+            participant=self.origins[index].split(":")[-1], group=group)
 
     async def dispatch(self, event):
         await self.queue.put(event)
@@ -281,6 +289,13 @@ class LinkedReplyFixture(MultiFixture):
                     return task
             await asyncio.sleep(0)
         self.fail("EventBus did not create the pipeline task")
+
+    async def queued_for_permit(self, event):
+        # The stamp is written in the same step that starts waiting for the permit.
+        from astrbot_host.linked_conversations import EXTRA
+        async with asyncio.timeout(10):
+            while event.get_extra(EXTRA) is None:
+                await asyncio.sleep(.01)
 
     async def history(self):
         conversation = await self.manager.get_conversation(self.origins[0], "conversation-a")
@@ -304,11 +319,11 @@ class LinkedReplyFixture(MultiFixture):
         with patch("astrbot_host.account_session_api.request", NS(username="owner", query={}, body=request_body)):
             return await AccountSessionWebAPI(self.controller).link_conversation()
 
-    def builtin(self, command, handler, name=None):
+    def builtin(self, command, handler, name=None, module="astrbot.builtin_stars.builtin_commands.main"):
         from astrbot.core.star.filter.command import CommandFilter
-        module = "astrbot.builtin_stars.builtin_commands.main"
         if module not in star_map:
-            star_map[module] = StarMetadata(name="builtin_commands", module_path=module, reserved=True)
+            star_map[module] = StarMetadata(name=module.split(".")[-2], module_path=module,
+                reserved=module.startswith("astrbot."))
             self.addCleanup(star_map.pop, module, None)
         metadata = StarHandlerMetadata(EventType.AdapterMessageEvent, module + "." + command,
             name or handler.__name__, module, handler, [])

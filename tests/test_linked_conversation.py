@@ -20,42 +20,6 @@ class LinkedConversationConcurrencyTests(LinkedReplyFixture, unittest.IsolatedAs
         self.assertEqual([write[0] for write in self.manager.writes], [ORIGINS[1], ORIGINS[0]])
         self.assertEqual(len(self.calls), 2)
 
-    async def test_gate_holds_from_preparation_through_final_save(self):
-        from astrbot.core.star.star_handler import EventType
-        from astrbot_host.linked_turn_gate import LinkedTurnGate
-
-        gate = LinkedTurnGate()
-        async def admit(event):
-            await gate.acquire("conversation-a", event)
-        self.register(EventType.AdapterMessageEvent, admit,
-            self.handlers[0].event_filters, priority=300000)
-        self.register(EventType.OnWaitingLLMRequestEvent, admit, priority=300000)
-        await self.manager.switch_conversation(ORIGINS[1], "conversation-a")
-        self.pause_after_response = self.manager.pause_save = True
-        event_a, event_b = self.event_for(0), self.event_for(1)
-        first = await self.dispatch(event_a)
-        await asyncio.wait_for(self.model_done.wait(), 10)
-        reads = len(self.manager.reads)
-        second = await self.dispatch(event_b)
-        await asyncio.sleep(.05)
-        self.assertEqual(len(self.manager.reads), reads)
-        self.assertEqual(len(self.calls), 1)
-        self.allow_model.set()
-        await asyncio.wait_for(self.manager.saving.wait(), 10)
-        await asyncio.sleep(.05)
-        self.assertEqual(len(self.calls), 1)
-        self.assertFalse(second.done())
-        self.manager.allow_save.set()
-        await asyncio.wait_for(asyncio.gather(first, second), 15)
-        await gate.drain()
-        self.assertEqual(self.contents(await self.history()),
-            ["old", "old-reply", "A", "reply-A", "B", "reply-B"])
-        self.assertEqual([w[0] for w in self.manager.writes], list(ORIGINS))
-        self.assertEqual(self.manager.tasks, [first, second])
-        self.assertEqual([p for p, _ in self.sent], ["qq-main", "qq-second"])
-        self.assertEqual((event_a.unified_msg_origin, event_b.unified_msg_origin), ORIGINS)
-        self.assertIn("reply-A", str(self.calls[1]["contexts"]))
-
     async def test_explicit_versioned_link_selects_existing_history_and_survives_restart(self):
         from astrbot_host.account_session_api import AccountSessionWebAPI
         from unittest.mock import patch
@@ -89,24 +53,47 @@ class LinkedConversationConcurrencyTests(LinkedReplyFixture, unittest.IsolatedAs
         second = await self.dispatch(b)
         await asyncio.sleep(.05)
         self.assertEqual(len(self.manager.reads), reads)
+        self.assertEqual(len(self.calls), 1)
         self.allow_model.set()
         await asyncio.wait_for(self.manager.saving.wait(), 10)
+        await asyncio.sleep(.05)
         self.assertEqual(len(self.calls), 1)
+        self.assertFalse(second.done())
         self.manager.allow_save.set()
         await asyncio.wait_for(asyncio.gather(first, second), 20)
         await self.controller.session.linked_conversations.gate.drain()
         self.assertEqual(self.contents(await self.history()),
             ["old", "old-reply", "A", "reply-A", "B", "reply-B"])
+        self.assertEqual([write[0] for write in self.manager.writes], list(ORIGINS))
+        self.assertEqual(self.manager.tasks, [first, second])
+        self.assertEqual([platform for platform, _ in self.sent], ["qq-main", "qq-second"])
+        self.assertEqual((a.unified_msg_origin, b.unified_msg_origin), ORIGINS)
+        self.assertIn("reply-A", str(self.calls[1]["contexts"]))
         from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA
         prepared = b.get_extra(CORE_REPLY_CONTEXT_EXTRA)["prepared"]
         self.assertEqual(prepared["source_endpoint"].unified_msg_origin, ORIGINS[1])
         self.assertEqual(prepared["conversation"].unified_msg_origin, ORIGINS[0])
         self.assertEqual(prepared["source_endpoint"].target_id, "second")
-        duplicate = self.event_for(1)
-        await (await self.dispatch(duplicate))
-        self.assertTrue(duplicate.is_stopped())
-        self.assertEqual(duplicate.get_extra("companion_linked_failure"), "linked_duplicate_delivery")
+        await (await self.dispatch(self.event_for(1)))
         self.assertEqual(len(self.manager.writes), 2)
+        self.assertEqual(len(self.calls), 2)
+
+    async def test_rapid_messages_from_one_linked_chat_merge_like_an_unlinked_chat(self):
+        self.reply_settings(private_debounce_enabled=True, private_debounce_min_ms=1000,
+            private_debounce_max_ms=2000, private_debounce_total_ms=6000)
+        async def burst(prefix):
+            first = await self.dispatch(self.event_for(1, "one", prefix + "one"))
+            await asyncio.sleep(.3)  # inside the first message's quiet window
+            second = await self.dispatch(self.event_for(1, "two", prefix + "two"))
+            await asyncio.wait_for(asyncio.gather(first, second), 30)
+        await burst("unlinked-")
+        independent = await self.manager.get_conversation(ORIGINS[1], "conversation-b")
+        unlinked = self.contents(json.loads(independent.history))[2:]
+        self.assertEqual(unlinked, ["one\ntwo", "reply-B"])
+        self.assertEqual((await self.link())["status"], "ok")
+        await burst("linked-")
+        await self.controller.session.linked_conversations.gate.drain()
+        self.assertEqual(self.contents(await self.history())[2:], unlinked)
         self.assertEqual(len(self.calls), 2)
 
     async def test_conversation_continues_after_original_endpoint_is_detached_and_offline(self):
@@ -224,15 +211,14 @@ class LinkedConversationConcurrencyTests(LinkedReplyFixture, unittest.IsolatedAs
         await asyncio.wait_for(self.model_done.wait(), 15)
         waiter_event = self.event_for(1)
         waiter = await self.dispatch(waiter_event)
-        await asyncio.sleep(.05)
+        await self.queued_for_permit(waiter_event)
         waiter.cancel()
         await asyncio.gather(waiter, return_exceptions=True)
         self.assertTrue(waiter_event.is_stopped())
         self.assertEqual(len(self.calls), 1)
         self.allow_model.set()
         await first
-        replay = self.event_for(1)
-        await asyncio.wait_for(await self.dispatch(replay), 15)
+        await asyncio.wait_for(await self.dispatch(self.event_for(1, identifier="next-message")), 15)
         await self.controller.session.linked_conversations.gate.drain()
         self.assertEqual(self.contents(await self.history()), ["old", "old-reply", "A", "reply-A", "B", "reply-B"])
 
@@ -278,21 +264,32 @@ class LinkedConversationConcurrencyTests(LinkedReplyFixture, unittest.IsolatedAs
         self.assertEqual([write[0] for write in self.manager.writes], list(ORIGINS))
         self.assertEqual(self.contents(await self.history())[-2:], ["B", "reply-B"])
 
-    async def test_session_changing_and_unknown_commands_are_blocked_before_handlers(self):
+    async def test_session_commands_are_refused_and_other_plugins_commands_pass(self):
+        from astrbot.core.message.message_event_result import MessageChain
         called = []
-        for command in ("reset", "new", "provider", "set", "unset", "third_party_destructive"):
+        for command, name in (("reset", "reset"), ("new", "new_conv"), ("provider", "provider"),
+                              ("set", "set_variable"), ("unset", "unset_variable")):
             async def destructive(event):
                 called.append(event.message_str)
                 await self.manager.update_conversation(event.unified_msg_origin, "conversation-a", history=[])
-            self.builtin(command, destructive)
+            self.builtin(command, destructive, name)
+        async def update_stack(event):
+            called.append(event.message_str)
+            await event.send(MessageChain().message("stack updated"))
+        self.config["plugin_set"].append("synthetic_updater")
+        self.builtin("update_stack", update_stack, module="synthetic_updater.main")
         self.assertEqual((await self.link())["status"], "ok")
-        for index, text in enumerate(("/reset", "/new", "/provider", "/set", "/unset",
-                                      "/third_party_destructive", "陪伴 全部重置")):
+        for index, text in enumerate(("/reset", "/new", "/provider", "/set", "/unset", "陪伴 全部重置")):
             with self.subTest(text=text):
                 event = self.event_for(1, text, "command-" + str(index))
                 await asyncio.wait_for(await self.dispatch(event), 10)
                 self.assertTrue(event.is_stopped())
         self.assertEqual(called, [])
+        event = self.event_for(1, "/update_stack", "third-party-command")
+        await asyncio.wait_for(await self.dispatch(event), 10)
+        self.assertFalse(event.is_stopped())
+        self.assertEqual(len(called), 1)
+        self.assertIn("stack updated", str(self.sent[-1]))
         self.assertEqual(self.calls, [])
         self.assertEqual(self.manager.writes, [])
         self.assertEqual(self.contents(await self.history()), ["old", "old-reply"])
@@ -306,11 +303,39 @@ class LinkedConversationConcurrencyTests(LinkedReplyFixture, unittest.IsolatedAs
         self.assertEqual(self.calls, [])
         self.assertEqual(self.manager.writes, [])
 
+    async def test_group_and_unlinked_private_events_are_untouched_while_the_host_is_not_running(self):
+        from astrbot_host.linked_turn_gate import LinkedTurnGate
+        from companion_v2.storage.runtime import StorageRuntime
+        self.assertEqual((await self.link(members=["first"]))["status"], "ok")
+        await self.controller.terminate()
+        self.controller = self.make_controller()
+        self.plugin.staging = self.controller
+        # Unreadable store: nothing may depend on reading it for these events.
+        database = self.controller.profile_root / "runtime" / StorageRuntime.DATABASE_FILENAME
+        database.write_bytes(b"synthetic unreadable store")
+        async def answered_by_astrbot(event):
+            answered = len(self.calls)
+            await asyncio.wait_for(await self.dispatch(event), 15)
+            self.assertFalse(event.is_stopped())
+            self.assertEqual(len(self.calls), answered + 1)
+        await answered_by_astrbot(self.event_for(1, "group", "group-message", group="300"))
+        await answered_by_astrbot(self.event_for(1, "private", "private-message"))
+        linked = self.event_for(0, identifier="linked-message")
+        await asyncio.wait_for(await self.dispatch(linked), 10)
+        self.assertTrue(linked.is_stopped())
+        self.assertEqual(len(self.calls), 2)
+        # A new process has no in-memory index: the failed read stops nothing.
+        LinkedTurnGate.shared().linked_origins = None
+        await answered_by_astrbot(self.event_for(1, "cold", "cold-message"))
+
     async def test_cold_controller_refuses_linked_native_turn_before_host_has_loaded(self):
+        from astrbot_host.linked_turn_gate import LinkedTurnGate
         self.assertEqual((await self.link())["status"], "ok")
         await self.controller.terminate()
         self.controller = self.make_controller()
         self.plugin.staging = self.controller
+        # A new process knows its links only from the persisted record.
+        LinkedTurnGate.shared().linked_origins = None
         event = self.event_for(1)
         await asyncio.wait_for(await self.dispatch(event), 10)
         self.assertTrue(event.is_stopped())
@@ -356,17 +381,12 @@ class LinkedConversationConcurrencyTests(LinkedReplyFixture, unittest.IsolatedAs
             conversation = await self.manager.get_conversation(event.unified_msg_origin, "conversation-a")
             yield event.request_llm(prompt=event.message_str, conversation=conversation)
         self.register(EventType.AdapterMessageEvent, request_native_reply, self.handlers[0].event_filters, priority=0)
-        waiting = asyncio.Event()
-        async def entered_waiting_hook(event):
-            if event.unified_msg_origin == ORIGINS[1]:
-                waiting.set()
-        self.register(EventType.OnWaitingLLMRequestEvent, entered_waiting_hook, priority=2000000)
         self.pause_model = True
         first = await self.dispatch(self.event_for(0))
         await asyncio.wait_for(self.model_done.wait(), 15)
         b = self.event_for(1)
         waiter = await self.dispatch(b)
-        await asyncio.wait_for(waiting.wait(), 15)
+        await self.queued_for_permit(b)
         waiter.cancel()
         await asyncio.wait_for(asyncio.gather(waiter, return_exceptions=True), 5)
         self.assertTrue(b.is_stopped())
@@ -476,6 +496,10 @@ class LinkedConversationConcurrencyTests(LinkedReplyFixture, unittest.IsolatedAs
         event = self.event_for(1)
         await asyncio.wait_for(await self.dispatch(event), 10)
         self.assertTrue(event.is_stopped())
+        # Nor from the endpoint whose own selection the deletion cleared.
+        orphaned = self.event_for(0)
+        await asyncio.wait_for(await self.dispatch(orphaned), 10)
+        self.assertTrue(orphaned.is_stopped())
         self.assertEqual(self.calls, [])
         self.assertEqual(self.manager.writes, [])
         self.assertIsNone(await self.manager.get_curr_conversation_id(ORIGINS[0]))
@@ -491,16 +515,39 @@ class LinkedConversationConcurrencyTests(LinkedReplyFixture, unittest.IsolatedAs
         self.assertEqual(self.manager.writes, [])
         self.assertEqual(self.contents(await self.history()), ["old", "old-reply"])
 
-    async def test_session_settings_drift_is_refused_before_model_work(self):
+    async def test_unrelated_config_edit_leaves_the_next_linked_turn_working(self):
+        from astrbot_host.linked_conversations import KEY
+        self.assertEqual((await self.link())["status"], "ok")
+        # A record written before the fingerprint left the document is still read.
+        records = self.controller.session.linked_conversations.records()
+        records["owner-dialogue"]["settings"] = "sha256:frozen-at-link-time"
+        self.controller.authority.write(KEY, records)
+        self.config["admins_id"].append("synthetic-admin")
+        self.config["platform_settings"]["id_whitelist"].append("synthetic:FriendMessage:1")
+        event = self.event_for(1)
+        await asyncio.wait_for(await self.dispatch(event), 15)
+        self.assertFalse(event.is_stopped())
+        self.assertEqual(self.contents(await self.history()), ["old", "old-reply", "B", "reply-B"])
+
+    async def test_member_settings_divergence_is_refused_until_the_members_agree_again(self):
         from astrbot.core import sp
         self.assertEqual((await self.link())["status"], "ok")
-        await sp.session_put(ORIGINS[1], "session_variables", {"synthetic-variable": "changed"})
+        for origin in ORIGINS:
+            self.addAsyncCleanup(sp.session_put, origin, "session_variables", {})
+        changed = {"synthetic-variable": "changed"}
+        await sp.session_put(ORIGINS[1], "session_variables", changed)
         event = self.event_for(1)
         await asyncio.wait_for(await self.dispatch(event), 10)
         self.assertTrue(event.is_stopped())
         self.assertEqual(self.calls, [])
         self.assertEqual(self.manager.writes, [])
-        await sp.session_put(ORIGINS[1], "session_variables", {})
+        # The same change on the other member is simply followed: no re-link.
+        await sp.session_put(ORIGINS[0], "session_variables", changed)
+        event = self.event_for(1, identifier="after-alignment")
+        await asyncio.wait_for(await self.dispatch(event), 15)
+        self.assertFalse(event.is_stopped())
+        self.assertEqual(self.contents(await self.history()), ["old", "old-reply", "B", "reply-B"])
+        self.assertEqual(self.controller.session.linked_conversations.get("owner-dialogue")["revision"], 1)
 
     async def test_links_require_local_runner_and_enabled_companion_hooks(self):
         saved = self.config["agent_runner"]["runner_type"]
@@ -583,21 +630,24 @@ class LinkedConversationConcurrencyTests(LinkedReplyFixture, unittest.IsolatedAs
         self.assertEqual(result["data"]["code"], "dashboard_identity_required")
         self.assertEqual(self.controller.session.linked_conversations.records(), {})
 
-    async def test_busy_timeout_refuses_waiter_and_never_takes_away_holders_permit(self):
+    async def test_waiting_linked_turn_queues_without_a_time_limit(self):
         self.assertEqual((await self.link())["status"], "ok")
         self.pause_model = True
         first = await self.dispatch(self.event_for(0))
         await asyncio.wait_for(self.model_done.wait(), 15)
         waiter = self.event_for(1)
-        await asyncio.wait_for(await self.dispatch(waiter), 20)
-        self.assertTrue(waiter.is_stopped())
-        self.assertEqual(waiter.get_extra("companion_linked_failure"), "linked_busy")
-        self.assertFalse(first.done())
+        second = await self.dispatch(waiter)
+        # Longer than any tool or streaming turn was once allowed to take.
+        await asyncio.sleep(17)
+        self.assertFalse(second.done())
+        self.assertFalse(waiter.is_stopped())
         self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.sent, [])
         self.allow_model.set()
-        await first
+        await asyncio.wait_for(asyncio.gather(first, second), 20)
         await self.controller.session.linked_conversations.gate.drain()
-        self.assertEqual(self.contents(await self.history()), ["old", "old-reply", "A", "reply-A"])
+        self.assertEqual(self.contents(await self.history()),
+            ["old", "old-reply", "A", "reply-A", "B", "reply-B"])
 
     async def test_native_stop_can_abort_a_turn_while_unload_is_draining(self):
         from astrbot.builtin_stars.builtin_commands.commands.conversation import ConversationCommands

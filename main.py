@@ -842,9 +842,6 @@ class PrivateCompanionV2StagingPlugin(Star):
             return
         if target is None:
             return
-        links = getattr(getattr(self.staging, "session", None), "linked_conversations", None)
-        if links is not None and not await links.admit(self.staging, event):
-            return
         # AstrBot owns the persona and reply; V2 contributes optional background.
         event_ref = uuid4().hex
         origin_key = self._origin_key_for_event(event)
@@ -1130,6 +1127,12 @@ class PrivateCompanionV2StagingPlugin(Star):
                 getattr(event, "message_str", ""),
                 target=getattr(target, "target_id", ""),
             )
+        # Only the event that survived the duplicate check, follow-up fold and
+        # debounce takes the linked conversation permit, and never waits for a
+        # sibling message while holding it.
+        links = getattr(getattr(self.staging, "session", None), "linked_conversations", None)
+        if links is not None and not await links.admit(self.staging, event):
+            return
         try:
             prepare_kwargs = {"group_admission": group_admission}
             if core_reply_plan is not None:
@@ -1370,7 +1373,7 @@ class PrivateCompanionV2StagingPlugin(Star):
 
     @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE, priority=1000000)
     async def guard_linked_companion_commands(self, event: AstrMessageEvent):
-        from .astrbot_host.linked_conversations import refuse_unavailable_link
+        from .astrbot_host.linked_conversations import SESSION_COMMANDS, refuse_unavailable_link
         if await refuse_unavailable_link(self.staging, event):
             return
         session = getattr(self.staging, "session", None)
@@ -1378,16 +1381,12 @@ class PrivateCompanionV2StagingPlugin(Star):
         if links is None or (links.for_event(event) is None
                              and event.unified_msg_origin not in links.gate.editing_origins):
             return
-        # Default-deny parsed commands until the coherent lifecycle ticket.
-        # AstrBot's /stop remains a native, physical-origin operation.
-        handlers = event.get_extra("activated_handlers", ()) or ()
-        from .astrbot_host.event_routing import _is_command_filter
+        # Only session-changing commands wait for the coherent lifecycle ticket:
+        # AstrBot's own and the companion's reset and binding. Other plugins'
+        # commands and AstrBot's /stop are untouched.
         from .astrbot_host.reset_command import parse_reset_command
-        blocked = any(any(_is_command_filter(f) for f in handler.event_filters or ())
-                      and not (handler.handler_module_path == "astrbot.builtin_stars.builtin_commands.main"
-                               and handler.handler_name == "stop") for handler in handlers)
         binding = getattr(self.staging, "handles_binding", None)
-        if (blocked or (callable(binding) and binding(event))
+        if (links.native_command(event, SESSION_COMMANDS) or (callable(binding) and binding(event))
                 or parse_reset_command(str(getattr(event, "message_str", "") or "")) is not None):
             event.stop_event()
             from astrbot.core.message.message_event_result import MessageChain

@@ -203,9 +203,6 @@ class MultiPrivateBridge(NativePrivateBridge):
             event_id = native_id(message.message_id)
             at = datetime.fromtimestamp(event.created_at, timezone.utc)
             principal = self.authority.principal(target)
-            links = getattr(self, "linked_conversations", None)
-            if links is not None:
-                links.require_permit(event)
             owner = self.resolve_core_conversation_owner(target)
             linked_owner = owner if isinstance(owner, NativeServedConversation) else None
             if linked_owner is not None:
@@ -950,6 +947,9 @@ class MultiHostSession:
         umo = event.unified_msg_origin
         try:
             cid = await bounded_native_lookup(manager.get_curr_conversation_id(umo), operation="conversation_id")
+            if not cid and self.linked_conversations.for_origin(umo) is not None:
+                # Admission refuses this turn; never open a replacement beside the link.
+                raise TaskError("linked_selection_changed", "a linked endpoint lost its shared conversation")
             if not cid:
                 create = getattr(manager, "new_conversation", None)
                 if not callable(create):
@@ -1181,6 +1181,7 @@ class MultiHostSession:
             presence, typing_context, typing_turn, prepared_ok = None, None, None, False
             try:
                 self.application.require_running()
+                self.linked_conversations.require_permit(event)
                 if plan is None:
                     captured = require(await (
                         self.bridge.capture_text_only(event)
