@@ -264,21 +264,32 @@ class LinkedConversationConcurrencyTests(LinkedReplyFixture, unittest.IsolatedAs
         self.assertEqual([write[0] for write in self.manager.writes], list(ORIGINS))
         self.assertEqual(self.contents(await self.history())[-2:], ["B", "reply-B"])
 
-    async def test_session_changing_and_unknown_commands_are_blocked_before_handlers(self):
+    async def test_session_commands_are_refused_and_other_plugins_commands_pass(self):
+        from astrbot.core.message.message_event_result import MessageChain
         called = []
-        for command in ("reset", "new", "provider", "set", "unset", "third_party_destructive"):
+        for command, name in (("reset", "reset"), ("new", "new_conv"), ("provider", "provider"),
+                              ("set", "set_variable"), ("unset", "unset_variable")):
             async def destructive(event):
                 called.append(event.message_str)
                 await self.manager.update_conversation(event.unified_msg_origin, "conversation-a", history=[])
-            self.builtin(command, destructive)
+            self.builtin(command, destructive, name)
+        async def update_stack(event):
+            called.append(event.message_str)
+            await event.send(MessageChain().message("stack updated"))
+        self.config["plugin_set"].append("synthetic_updater")
+        self.builtin("update_stack", update_stack, module="synthetic_updater.main")
         self.assertEqual((await self.link())["status"], "ok")
-        for index, text in enumerate(("/reset", "/new", "/provider", "/set", "/unset",
-                                      "/third_party_destructive", "陪伴 全部重置")):
+        for index, text in enumerate(("/reset", "/new", "/provider", "/set", "/unset", "陪伴 全部重置")):
             with self.subTest(text=text):
                 event = self.event_for(1, text, "command-" + str(index))
                 await asyncio.wait_for(await self.dispatch(event), 10)
                 self.assertTrue(event.is_stopped())
         self.assertEqual(called, [])
+        event = self.event_for(1, "/update_stack", "third-party-command")
+        await asyncio.wait_for(await self.dispatch(event), 10)
+        self.assertFalse(event.is_stopped())
+        self.assertEqual(len(called), 1)
+        self.assertIn("stack updated", str(self.sent[-1]))
         self.assertEqual(self.calls, [])
         self.assertEqual(self.manager.writes, [])
         self.assertEqual(self.contents(await self.history()), ["old", "old-reply"])

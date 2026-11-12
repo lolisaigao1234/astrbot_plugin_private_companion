@@ -16,6 +16,9 @@ from .linked_turn_gate import LinkedTurnGate
 
 KEY = "astrbot.private-conversation-links.v1"
 EXTRA = "companion_linked_turn_v1"
+# AstrBot 4.29.4's own commands that replace the conversation, switch the
+# provider or write session variables (handler names in its builtin_commands).
+SESSION_COMMANDS = frozenset({"reset", "new_conv", "provider", "set_variable", "unset_variable"})
 
 
 def origin(target):
@@ -243,10 +246,14 @@ class LinkedConversations:
             raise
 
     @staticmethod
-    def stop_only(event):
+    def native_command(event, names):
         handlers = event.get_extra("activated_handlers", ()) or ()
         return any(handler.handler_module_path == "astrbot.builtin_stars.builtin_commands.main"
-                   and handler.handler_name == "stop" for handler in handlers)
+                   and handler.handler_name in names for handler in handlers)
+
+    @staticmethod
+    def stop_only(event):
+        return LinkedConversations.native_command(event, ("stop",))
 
     def require_permit(self, event):
         link = self.for_event(event)

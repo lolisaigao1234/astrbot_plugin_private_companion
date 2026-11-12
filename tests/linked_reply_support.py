@@ -313,11 +313,11 @@ class LinkedReplyFixture(MultiFixture):
         with patch("astrbot_host.account_session_api.request", NS(username="owner", query={}, body=request_body)):
             return await AccountSessionWebAPI(self.controller).link_conversation()
 
-    def builtin(self, command, handler, name=None):
+    def builtin(self, command, handler, name=None, module="astrbot.builtin_stars.builtin_commands.main"):
         from astrbot.core.star.filter.command import CommandFilter
-        module = "astrbot.builtin_stars.builtin_commands.main"
         if module not in star_map:
-            star_map[module] = StarMetadata(name="builtin_commands", module_path=module, reserved=True)
+            star_map[module] = StarMetadata(name=module.split(".")[-2], module_path=module,
+                reserved=module.startswith("astrbot."))
             self.addCleanup(star_map.pop, module, None)
         metadata = StarHandlerMetadata(EventType.AdapterMessageEvent, module + "." + command,
             name or handler.__name__, module, handler, [])

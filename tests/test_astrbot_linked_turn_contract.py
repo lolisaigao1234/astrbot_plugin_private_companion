@@ -32,6 +32,16 @@ class AstrBotSourceContractTests(unittest.TestCase):
         self.assertIn("break", scheduler)
         self.assertNotIn("aclose()", scheduler)
 
+    def test_native_commands_are_the_known_set_so_a_new_session_command_is_noticed(self):
+        # Parsed, not imported: importing the module would register the real commands.
+        import ast
+        from importlib.util import find_spec
+        from pathlib import Path
+        from astrbot_host.linked_conversations import SESSION_COMMANDS
+        source = Path(find_spec("astrbot.builtin_stars.builtin_commands.main").origin).read_text(encoding="utf-8")
+        handlers = {node.name for node in ast.walk(ast.parse(source)) if isinstance(node, ast.AsyncFunctionDef)}
+        self.assertEqual(handlers, SESSION_COMMANDS | {"help", "sid", "name", "stop", "stats", "update_dashboard"})
+
 
 class AstrBotRuntimeContractTests(LinkedReplyFixture, unittest.IsolatedAsyncioTestCase):
     async def test_waiting_hook_owns_pipeline_task_before_native_lock_and_stop_prevents_model_and_save(self):
