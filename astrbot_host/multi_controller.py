@@ -237,15 +237,15 @@ class AstrBotMultiController:
     async def serve_available_accounts(self):
         """Run the start-up work of accounts that became available while the host runs.
 
-        Returns whether every configured account is now served, so late pick-up
-        knows when it has nothing left to wait for.
+        Returns whether nothing is left to pick up: every configured account is
+        served and no window's start-up work is left to try again.
         """
         async with self._lifecycle_lock:
             session = self.session
             if self._terminated or session is None or session.application.state != "running":
                 return True
-            await session.bind_available_targets(late=True)
-            return not self._report_waiting_accounts()
+            failed = await session.bind_available_targets(late=True)
+            return not self._report_waiting_accounts() and not failed
 
     async def _serve_late_accounts(self):
         delay = 0.5

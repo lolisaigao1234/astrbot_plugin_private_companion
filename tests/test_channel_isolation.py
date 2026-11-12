@@ -188,6 +188,42 @@ class LateChannelTests(ChannelIsolationFixture, unittest.IsolatedAsyncioTestCase
         await install_history(self, QQ_WINDOW)
         self.assertEqual(await self.qq_reply(), ["我在 QQ 这里"])
 
+    async def test_a_late_window_whose_start_up_work_fails_is_tried_again_and_holds_up_no_other(self):
+        self.controller = self.plugin.staging = self.make_controller(multi_config(
+            targets=[dict(target_id="qq-owner", platform_id="qq-main", account_id="100",
+                          bot_id="bot-a", participant_id="200"),
+                     dict(target_id="qq-friend", platform_id="qq-main", account_id="100",
+                          bot_id="bot-a", participant_id="201"),
+                     dict(target_id="tg-owner", platform_id="tg-main", account_id="tg-main",
+                          bot_id="bot-tg", participant_id=str(OWNER))],
+            personas=[dict(bot_id="bot-a", persona_id="original", role_id="role-a"),
+                      dict(bot_id="bot-tg", persona_id="original", role_id="role-tg")],
+            group_targets=[]))
+        self.window_personas["qq-main:FriendMessage:201"] = "original"
+        self.qq_disconnect()
+        self.assertTrue(await self.boot())
+        first, second = [target.participant_id for target in self.controller.settings.primary_targets
+                         if target.platform_id == "qq-main"]
+        # AstrBot's own lookup fails for the first late window, and not with a companion error.
+        failing = {"qq-main:FriendMessage:" + first}
+        lookup = self.native.conversation_manager.get_curr_conversation_id
+
+        async def conversation_id(umo):
+            if umo in failing:
+                raise OSError("synthetic native lookup failure")
+            return await lookup(umo)
+
+        self.native.conversation_manager.get_curr_conversation_id = conversation_id
+        life = self.controller.session.application.life_runtime
+        with patch.object(life, "bind", wraps=life.bind) as bind:
+            def started():
+                return [call.args[0].scope.native_scope_id for call in bind.call_args_list]
+            self.qq_connect()
+            await self.until(lambda: started() == [second])
+            failing.clear()
+            await self.until(lambda: len(started()) > 1)
+            self.assertEqual(started(), [second, first])
+
     async def test_an_account_offline_at_a_dashboard_start_is_served_when_it_comes_online(self):
         self.qq_disconnect()
         # The Dashboard's Start, with no plugin start-up loop behind it.
