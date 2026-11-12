@@ -11,8 +11,8 @@ import traceback
 from uuid import uuid4
 
 from companion_v2.adapters.astrbot.native import (
-    HostPersona, NativePrivateBridge, bounded_native_lookup, event_account_id, event_peer_id,
-    native_client_connected, persona_instruction, platform_client_matches, supported_platform_name,
+    HostPersona, NativePrivateBridge, bounded_native_lookup, event_account_id, event_native_client, event_peer_id,
+    native_client_connected, persona_instruction, platform_client_matches, private_event_supported, supported_platform_name,
 )
 from companion_v2.adapters.astrbot.group import group_event_route
 from companion_v2.adapters.astrbot.provider import provider_fingerprint
@@ -447,10 +447,13 @@ class AstrBotMultiController:
 
     def handles_binding(self, event):
         from .recalls import is_notice_event
-        return (not is_notice_event(event) and is_private_message(event)
+        return (getattr(getattr(event, "platform_meta", None), "name", None) != "telegram"
+                and not is_notice_event(event) and is_private_message(event)
                 and parse_bind_command(message_text(event)).kind != "ignore")
 
     async def receive_binding(self, event):
+        if getattr(getattr(event, "platform_meta", None), "name", None) == "telegram":
+            return {"handled": False}
         request = parse_bind_command(message_text(event))
         if request.kind == "ignore":
             return {"handled": False}
@@ -1239,6 +1242,8 @@ class AstrBotMultiController:
         if not isinstance(event, self.native_types.event) or self.settings is None:
             return None
         try:
+            if not private_event_supported(event):
+                return None
             message, session, meta = event.message_obj, event.session, event.platform_meta
             if getattr(message.type, "value", None) == "GroupMessage":
                 route = group_event_route(event)
@@ -1257,10 +1262,17 @@ class AstrBotMultiController:
                     or event.unified_msg_origin != f"{meta.id}:FriendMessage:{sender}"):
                 return None
             target = self.settings.private_target(meta.id, login, sender)
+            if meta.name == "telegram":
+                from companion_v2.adapters.astrbot.telegram import explicit_target
+                if not explicit_target(self.settings, target):
+                    return None
             platform = self.context.get_platform_inst(meta.id)
             if target is None or platform is None:
                 return None
-            if not platform_client_matches(platform, event.bot):
+            if (meta.name == "telegram" and (platform.meta().name != "telegram"
+                    or platform.meta().id != meta.id or not native_client_connected(platform, login))):
+                return None
+            if not platform_client_matches(platform, event_native_client(event)):
                 return None
             return self.settings.effective_private_target(target)
         except (ValueError, AttributeError, TypeError):
