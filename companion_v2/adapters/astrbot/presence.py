@@ -2,7 +2,7 @@
 
 from companion_v2.execution.models import require
 from companion_v2.foundation.outcome import Outcome
-from .native import route_id
+from .native import principal_host_id, route_id
 
 
 class OneBotPresencePort:
@@ -13,7 +13,7 @@ class OneBotPresencePort:
         try:
             scope, principal = context.scope, context.actor.principal
             if (context.audience.recipients != (context.actor.subject,)
-                    or principal.host_id != self.bridge.host_id or principal.account_id != scope.account_id
+                    or principal.host_id != principal_host_id(self.bridge, scope) or principal.account_id != scope.account_id
                     or principal.bot_id != scope.bot_id or principal.platform != scope.platform
                     or route_id(principal.native_account_id) != scope.native_scope_id):
                 return {"state": "not_started", "code": "presence_scope_mismatch"}

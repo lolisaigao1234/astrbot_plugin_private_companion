@@ -141,7 +141,10 @@ def intake_fields():
 
 def intake_settings(runtime, scope, role):
     """Read preferences only after the bridge has verified the native account and role."""
-    target = ConfigTarget(scope.installation_id, ConfigLayer.WINDOW, role, scope)
+    from companion_v2.conversation.linked_ownership import owner_scope
+    storage = owner_scope(runtime, scope)
+    target = ConfigTarget(scope.installation_id, ConfigLayer.WINDOW, role, scope,
+                          storage_scope=storage if storage != scope else None)
     fields = intake_fields()
     with runtime.read_snapshot():
         snapshot = MediaScopeSettingsOwner(runtime).read(target, fields)

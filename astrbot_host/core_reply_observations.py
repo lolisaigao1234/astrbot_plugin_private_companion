@@ -73,6 +73,8 @@ class CoreReplyObservations:
         def record():
             self.session.authorize(context)
             reference = self.owner.capture_input(context, native_input, turn_id=turn_id)
+            logger.info("[CompanionV2] companion_native_input turn_id=%s source_channel=%s",
+                        turn_id, context.scope.platform)
             if expression_signal_ids:
                 from companion_v2.execution.models import digest
                 from companion_v2.expression.feedback import stage_injection

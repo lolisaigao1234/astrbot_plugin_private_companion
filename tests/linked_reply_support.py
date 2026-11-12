@@ -76,16 +76,16 @@ class SyntheticFailureTool(FunctionTool):
 
 
 class LinkedQQEvent(AiocqhttpMessageEvent):
-    def __init__(self, platform, at, text, identifier="7"):
+    def __init__(self, platform, at, text, identifier="7", participant="200"):
         message = AstrBotMessage()
         message.type = MessageType.FRIEND_MESSAGE
         message.self_id = "100" if platform.meta().id == "qq-main" else "101"
-        message.sender = MessageMember("200", "Synthetic owner")
+        message.sender = MessageMember(participant, "Synthetic owner")
         message.message_id, message.message, message.raw_message = identifier, [Plain(text)], {"post_type": "message"}
         meta = platform.meta()
         meta.support_streaming_message = False
         meta.support_proactive_message = False
-        super().__init__(text, message, meta, "200", platform.get_client())
+        super().__init__(text, message, meta, participant, platform.get_client())
         self.created_at = at.timestamp()
         self.stream_invocations = 0
         self.transport_chunks = []
@@ -103,6 +103,8 @@ class LinkedQQEvent(AiocqhttpMessageEvent):
 
 
 class LinkedReplyFixture(MultiFixture):
+    origins = ORIGINS
+
     async def asyncSetUp(self):
         self.types = replace(self.types, event=LinkedQQEvent, session_persona_override_lookup=None)
         self.config = deepcopy(DEFAULT_CONFIG)
@@ -117,7 +119,7 @@ class LinkedReplyFixture(MultiFixture):
         await self.db.initialize()
         self.addAsyncCleanup(self.db.engine.dispose)
         self.manager = RecordedConversations(self.db)
-        for origin, cid in zip(ORIGINS, ("conversation-a", "conversation-b")):
+        for origin, cid in zip(self.origins, ("conversation-a", "conversation-b")):
             await self.db.create_conversation(origin, origin.split(":")[0], cid=cid, persona_id="original",
                 content=[{"role": "user", "content": "old" if cid == "conversation-a" else "separate-old"},
                          {"role": "assistant", "content": "old-reply" if cid == "conversation-a" else "separate-reply"}])
@@ -158,11 +160,11 @@ class LinkedReplyFixture(MultiFixture):
             self.calls.append({key: deepcopy(args.get(key)) for key in
                                ("contexts", "prompt", "session_id", "conversation_id", "model")})
             origin = args["session_id"]
-            if self.pause_model and origin == ORIGINS[0]:
+            if self.pause_model and origin == self.origins[0]:
                 self.model_done.set()
                 await self.allow_model.wait()
             self.model_rounds[origin] = self.model_rounds.get(origin, 0) + 1
-            if origin == ORIGINS[0] and self.model_rounds[origin] == 1:
+            if origin == self.origins[0] and self.model_rounds[origin] == 1:
                 if self.provider_mode == "provider_error":
                     return LLMResponse(role="err", completion_text="synthetic provider error")
                 if self.provider_mode in ("tool", "tool_failure"):
@@ -170,19 +172,19 @@ class LinkedReplyFixture(MultiFixture):
                     return LLMResponse(role="assistant", completion_text="", tools_call_ids=["synthetic-tool-call"],
                         tools_call_name=[native_tool_name("turn.evidence") if self.provider_mode == "tool"
                                          else "synthetic_failure"], tools_call_args=[{}])
-            if self.pause_final_model and origin == ORIGINS[0]:
+            if self.pause_final_model and origin == self.origins[0]:
                 self.final_model_done.set()
                 await self.allow_final_model.wait()
-            if self.model_error and origin == ORIGINS[0]:
+            if self.model_error and origin == self.origins[0]:
                 raise self.model_error
-            return LLMResponse(role="assistant", completion_text="reply-A" if origin == ORIGINS[0] else "reply-B")
+            return LLMResponse(role="assistant", completion_text="reply-A" if origin == self.origins[0] else "reply-B")
 
         async def text_chat_stream(**args):
             self.stream_calls.append(args["session_id"])
             response = await text_chat(**args)
             if response.role == "assistant" and not response.tools_call_name:
                 yield LLMResponse(role="assistant", completion_text="reply-", is_chunk=True)
-                yield LLMResponse(role="assistant", completion_text="A" if args["session_id"] == ORIGINS[0] else "B", is_chunk=True)
+                yield LLMResponse(role="assistant", completion_text="A" if args["session_id"] == self.origins[0] else "B", is_chunk=True)
             yield response
 
         self.provider = NS(provider_config={"id": "native-model", "modalities": ["text"]},
@@ -234,7 +236,7 @@ class LinkedReplyFixture(MultiFixture):
         ):
             self.register(kind, method)
         async def pause_completed_model(event, response):
-            if self.pause_after_response and event.unified_msg_origin == ORIGINS[0]:
+            if self.pause_after_response and event.unified_msg_origin == self.origins[0]:
                 self.model_done.set()
                 await self.allow_model.wait()
         self.register(EventType.OnLLMResponseEvent, pause_completed_model, priority=2000000)
@@ -268,8 +270,8 @@ class LinkedReplyFixture(MultiFixture):
         await asyncio.gather(*tuple(self.bus._pending_tasks), return_exceptions=True)
 
     def event_for(self, index, text=None, identifier="7"):
-        return LinkedQQEvent(self.native.platforms[ORIGINS[index].split(":")[0]], self.clock.now(),
-            text or ("A" if index == 0 else "B"), identifier)
+        return LinkedQQEvent(self.native.platforms[self.origins[index].split(":")[0]], self.clock.now(),
+            text or ("A" if index == 0 else "B"), identifier, self.origins[index].split(":")[-1])
 
     async def dispatch(self, event):
         await self.queue.put(event)
@@ -281,7 +283,7 @@ class LinkedReplyFixture(MultiFixture):
         self.fail("EventBus did not create the pipeline task")
 
     async def history(self):
-        conversation = await self.manager.get_conversation(ORIGINS[0], "conversation-a")
+        conversation = await self.manager.get_conversation(self.origins[0], "conversation-a")
         return json.loads(conversation.history)
 
     @staticmethod

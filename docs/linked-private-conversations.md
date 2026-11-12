@@ -1,8 +1,8 @@
 # Explicit private conversation links
 
-Ticket #3 links native **model history** only. Memory, relationships, companion state,
-window settings and companion logs keep their existing physical owners (ticket #11).
+Explicit links share native model history and the companion owners described below.
 AstrBot, its event origins, provider/tool runner, history format and transports are unchanged.
+Ticket #11 is partially implemented; scheduling and agenda boundaries remain below.
 
 ## Management
 
@@ -45,6 +45,41 @@ The original endpoint need not remain connected or in the member list. The ancho
 conversation/role metadata rather than a live endpoint dependency. Detached endpoints remain
 refused, including when the initial source is omitted from membership. They cannot continue
 unguarded against the shared CID. Fresh independent admission/unlink controls belong to #7.
+
+## Shared companion owners
+
+The persisted anchor records the existing conversation's logical bot, role, human subject
+and storage scope. Older link records resolve the human through that anchor's persisted
+route. An older linked endpoint whose exact route already records a different human
+cannot silently adopt another recipient; that conflict is refused rather than rewriting
+historical provenance. Owner resolution never needs the first endpoint's live client. Linking neither
+copies the joining endpoint's old records nor rewrites either endpoint's history.
+
+- Long-term facts, relationship memory, the role body and its maintenance key use their
+  existing bot/role/human owners. Person cards use the anchor's storage scope.
+- Window settings use the anchor for storage and the requesting endpoint for authorization
+  and operation receipts. Role and relationship settings retain their existing owners.
+- Timeline and journal readers include the linked physical scopes. Original activity,
+  evidence, journal and operation records keep their source scope.
+- The native per-role usage view includes the linked accounts without changing stored
+  usage keys. Each native turn appears once and includes `source_channel`. The AstrBot
+  plugin logger records one `companion_native_input` line per admitted input with its
+  turn ID and physical source channel.
+
+The task's authentication, audience, transport and source references remain physical.
+Additional endpoints use a separate private principal binding; the native binding used
+by unrelated conversations and groups is preserved. A linked principal cannot inherit
+subject-level core/maintenance access, and shared-source reads still require that
+endpoint's own action grant. Dashboard administration remains a separate authentication
+path. Without an explicit link, owner resolution leaves existing addresses unchanged.
+
+This does **not** yet unify notes, reminders, non-role calendar records, proactive/life
+schedules or window budget accounts. Their owners are coupled to physical delivery or
+exact-scope accounting and need further work. Only role-state maintenance already has a
+shared schedule key. Exact-window diagnostic/legacy usage views also remain physical.
+The plugin's existing Dashboard log-buffer behavior is unchanged; the tagged input log
+is available through AstrBot's plugin logging. Startup still requires configured accounts
+to be online; independent offline startup is ticket #12.
 
 ## Turn lifetime
 
@@ -94,8 +129,8 @@ and cannot race first-link creation. Unlinked coordination and reply preparation
   by physical origin and message ID, and survives plugin import reload. Durable redelivery
   across a process restart remains deferred per the owner's priorities.
 - Send exceptions retain existing unknown-outcome accounting. There is no automatic replay.
-- Shared memory/state/settings/logs (#11), Telegram linked dialogue (#4), coherent controls (#7),
-  cross-endpoint stop, preferred background delivery and operational recovery are separate work.
+- Completing the remaining shared owners (#11), Telegram linked dialogue (#4), coherent controls
+  (#7), cross-endpoint stop, preferred background delivery and operational recovery remain work.
 
 ## Offline proof
 
@@ -126,7 +161,7 @@ installed plugin or a live data directory:
 
 ```sh
 python -X utf8 -m unittest -q \
-  tests.test_linked_conversation tests.test_astrbot_linked_turn_contract \
+  tests.test_linked_owners tests.test_linked_conversation tests.test_astrbot_linked_turn_contract \
   tests.test_core_reply_conversation_ownership tests.test_telegram_private_reply
 ```
 

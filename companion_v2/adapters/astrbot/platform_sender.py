@@ -25,6 +25,7 @@ from companion_v2.delivery.models import DeliveryEnvelope
 from companion_v2.execution.models import TaskError, digest, require
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.foundation.refs import ScopeKind
+from .native import principal_host_id
 
 
 logger = logging.getLogger(__name__)
@@ -155,7 +156,7 @@ class AstrBotPlatformSender:
                     or (not has_message_content and envelope.poke is None)
                     or (not envelope.text.strip() and envelope.text != "" and not images)
                     or len(envelope.text) > 65536
-                    or principal.host_id != self.bridge.host_id
+                    or principal.host_id != principal_host_id(self.bridge, scope)
                     or principal.installation_id != scope.installation_id
                     or principal.platform != scope.platform
                     or principal.bot_id != scope.bot_id

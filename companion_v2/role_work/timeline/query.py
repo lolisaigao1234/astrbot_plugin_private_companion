@@ -1,6 +1,7 @@
 """Bounded index reads of immutable versions and metadata-only journal receipts."""
 
 from companion_v2.execution.models import digest, encode
+from companion_v2.conversation.linked_ownership import shared_scopes
 
 
 SCAN_LIMIT = 64
@@ -24,10 +25,12 @@ def streams(kinds):
 
 def ceilings(runtime, owner, scope, kinds):
     result = {}
+    scopes = tuple(encode(s) for s in shared_scopes(runtime, scope))
+    slots = ",".join("json(?)" for _ in scopes)
     for name in streams(kinds):
         table, _, _, _, _, scope_sql, condition = STREAMS[name]
         row = runtime.read_one(f"SELECT COALESCE(MAX(r.rowid), 0) AS ceiling FROM {table} "
-            f"WHERE r.owner_key = ? AND {scope_sql} = json(?) AND {condition}", (digest(owner), encode(scope)))
+            f"WHERE r.owner_key = ? AND {scope_sql} IN ({slots}) AND {condition}", (digest(owner), *scopes))
         result[name] = row["ceiling"]
     return result
 
@@ -36,12 +39,14 @@ def candidates(runtime, owner, scope, snapshot):
     query, included = snapshot["query"], snapshot["included_kinds"]
     end = min(query["time_end"], snapshot["captured_at"]) if query["time_end"] else snapshot["captured_at"]
     combined = []
+    scopes = tuple(encode(s) for s in shared_scopes(runtime, scope))
+    slots = ",".join("json(?)" for _ in scopes)
     for name in streams(included):
         table, time_sql, kind_sql, id_sql, revision_sql, scope_sql, condition = STREAMS[name]
         sql = (f"SELECT {time_sql} AS occurred_at, {kind_sql} AS kind, {id_sql} AS identifier, {revision_sql} AS revision "
-               f"FROM {table} WHERE r.owner_key = ? AND {scope_sql} = json(?) AND {condition} AND r.rowid <= ? "
+               f"FROM {table} WHERE r.owner_key = ? AND {scope_sql} IN ({slots}) AND {condition} AND r.rowid <= ? "
                f"AND {time_sql} <= ?")
-        args = [digest(owner), encode(scope), snapshot["ceilings"][name], end]
+        args = [digest(owner), *scopes, snapshot["ceilings"][name], end]
         if query["time_start"] is not None:
             sql += f" AND {time_sql} >= ?"
             args.append(query["time_start"])

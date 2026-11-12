@@ -17,6 +17,7 @@ from companion_v2.relationships.private_access import (DEFAULT_FOR_CAPABILITY, R
 from companion_v2.storage.codec import scope_values
 from companion_v2.adapters.astrbot.native import native_user_subject_id
 from .group_settings import GroupTarget
+from companion_v2.conversation.linked_ownership import with_owner, link_for_endpoint, PRIVATE_HOST_ID
 
 
 logger = logging.getLogger(__name__)
@@ -171,9 +172,27 @@ class MultiAuthority:
             return ("account", "private_target", "persona")
         return ()
 
+    def conversation_link(self, target, participant_id=None):
+        if isinstance(target, GroupTarget):
+            return None
+        return link_for_endpoint(self.runtime, target.platform_id, target.account_id,
+                                 participant_id if participant_id is not None else target.participant_id)
+
+    def bot_id(self, target, participant_id=None):
+        link = self.conversation_link(target, participant_id)
+        return link["anchor"]["scope"]["bot_id"] if link else target.bot_id
+
     def principal(self, target, participant_id=None):
-        return AuthenticatedHostPrincipal(self.runtime.installation_id, HOST_ID, target.platform_id,
-            participant_id if participant_id is not None else target.participant_id, target.bot_id, target.account_id)
+        link = self.conversation_link(target, participant_id)
+        peer = participant_id if participant_id is not None else target.participant_id
+        anchor = link["anchor"]["scope"] if link else None
+        joined = anchor is not None and (target.platform_id, target.account_id, peer) != (
+            anchor["platform"], anchor["account_id"], anchor["native_scope_id"])
+        # A private link must not supersede the native binding used by groups
+        # or by this endpoint's previously independent conversation.
+        return AuthenticatedHostPrincipal(self.runtime.installation_id, PRIVATE_HOST_ID if joined else HOST_ID, target.platform_id,
+            participant_id if participant_id is not None else target.participant_id,
+            self.bot_id(target, participant_id), target.account_id)
 
     def actor(self, target, participant_id=None):
         actor = require(self.identities.resolve_authenticated(self.principal(target, participant_id), observed_at=self.now()))
@@ -182,6 +201,17 @@ class MultiAuthority:
         return actor
 
     def subject(self, target, participant_id=None):
+        link = self.conversation_link(target, participant_id)
+        if link:
+            if "subject" in link["anchor"]:
+                data = link["anchor"]["subject"]
+                return SubjectRef(data["installation_id"], SubjectKind(data["kind"]), data["subject_id"])
+            # Ticket #3 anchors predate the explicit subject. Their persisted
+            # route owns the human even if the original endpoint is unavailable.
+            route = self.personas.route(ScopeRef.restore(link["anchor"]["scope"]))
+            if route is None:
+                raise TaskError("linked_anchor_missing", "the linked conversation has no persisted owner route")
+            return route.user
         participant = participant_id if participant_id is not None else target.participant_id
         name = self.platform_name(target.platform_id) if callable(self.platform_name) else ""
         try:
@@ -197,7 +227,8 @@ class MultiAuthority:
 
     def ensure_actor(self, target, participant_id=None):
         identifier = self.identity_id(target, participant_id)
-        if self.runtime.read_one("SELECT 1 FROM identity_bindings WHERE binding_id = ?", (identifier,)) is None:
+        existing = self.identities.resolve_authenticated(self.principal(target, participant_id), observed_at=self.now())
+        if existing.failure is not None and existing.failure.code == "unbound_identity":
             self.identities.bind(binding_id=identifier, principal=self.principal(target, participant_id),
                 subject=self.subject(target, participant_id), valid_from=datetime.fromisoformat(self.require_manifest()["valid_from"]),
                 expected_revision=self.identities.revision)
@@ -244,7 +275,7 @@ class MultiAuthority:
                 if target.participant_id == "*":
                     continue
                 principal = self.principal(target)
-                existing = self.identities.resolve_authenticated(principal, observed_at=at)
+                existing = self.identities.resolve_authenticated(principal, observed_at=self.now())
                 if existing.failure is None:
                     if existing.unwrap().subject != self.subject(target):
                         raise TaskError("host_identity_changed", "the configured participant identity changed")
@@ -290,8 +321,11 @@ class MultiAuthority:
             raise TaskError("host_target_unavailable", "the native conversation route is unavailable")
 
     def _scope(self, target, scope, role):
-        local_role = any(p.bot_id == target.bot_id and p.role_id == role.subject_id
+        local_role = any(p.bot_id == self.bot_id(target) and p.role_id == role.subject_id
                          for p in self.settings.personas)
+        conversation = self.conversation_link(target)
+        if conversation:
+            local_role = role.subject_id == conversation["anchor"]["role"]["subject_id"]
         if not local_role:
             link = self.settings.window_link_for_target(target.target_id)
             if link is not None and link.mode == "role":
@@ -300,7 +334,7 @@ class MultiAuthority:
                                  for p in self.settings.personas)
         if (scope.installation_id != self.runtime.installation_id or scope.kind.value != "private"
                 or (scope.platform, scope.account_id, scope.bot_id, scope.native_scope_id, scope.session_id)
-                != (target.platform_id, target.account_id, target.bot_id, target.participant_id, target.participant_id)
+                != (target.platform_id, target.account_id, self.bot_id(target), target.participant_id, target.participant_id)
                 or role.installation_id != self.runtime.installation_id
                 or not local_role):
             raise TaskError("host_target_mismatch", "scope and role must come from this configured private target")
@@ -345,7 +379,7 @@ class MultiAuthority:
             # 私聊权限的默认值：决定"新用户一开始有没有这两项权限"。
             # 默认关的能力**不签发**——没有授权就是没有权限，页面也会如实显示"未授权"；
             # 默认开的能力即使不在配置能力表里也签发（表管的是宿主能力，不是这两项按人权限）。
-            context = TaskContext(actor, resolution.binding, AudienceRef(scope, (actor.subject,)))
+            context = with_owner(self.runtime, TaskContext(actor, resolution.binding, AudienceRef(scope, (actor.subject,))))
             pending = self._defaults(context)
             decided = {grant.capability for grant in self.identities.grants_for_subject(actor.subject)
                        if grant.subject == actor.subject and grant.scope == scope
@@ -401,6 +435,9 @@ class MultiAuthority:
         the upgrade path.  Only fill a missing tier/grant: an explicit downgrade or
         revoke is a decision and must survive restarts.
         """
+        from companion_v2.conversation.linked_ownership import joined_principal
+        if joined_principal(context.actor.principal):
+            return
         policy = ObjectAccessPolicy(self.runtime)
         tier = self.runtime.read_one(
             "SELECT tier FROM subject_access_tiers WHERE subject_kind = ? AND subject_id = ?",
@@ -522,7 +559,7 @@ class MultiAuthority:
             if binding.role != role:
                 raise TaskError("host_persona_binding_changed", "the private persona binding changed")
             self.write(self.context_key(target, role_id), scope.document())
-        return TaskContext(actor, binding, AudienceRef(scope, (actor.subject,)))
+        return with_owner(self.runtime, TaskContext(actor, binding, AudienceRef(scope, (actor.subject,))))
 
     def authorize_delivery(self, target_id, expires_at):
         """正式版：不再需要投递授权，这里只回报"无需授权"。"""

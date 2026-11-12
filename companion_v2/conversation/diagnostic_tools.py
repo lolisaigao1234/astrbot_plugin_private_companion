@@ -89,7 +89,8 @@ def diagnostic_query(context: DiagnosticContext, arguments: dict, diagnostics: D
         if target_kind == "role":
             target = ConfigTarget(context.scope.installation_id, ConfigLayer.ROLE, role, bot_id=context.scope.bot_id)
         elif target_kind == "current_window":
-            target = ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW, role, context.scope)
+            target = ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW, role, context.scope,
+                        storage_scope=getattr(context, "storage_scope", None))
         elif target_kind == "current_scope":
             target = ConfigTarget(context.scope.installation_id, ConfigLayer.SCOPE, scope=context.scope)
         elif target_kind == "current_relationship":

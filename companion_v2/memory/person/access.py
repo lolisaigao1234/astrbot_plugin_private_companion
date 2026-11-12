@@ -21,13 +21,13 @@ def person_owner_key(installation_id, platform, bot_id, account_id, subject_id, 
 
 
 def owner_key(context):
-    scope = context.scope
+    scope = context.owner_scope
     return person_owner_key(scope.installation_id, scope.platform, scope.bot_id, scope.account_id,
                             context.actor.subject.subject_id, context.role_binding.role.subject_id)
 
 
 def owner_for_subject(context, subject_id):
-    scope = context.scope
+    scope = context.owner_scope
     return person_owner_key(scope.installation_id, scope.platform, scope.bot_id, scope.account_id,
                             subject_id, context.role_binding.role.subject_id)
 

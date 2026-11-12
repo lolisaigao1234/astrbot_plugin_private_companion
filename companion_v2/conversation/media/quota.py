@@ -104,7 +104,8 @@ class ImageQuotaGate:
 
     def _limit(self, context, scope):
         target = ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW, context.role_binding.role,
-                              context.scope, subject=context.actor.subject)
+                              context.scope, subject=context.actor.subject,
+                              storage_scope=getattr(context, "storage_scope", None))
         snapshot = self.owner.read(target, QUOTA_FIELDS)
         return snapshot.fields[GROUP + "." + scope + "_max_daily"].value
 

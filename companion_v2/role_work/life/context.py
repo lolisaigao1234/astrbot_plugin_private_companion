@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import json
 from zoneinfo import ZoneInfo
 
+from companion_v2.conversation.linked_ownership import same_conversation, link_for_scope
 from companion_v2.execution.models import TaskError, digest, require
 from companion_v2.foundation.refs import RoleOwnerRef
 from companion_v2.role_work.journal.models import JournalKey, JournalKind
@@ -54,14 +55,15 @@ class RoleLifeContextReader:
         require(self.tasks.authorize_context(context, action=READ_ACTION, observed_at=at))
 
     def _source(self, source, context, at, content_hash=None):
-        if source.scope != context.scope:
+        if not same_conversation(self.runtime, context.scope, source.scope):
             raise TaskError("life_context_scope", "life source belongs to another conversation")
         require(self.journal.sources.validate_reference_for_audience(source,
             recipient=context.actor.subject, observed_at=at, expected_content_hash=content_hash))
 
     def _activity(self, activity, context, at):
-        if (activity.owner != self.owner(context) or activity.scope != context.scope
-                or activity.work is not None and activity.work.context_key != context.key):
+        if (activity.owner != self.owner(context) or not same_conversation(self.runtime, context.scope, activity.scope)
+                or activity.work is not None and activity.work.context_key != context.key
+                and link_for_scope(self.runtime, context.scope) is None):
             raise TaskError("life_context_scope", "activity belongs to another original authority")
         if activity.updated_at > at:
             raise TaskError("life_context_not_active", "activity is not available at this time")

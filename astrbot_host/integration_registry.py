@@ -272,7 +272,8 @@ class UnifiedCompanionExtensionAPI:
     def _task_model_route(self, application, context, kind):
         group = "model." + str(kind or "").strip()
         target = ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW,
-                              context.role_binding.role, context.scope, subject=context.actor.subject)
+                              context.role_binding.role, context.scope, subject=context.actor.subject,
+                              storage_scope=getattr(context, "storage_scope", None))
         snapshot = application.configuration.read(
             context.actor, target=target, group_id=group, observed_at=application.now())
         if not snapshot.is_success:

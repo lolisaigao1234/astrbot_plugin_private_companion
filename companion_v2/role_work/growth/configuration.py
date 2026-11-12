@@ -79,7 +79,8 @@ def skills_enabled(runtime, context):
 
 
 def target_for(context):
-    return ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW, context.role_binding.role, context.scope)
+    return ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW, context.role_binding.role, context.scope,
+                        storage_scope=getattr(context, "storage_scope", None))
 
 
 def skill_target_for(context):

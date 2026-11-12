@@ -189,7 +189,8 @@ def _configuration_target(context):
         return None
     try:
         return ConfigTarget(installation_id, ConfigLayer.WINDOW, role, scope,
-                            bot_id=getattr(scope, "bot_id", None))
+                            bot_id=getattr(scope, "bot_id", None),
+                            storage_scope=getattr(context, "storage_scope", None))
     except (TypeError, ValueError):
         return None
 

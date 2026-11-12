@@ -311,7 +311,8 @@ def build_core_reply_prompt(application, context, native_input, *, at, keyword_m
         prompt = profile.default_prompt
         try:
             target = ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW,
-                                  context.role_binding.role, context.scope)
+                                  context.role_binding.role, context.scope,
+                                  storage_scope=getattr(context, "storage_scope", None))
             snapshot = require(application.router.configuration.read(
                 context.actor, target=target, group_id=profile.group, observed_at=at))
             prompt = snapshot.fields[profile.group + ".prompt"].value

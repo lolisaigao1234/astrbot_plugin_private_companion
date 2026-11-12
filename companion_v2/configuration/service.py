@@ -71,6 +71,9 @@ class ConfigurationService:
 
     def _authorize(self, actor: ResolvedIdentity, target: ConfigTarget, capability: str, now: datetime,
                    *, core_only: bool = False):
+        from companion_v2.conversation.linked_ownership import owner_scope
+        if target.storage_scope is not None and target.storage_scope != owner_scope(self.runtime, target.scope):
+            raise ConfigurationError("configuration_owner_changed", "the stored settings owner is no longer current")
         if target.installation_id != self.runtime.installation_id:
             raise ConfigurationError("scope_installation_mismatch", "configuration belongs to another installation")
         access = _require(self.policy.scope_access(

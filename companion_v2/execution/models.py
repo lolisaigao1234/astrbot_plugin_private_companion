@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, fields, is_dataclass
+from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from datetime import datetime
 from enum import Enum
 import hashlib
@@ -52,7 +52,8 @@ def _dump(value: object, *, ensure_ascii: bool) -> str:
     def default(item):
         if is_dataclass(item):
             return {descriptor.name: getattr(item, descriptor.name) for descriptor in fields(item)
-                    if descriptor.metadata.get("encode", True)}
+                    if descriptor.metadata.get("encode", True)
+                    and not (descriptor.metadata.get("omit_none") and getattr(item, descriptor.name) is None)}
         if isinstance(item, datetime):
             return stamp(item)
         raise TypeError("unsupported task record value")
@@ -101,6 +102,11 @@ class TaskContext:
     actor: ResolvedIdentity
     role_binding: RoleBinding
     audience: AudienceRef
+    storage_scope: ScopeRef | None = field(default=None, metadata={"omit_none": True})
+
+    @property
+    def owner_scope(self) -> ScopeRef:
+        return self.storage_scope or self.scope
 
     def __post_init__(self):
         if self.role_binding.scope != self.audience.scope or not self.scope.is_resolved:
@@ -144,7 +150,8 @@ class TaskContext:
         scope = ScopeRef.restore(value["role_binding"]["scope"])
         return cls(identity, RoleBinding(scope, subject(value["role_binding"]["role"]), value["role_binding"]["revision"]),
                    AudienceRef(ScopeRef.restore(value["audience"]["scope"]),
-                               tuple(subject(item) for item in value["audience"]["recipients"])))
+                               tuple(subject(item) for item in value["audience"]["recipients"])),
+                   ScopeRef.restore(value["storage_scope"]) if value.get("storage_scope") else None)
 
 
 @dataclass(frozen=True)

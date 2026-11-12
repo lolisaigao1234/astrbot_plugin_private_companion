@@ -172,7 +172,8 @@ class LinkedConversations:
                     scope = ScopeRef(session.runtime.installation_id, source.platform_id, ScopeKind.PRIVATE,
                         source.participant_id, source.bot_id, source.account_id, conversation_key, source.participant_id)
                     anchor = {"target_id": source.target_id, "origin": origin(source),
-                              "scope": scope.document(), "role": asdict(role)}
+                              "scope": scope.document(), "role": asdict(role),
+                              "subject": asdict(session.authority.actor(source).subject)}
                 else:
                     anchor = old["anchor"]
                 signatures = [await self.settings(row["origin"], row["platform_name"], cid) for row in members]
@@ -197,6 +198,18 @@ class LinkedConversations:
                     records = self.records()
                     records[body["link_id"]] = record
                     session.authority.write(KEY, records)
+                    for target in targets:
+                        principal = session.authority.principal(target)
+                        subject = session.authority.subject(target)
+                        directory = session.authority.identities
+                        existing = directory.resolve_authenticated(principal, observed_at=session.now())
+                        if existing.failure is not None and existing.failure.code != "unbound_identity":
+                            from companion_v2.execution.models import require
+                            require(existing)
+                        if existing.failure is not None or existing.unwrap().subject != subject:
+                            directory.bind(binding_id="linked-person:" + digest([record["link_id"], principal,
+                                record["revision"]]), principal=principal, subject=subject,
+                                valid_from=session.now(), expected_revision=directory.revision)
                 self.gate.linked_cids.add(cid)
                 for row in members:
                     await manager.switch_conversation(row["origin"], cid)

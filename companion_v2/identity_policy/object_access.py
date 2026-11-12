@@ -268,13 +268,17 @@ class ObjectAccessPolicy:
                 (actor.subject.kind.value, actor.subject.subject_id),
             )
             tier = AuthorizationTier(row["tier"]) if row else AuthorizationTier.STANDARD
+            from companion_v2.conversation.linked_ownership import joined_principal, action_scope
+            joined = joined_principal(actor.principal)
+            if joined:
+                tier = AuthorizationTier.STANDARD
             if definition.core_only and tier is not AuthorizationTier.CORE:
                 return Outcome.failed("core_access_required", "action requires installation core membership")
             route = PersonaDirectory(self.runtime).route(scope) if (
                 allow_private_owner and definition.private_owner_without_grant
                 and scope.kind is ScopeKind.PRIVATE
             ) else None
-            private_owner_feature = route is not None and route.user == actor.subject
+            private_owner_feature = not joined and route is not None and route.user == actor.subject
             from .grants import PERSON_PERMISSION_GRANT_PREFIX
             explicit_private_decision = scope.kind is ScopeKind.PRIVATE and action in (
                 "conversation.reply", "proactive.contact") and any(
@@ -282,7 +286,13 @@ class ObjectAccessPolicy:
                     and grant.grant_id.startswith(PERSON_PERMISSION_GRANT_PREFIX)
                     for grant in self.identity.grants_for_subject(actor.subject))
             if explicit_private_decision or tier is AuthorizationTier.STANDARD and not private_owner_feature:
-                granted = self.identity.authorize(actor, scope=scope, capability=action, observed_at=observed_at)
+                permission_scope = scope
+                if scope.kind is ScopeKind.PRIVATE and (
+                        actor.principal.platform, actor.principal.account_id, actor.principal.native_account_id) != (
+                        scope.platform, scope.account_id, scope.native_scope_id):
+                    permission_scope = action_scope(self.runtime, actor.principal, scope)
+                granted = self.identity.authorize(actor, scope=permission_scope,
+                                                  capability=action, observed_at=observed_at)
                 if not granted.is_success:
                     return Outcome(failure=granted.failure)
             return Outcome.success(ObjectAccessDecision(tier, self.revision, identity.policy_revision))

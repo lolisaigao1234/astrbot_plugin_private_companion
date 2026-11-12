@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 import hashlib
 import json
@@ -51,6 +51,7 @@ class ConfigTarget:
     scope: ScopeRef | None = None
     bot_id: str | None = None
     subject: SubjectRef | None = None
+    storage_scope: ScopeRef | None = field(default=None, metadata={"omit_none": True})
 
     def __post_init__(self) -> None:
         if self.bot_id is not None and (not self.bot_id or self.bot_id != self.bot_id.strip()):
@@ -83,6 +84,12 @@ class ConfigTarget:
                 raise ReferenceValidationError("window target requires its installation scope")
         elif self.scope is not None:
             raise ReferenceValidationError("only window targets have a scope")
+        if self.storage_scope is not None and (
+                self.layer is not ConfigLayer.WINDOW or self.scope is None
+                or self.storage_scope.installation_id != self.installation_id
+                or self.storage_scope.kind is not ScopeKind.PRIVATE
+                or self.storage_scope.bot_id != self.bot_id):
+            raise ReferenceValidationError("linked settings require their private conversation owner")
         self.authorization_scope
 
     def document(self) -> dict:
@@ -94,7 +101,7 @@ class ConfigTarget:
         if self.bot_id is not None:
             result["bot_id"] = self.bot_id
         if self.scope is not None and self.scope.is_resolved:
-            result["scope"] = self.scope.document()
+            result["scope"] = (self.storage_scope or self.scope).document()
         if self.subject is not None:
             result["subject_id"] = self.subject.subject_id
         return result
