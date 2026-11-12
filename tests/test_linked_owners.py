@@ -314,6 +314,23 @@ class LinkedDistinctPrincipalTests(LinkedOwnerTests):
         config["multi_host"]["targets"][1]["participant_id"] = "201"
         return super().make_controller(config)
 
+    async def test_anchor_endpoint_cannot_use_private_ownership_to_bypass_its_action_grant(self):
+        from companion_v2.identity_policy.object_access import ObjectAccessPolicy
+        self.assertEqual((await self.link())["status"], "ok")
+        first = (await self.turn(0, "First source", "anchor-permission-a"))["context"]
+        second = (await self.turn(1, "Second source", "anchor-permission-b"))["context"]
+        directory = self.controller.authority.identities
+        for grant in directory.grants_for_subject(first.actor.subject):
+            if grant.scope == first.scope and grant.capability == "memory.read":
+                directory.revoke_grant(grant.grant_id, revoked_at=self.clock.now(),
+                                       expected_revision=directory.revision)
+        policy = ObjectAccessPolicy(self.app.runtime)
+        for scope in (first.scope, second.scope):
+            result = policy.scope_access(first.actor, scope=scope, action="memory.read",
+                allow_private_owner=True, observed_at=self.clock.now())
+            self.assertFalse(result.is_success)
+            self.assertEqual(result.failure.code, "authorization_revoked")
+
     async def test_joining_admin_endpoint_does_not_promote_the_conversation_owner(self):
         from companion_v2.identity_policy.object_access import ObjectAccessPolicy
         policy = ObjectAccessPolicy(self.app.runtime)

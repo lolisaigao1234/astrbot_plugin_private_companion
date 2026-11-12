@@ -356,12 +356,17 @@ class LinkedConversationConcurrencyTests(LinkedReplyFixture, unittest.IsolatedAs
             conversation = await self.manager.get_conversation(event.unified_msg_origin, "conversation-a")
             yield event.request_llm(prompt=event.message_str, conversation=conversation)
         self.register(EventType.AdapterMessageEvent, request_native_reply, self.handlers[0].event_filters, priority=0)
+        waiting = asyncio.Event()
+        async def entered_waiting_hook(event):
+            if event.unified_msg_origin == ORIGINS[1]:
+                waiting.set()
+        self.register(EventType.OnWaitingLLMRequestEvent, entered_waiting_hook, priority=2000000)
         self.pause_model = True
         first = await self.dispatch(self.event_for(0))
         await asyncio.wait_for(self.model_done.wait(), 15)
         b = self.event_for(1)
         waiter = await self.dispatch(b)
-        await asyncio.sleep(.05)
+        await asyncio.wait_for(waiting.wait(), 15)
         waiter.cancel()
         await asyncio.wait_for(asyncio.gather(waiter, return_exceptions=True), 5)
         self.assertTrue(b.is_stopped())
