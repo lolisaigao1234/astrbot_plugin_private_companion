@@ -18,7 +18,7 @@ from astrbot.core.config.default import DEFAULT_CONFIG
 from astrbot.core.conversation_mgr import ConversationManager
 from astrbot.core.db.sqlite import SQLiteDatabase
 from astrbot.core.event_bus import EventBus
-from astrbot.core.message.components import Plain
+from astrbot.core.message.components import At, Plain
 from astrbot.core.persona_mgr import PersonaManager
 from astrbot.core.pipeline.context import PipelineContext
 from astrbot.core.pipeline.scheduler import PipelineScheduler
@@ -76,16 +76,19 @@ class SyntheticFailureTool(FunctionTool):
 
 
 class LinkedQQEvent(AiocqhttpMessageEvent):
-    def __init__(self, platform, at, text, identifier="7"):
+    def __init__(self, platform, at, text, identifier="7", group=None):
         message = AstrBotMessage()
-        message.type = MessageType.FRIEND_MESSAGE
+        message.type = MessageType.GROUP_MESSAGE if group else MessageType.FRIEND_MESSAGE
         message.self_id = "100" if platform.meta().id == "qq-main" else "101"
         message.sender = MessageMember("200", "Synthetic owner")
         message.message_id, message.message, message.raw_message = identifier, [Plain(text)], {"post_type": "message"}
+        if group:
+            message.group_id = group
+            message.message.insert(0, At(qq=message.self_id))
         meta = platform.meta()
         meta.support_streaming_message = False
         meta.support_proactive_message = False
-        super().__init__(text, message, meta, "200", platform.get_client())
+        super().__init__(text, message, meta, group or "200", platform.get_client())
         self.created_at = at.timestamp()
         self.stream_invocations = 0
         self.transport_chunks = []
@@ -196,7 +199,7 @@ class LinkedReplyFixture(MultiFixture):
                     raise OSError("synthetic send error")
                 self.sent.append((_platform_id, kwargs))
                 return {"message_id": len(self.sent)}
-            platform.client.send_private_msg = send
+            platform.client.send_private_msg = platform.client.send_group_msg = send
         self.controller = self.make_controller()
         self.app = await self.start_host()
         self.reply_settings(private_debounce_enabled=False)
@@ -271,9 +274,9 @@ class LinkedReplyFixture(MultiFixture):
             task.cancel()
         await asyncio.gather(*tuple(self.bus._pending_tasks), return_exceptions=True)
 
-    def event_for(self, index, text=None, identifier="7"):
+    def event_for(self, index, text=None, identifier="7", group=None):
         return LinkedQQEvent(self.native.platforms[ORIGINS[index].split(":")[0]], self.clock.now(),
-            text or ("A" if index == 0 else "B"), identifier)
+            text or ("A" if index == 0 else "B"), identifier, group)
 
     async def dispatch(self, event):
         await self.queue.put(event)

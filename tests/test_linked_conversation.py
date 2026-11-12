@@ -303,11 +303,39 @@ class LinkedConversationConcurrencyTests(LinkedReplyFixture, unittest.IsolatedAs
         self.assertEqual(self.calls, [])
         self.assertEqual(self.manager.writes, [])
 
+    async def test_group_and_unlinked_private_events_are_untouched_while_the_host_is_not_running(self):
+        from astrbot_host.linked_turn_gate import LinkedTurnGate
+        from companion_v2.storage.runtime import StorageRuntime
+        self.assertEqual((await self.link(members=["first"]))["status"], "ok")
+        await self.controller.terminate()
+        self.controller = self.make_controller()
+        self.plugin.staging = self.controller
+        # Unreadable store: nothing may depend on reading it for these events.
+        database = self.controller.profile_root / "runtime" / StorageRuntime.DATABASE_FILENAME
+        database.write_bytes(b"synthetic unreadable store")
+        async def answered_by_astrbot(event):
+            answered = len(self.calls)
+            await asyncio.wait_for(await self.dispatch(event), 15)
+            self.assertFalse(event.is_stopped())
+            self.assertEqual(len(self.calls), answered + 1)
+        await answered_by_astrbot(self.event_for(1, "group", "group-message", group="300"))
+        await answered_by_astrbot(self.event_for(1, "private", "private-message"))
+        linked = self.event_for(0, identifier="linked-message")
+        await asyncio.wait_for(await self.dispatch(linked), 10)
+        self.assertTrue(linked.is_stopped())
+        self.assertEqual(len(self.calls), 2)
+        # A new process has no in-memory index: the failed read stops nothing.
+        LinkedTurnGate.shared().linked_origins = None
+        await answered_by_astrbot(self.event_for(1, "cold", "cold-message"))
+
     async def test_cold_controller_refuses_linked_native_turn_before_host_has_loaded(self):
+        from astrbot_host.linked_turn_gate import LinkedTurnGate
         self.assertEqual((await self.link())["status"], "ok")
         await self.controller.terminate()
         self.controller = self.make_controller()
         self.plugin.staging = self.controller
+        # A new process knows its links only from the persisted record.
+        LinkedTurnGate.shared().linked_origins = None
         event = self.event_for(1)
         await asyncio.wait_for(await self.dispatch(event), 10)
         self.assertTrue(event.is_stopped())

@@ -3,6 +3,7 @@ import asyncio
 from contextlib import AsyncExitStack
 from dataclasses import asdict
 import json
+import logging
 
 from astrbot.core import sp
 from astrbot.core.star.star_handler import EventType, star_handlers_registry
@@ -14,6 +15,7 @@ from companion_v2.execution.models import TaskError, digest
 from companion_v2.foundation.refs import ScopeKind, ScopeRef, SubjectRef, SubjectKind
 from .linked_turn_gate import LinkedTurnGate
 
+logger = logging.getLogger(__name__)
 KEY = "astrbot.private-conversation-links.v1"
 EXTRA = "companion_linked_turn_v1"
 # AstrBot 4.29.4's own commands that replace the conversation, switch the
@@ -25,6 +27,10 @@ def origin(target):
     return f"{target.platform_id}:FriendMessage:{target.participant_id}"
 
 
+def linked_origins(records):
+    return {row["origin"] for link in records.values() for row in link["members"] + link.get("detached", [])}
+
+
 class LinkedConversations:
     def __init__(self, session):
         self.session = session
@@ -33,8 +39,11 @@ class LinkedConversations:
             self.gate.editing_origins = set()
         if not hasattr(self.gate, "linked_cids"):
             self.gate.linked_cids = set()
-        for link in self.records().values():
+        records = self.records()
+        for link in records.values():
             self.gate.linked_cids.add(link["conversation_id"])
+        # Every other origin is answered from memory, without reading the record.
+        self.gate.linked_origins = linked_origins(records)
         self.retiring = False
         self.management_tasks = set()
 
@@ -51,6 +60,8 @@ class LinkedConversations:
         return self.records().get(link_id)
 
     def for_origin(self, umo):
+        if umo not in self.gate.linked_origins:
+            return None
         return next((link for link in self.records().values()
                      if any(row["origin"] == umo for row in link["members"] + link.get("detached", []))), None)
 
@@ -195,6 +206,7 @@ class LinkedConversations:
                     records[body["link_id"]] = record
                     session.authority.write(KEY, records)
                 self.gate.linked_cids.add(cid)
+                self.gate.linked_origins |= linked_origins(records)
                 for row in members:
                     await manager.switch_conversation(row["origin"], cid)
                 return record
@@ -339,35 +351,36 @@ class LinkedConversations:
 
 async def refuse_unavailable_link(controller, event):
     """Persisted links remain closed before startup and while the host is stopped."""
-    if LinkedConversations.stop_only(event):
+    umo = event.unified_msg_origin
+    if ":FriendMessage:" not in umo or LinkedConversations.stop_only(event):
         return False
     session = getattr(controller, "session", None)
     links = getattr(session, "linked_conversations", None)
     if (links is not None and not links.retiring
             and getattr(getattr(session, "application", None), "state", None) == "running"):
         return False
-    root = getattr(controller, "profile_root", None)
-    if root is None:
-        return False
-    from contextlib import closing
-    import sqlite3
-    from companion_v2.storage.runtime import StorageRuntime
-    path = root / "runtime" / StorageRuntime.DATABASE_FILENAME
-    if not path.is_file():
-        return False
-    # No migrations, creation or host startup: just the one management record.
-    # This also covers a cold restart where an adapter prevents host assembly.
-    try:
-        with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as connection:
-            row = connection.execute("SELECT value FROM runtime_metadata WHERE key = ?", (KEY,)).fetchone()
-        records = json.loads(row[0]) if row else {}
-        linked = any(any(member["origin"] == event.unified_msg_origin
-                         for member in link["members"] + link.get("detached", [])) for link in records.values())
-    except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):
-        # Unable to establish that this persisted installation is unlinked.
-        event.stop_event()
-        raise
-    if not linked:
+    gate = LinkedTurnGate.shared()
+    if getattr(gate, "linked_origins", None) is None:
+        # A new process whose host has not assembled yet: read the one
+        # management record once, with no migrations, creation or startup.
+        root = getattr(controller, "profile_root", None)
+        if root is None:
+            return False
+        from contextlib import closing
+        import sqlite3
+        from companion_v2.storage.runtime import StorageRuntime
+        path = root / "runtime" / StorageRuntime.DATABASE_FILENAME
+        if not path.is_file():
+            return False
+        try:
+            with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as connection:
+                row = connection.execute("SELECT value FROM runtime_metadata WHERE key = ?", (KEY,)).fetchone()
+            gate.linked_origins = linked_origins(json.loads(row[0]) if row else {})
+        except (OSError, sqlite3.Error, ValueError, TypeError, KeyError, AttributeError) as error:
+            # Nothing establishes a link for this origin: AstrBot's own reply continues.
+            logger.warning("[CompanionV2] 共享对话记录暂不可读 error_type=%s", type(error).__name__)
+            return False
+    if umo not in gate.linked_origins:
         return False
     event.stop_event()
     event.set_extra("companion_linked_failure", "linked_host_unavailable")
