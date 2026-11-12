@@ -561,14 +561,31 @@ class NativePrivateBridge:
         for account in accounts:
             platform = context.get_platform_inst(account.platform_id)
             if platform is None:
-                raise TaskError("host_platform_unavailable", "the configured native platform has not loaded")
+                # Not loaded yet: the other accounts start without this channel,
+                # and it is pinned by the first use after it appears.
+                continue
             meta = platform.meta()
             if not supported_platform_name(meta.name) or meta.id != account.platform_id:
                 raise TaskError("host_platform_changed", "the configured platform does not match its native account")
-            self.platforms[account.platform_id] = (platform, platform.get_client())
-            if meta.name == "telegram" and native_client_connected(platform, account.self_id):
-                self.telegram_bot_ids[account.platform_id] = platform.get_client().id
+            self._pinned(account.platform_id)
         self.ports = NativeInputPorts()
+
+    def _pinned(self, platform_id):
+        """The ``(platform, client)`` pinned for one channel, or ``(None, None)``.
+
+        A channel is pinned once, the first time it is found loaded with the
+        configured kind; later replacements are refused against that pin.
+        """
+        if platform_id not in self.platforms:
+            configured = any(account.platform_id == platform_id for account in self.accounts.values())
+            platform = self.context.get_platform_inst(platform_id) if configured else None
+            meta = platform.meta() if platform is not None else None
+            if meta is None or not supported_platform_name(meta.name) or meta.id != platform_id:
+                return None, None
+            self.platforms[platform_id] = (platform, platform.get_client())
+            if meta.name == "telegram" and native_client_connected(platform, platform_id):
+                self.telegram_bot_ids[platform_id] = platform.get_client().id
+        return self.platforms[platform_id]
 
     def account(self, scope):
         """The registered account a private scope belongs to, or an explicit refusal."""
@@ -580,7 +597,9 @@ class NativePrivateBridge:
 
     def platform(self, scope):
         account = self.account(scope)
-        platform, client = self.platforms[account.platform_id]
+        platform, client = self._pinned(account.platform_id)
+        if platform is None:
+            raise TaskError("host_platform_unavailable", "the configured native platform has not loaded")
         meta = platform.meta()
         if meta.name == "telegram":
             current = platform.get_client()
@@ -599,11 +618,11 @@ class NativePrivateBridge:
 
     def platform_name(self, scope_or_account):
         platform_id = getattr(scope_or_account, "platform_id", None) or getattr(scope_or_account, "platform", None)
-        platform = self.platforms.get(platform_id, (None, None))[0]
+        platform = self._pinned(platform_id)[0]
         return str(platform.meta().name) if platform is not None else ""
 
     def account_connected(self, account, client=None):
-        platform = self.platforms.get(account.platform_id, (None, None))[0]
+        platform = self._pinned(account.platform_id)[0]
         return native_client_connected(platform, account.self_id, client)
 
     def client(self, scope):

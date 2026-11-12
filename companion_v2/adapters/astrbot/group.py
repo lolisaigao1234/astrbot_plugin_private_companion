@@ -110,7 +110,7 @@ class NativeGroupBridge(NativePrivateBridge):
         return client
 
     def _connection_current(self, account, client, connection):
-        return (client is self.platforms[account.platform_id][1]
+        return (client is self._pinned(account.platform_id)[1]
                 and self.account_connected(account, client)
                 and self._connection(client, account.self_id) is connection)
 
