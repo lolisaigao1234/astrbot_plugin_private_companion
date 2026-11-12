@@ -10,7 +10,7 @@ import asyncio
 import inspect
 import logging
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 
 from companion_v2.execution.models import TaskError, digest, encode, require
@@ -407,6 +407,28 @@ class NativeVideoLocator:
 
 
 @dataclass(frozen=True)
+class NativeReplyEndpoint:
+    """Authenticated physical source and reply destination, held only for this turn."""
+
+    principal: AuthenticatedHostPrincipal
+    scope: ScopeRef
+    target_id: str
+    unified_msg_origin: str
+    event_id: str
+    client: object = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class NativeServedConversation:
+    """Owner window, role and existing role-scoped conversation key being served."""
+
+    target_id: str
+    unified_msg_origin: str
+    scope: ScopeRef
+    role: SubjectRef
+
+
+@dataclass(frozen=True)
 class NativeConversationInput:
     event_id: str
     principal: AuthenticatedHostPrincipal
@@ -422,6 +444,8 @@ class NativeConversationInput:
     audios: tuple[CapturedAudio, ...] = ()
     videos: tuple[CapturedVideo, ...] = ()
     merged_event_ids: tuple[str, ...] = ()
+    source_endpoint: NativeReplyEndpoint | None = None
+    conversation: NativeServedConversation | None = None
 
 
 NativePrivateInput = NativeConversationInput  # Preserve the private adapter's public snapshot name.
