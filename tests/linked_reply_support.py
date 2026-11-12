@@ -87,13 +87,17 @@ class LinkedQQEvent(AiocqhttpMessageEvent):
         meta.support_proactive_message = False
         super().__init__(text, message, meta, "200", platform.get_client())
         self.created_at = at.timestamp()
+        self.stream_invocations = 0
+        self.transport_chunks = []
 
     async def send_streaming(self, generator, use_fallback=False):
+        self.stream_invocations += 1
         if not self.get_extra("synthetic_stream_transport"):
             return await super().send_streaming(generator, use_fallback)
         # Fake transport consumes real RespondStage/run_agent chunks as they arrive.
         async for chain in generator:
             if chain.chain:
+                self.transport_chunks.append(chain.get_plain_text())
                 await self.send(chain)
 
 
@@ -115,7 +119,8 @@ class LinkedReplyFixture(MultiFixture):
         self.manager = RecordedConversations(self.db)
         for origin, cid in zip(ORIGINS, ("conversation-a", "conversation-b")):
             await self.db.create_conversation(origin, origin.split(":")[0], cid=cid, persona_id="original",
-                content=[{"role": "user", "content": "old"}, {"role": "assistant", "content": "old-reply"}])
+                content=[{"role": "user", "content": "old" if cid == "conversation-a" else "separate-old"},
+                         {"role": "assistant", "content": "old-reply" if cid == "conversation-a" else "separate-reply"}])
             await self.manager.switch_conversation(origin, cid)
         self.native.conversation_manager = self.manager
         router = UmopConfigRouter(sp)
@@ -138,7 +143,7 @@ class LinkedReplyFixture(MultiFixture):
         async def no_tts(*_):
             return None
         self.native.get_using_tts_provider_async = no_tts
-        self.calls, self.sent = [], []
+        self.calls, self.sent, self.stream_calls = [], [], []
         self.model_done, self.allow_model = asyncio.Event(), asyncio.Event()
         self.pause_model = False
         self.pause_after_response = False
@@ -173,6 +178,7 @@ class LinkedReplyFixture(MultiFixture):
             return LLMResponse(role="assistant", completion_text="reply-A" if origin == ORIGINS[0] else "reply-B")
 
         async def text_chat_stream(**args):
+            self.stream_calls.append(args["session_id"])
             response = await text_chat(**args)
             if response.role == "assistant" and not response.tools_call_name:
                 yield LLMResponse(role="assistant", completion_text="reply-", is_chunk=True)

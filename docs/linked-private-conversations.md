@@ -131,3 +131,6 @@ Run SDK tests only with the isolated runner:
 ```
 
 No network, installed plugin, deployment state or running AstrBot container is used.
+
+The [ticket validation report](ticket-3-validation.md) maps every acceptance criterion to its
+tests and records the exact commands, baseline failures and verification limits.

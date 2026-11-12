@@ -338,7 +338,8 @@ async def refuse_unavailable_link(controller, event):
         return False
     session = getattr(controller, "session", None)
     links = getattr(session, "linked_conversations", None)
-    if links is not None and not links.retiring:
+    if (links is not None and not links.retiring
+            and getattr(getattr(session, "application", None), "state", None) == "running"):
         return False
     root = getattr(controller, "profile_root", None)
     if root is None:

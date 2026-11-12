@@ -72,7 +72,7 @@ class LinkedConversationConcurrencyTests(LinkedReplyFixture, unittest.IsolatedAs
         self.assertEqual(result["data"]["revision"], 1)
         self.assertEqual(await self.manager.get_curr_conversation_id(ORIGINS[1]), "conversation-a")
         independent = await self.manager.get_conversation(ORIGINS[1], "conversation-b")
-        self.assertEqual(self.contents(json.loads(independent.history)), ["old", "old-reply"])
+        self.assertEqual(self.contents(json.loads(independent.history)), ["separate-old", "separate-reply"])
         await self.controller.stop()
         await self.controller.start()
         self.assertEqual(self.controller.session.linked_conversations.get("owner-dialogue")["revision"], 1)
@@ -172,6 +172,17 @@ class LinkedConversationConcurrencyTests(LinkedReplyFixture, unittest.IsolatedAs
 
     async def streaming_pair(self, true_streaming):
         self.config["provider_settings"]["streaming_response"] = True
+        from companion_v2.configuration.models import ConfigLayer
+        from companion_v2.conversation.reply_settings import ReplyConfigurationOwner, configuration_fields, target_for
+        owner = ReplyConfigurationOwner(self.app.runtime)
+        common = self.controller.settings.common
+        fields = configuration_fields(common.segmentation, common.streaming, common.policy.part_gap_seconds)
+        for target_id in ("first", "second"):
+            target = target_for(self.controller.authority.context(target_id, "role-a"), ConfigLayer.ROLE)
+            owner.write(target, fields, changes={"conversation.presentation.enabled": False}, reset=(),
+                expected_revision=owner.read(target, fields).revision, observed_at=self.clock.now())
+        semantic = self.app.semantics
+        semantic.store.configure({"reactions_enabled": False}, semantic.store.settings()["revision"])
         # Reinitialize the real configured stages, exactly as native profile startup does.
         self.scheduler.stages.clear()
         await self.scheduler.initialize()
@@ -194,6 +205,11 @@ class LinkedConversationConcurrencyTests(LinkedReplyFixture, unittest.IsolatedAs
         await self.controller.session.linked_conversations.gate.drain()
         self.assertEqual(self.contents(await self.history()), ["old", "old-reply", "A", "reply-A", "B", "reply-B"])
         self.assertEqual(len(self.manager.writes), 2)
+        self.assertEqual(self.stream_calls, list(ORIGINS))
+        self.assertEqual([a.stream_invocations, b.stream_invocations], [1, 1])
+        if true_streaming:
+            self.assertEqual(a.transport_chunks, ["reply-", "A"])
+            self.assertEqual(b.transport_chunks, ["reply-", "B"])
 
     async def test_buffered_streaming_saves_once_before_successor(self):
         await self.streaming_pair(False)
@@ -514,7 +530,7 @@ class LinkedConversationConcurrencyTests(LinkedReplyFixture, unittest.IsolatedAs
         await first
         self.assertEqual(self.contents(await self.history()), ["old", "old-reply", "A", "reply-A"])
         independent = await self.manager.get_conversation(ORIGINS[1], "conversation-b")
-        self.assertEqual(self.contents(json.loads(independent.history)), ["old", "old-reply", "B", "reply-B"])
+        self.assertEqual(self.contents(json.loads(independent.history)), ["separate-old", "separate-reply", "B", "reply-B"])
         self.assertEqual(self.controller.session.linked_conversations.gate.owners, {})
 
     async def test_reload_reuses_coordinator_and_unload_drains_before_replacing_it(self):
@@ -641,3 +657,15 @@ class LinkedConversationConcurrencyTests(LinkedReplyFixture, unittest.IsolatedAs
         await asyncio.wait_for(await self.dispatch(event), 15)
         self.assertFalse(event.is_stopped())
         self.assertEqual(self.contents(await self.history()), ["old", "old-reply", "B", "reply-B"])
+
+    async def test_loaded_but_unstarted_host_refuses_ungated_native_fallback(self):
+        self.assertEqual((await self.link())["status"], "ok")
+        await self.controller.stop()
+        loaded = await self.controller.load_existing()
+        self.assertTrue(loaded.is_success, loaded.failure)
+        self.assertEqual(self.controller.session.application.state, "new")
+        event = self.event_for(1)
+        await asyncio.wait_for(await self.dispatch(event), 10)
+        self.assertTrue(event.is_stopped())
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.manager.writes, [])
