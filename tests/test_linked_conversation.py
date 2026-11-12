@@ -556,6 +556,29 @@ class LinkedConversationConcurrencyTests(LinkedReplyFixture, unittest.IsolatedAs
         self.assertEqual(self.contents(await self.history()), ["old", "old-reply", "B", "reply-B"])
         self.assertEqual(self.controller.session.linked_conversations.get("owner-dialogue")["revision"], 1)
 
+    async def test_members_with_different_history_limits_are_refused_before_the_model(self):
+        from copy import deepcopy
+        from types import SimpleNamespace as NS
+        from astrbot.core.pipeline.context import PipelineContext
+        from astrbot.core.pipeline.scheduler import PipelineScheduler
+        self.assertEqual((await self.link())["status"], "ok")
+        # AstrBot resolves the runner's compression policy per origin: one member
+        # is routed to a profile, with its own pipeline, that keeps a single turn.
+        config = deepcopy(self.config)
+        config["agent_runner"]["config"]["compression"].update(max_turns=1, overflow_strategy="truncate_by_turns")
+        profile_id = await self.acm.create_conf(config, name="synthetic-short-history-profile")
+        scheduler = PipelineScheduler(PipelineContext(self.acm.confs[profile_id], NS(context=self.core_context),
+                                                      profile_id, self.db))
+        await scheduler.initialize()
+        self.bus.pipeline_scheduler_mapping[profile_id] = scheduler
+        await self.acm.ucr.update_route(ORIGINS[1], profile_id)
+        event = self.event_for(1)
+        await asyncio.wait_for(await self.dispatch(event), 15)
+        self.assertTrue(event.is_stopped())
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.manager.writes, [])
+        self.assertEqual(self.contents(await self.history()), ["old", "old-reply"])
+
     async def test_links_require_local_runner_and_enabled_companion_hooks(self):
         saved = self.config["agent_runner"]["runner_type"]
         self.config["agent_runner"]["runner_type"] = "dify"

@@ -103,10 +103,11 @@ class LinkedConversations:
             conversation_persona_id=conversation.persona_id)
         services = await sp.get_async(scope="umo", scope_id=umo, key="session_service_config", default={}) or {}
         variables = await sp.session_get(umo, "session_variables", {})
-        # Only what AstrBot resolves per origin and that shapes the turn; the runner
-        # and the companion's enablement are required above. Digests only: never
-        # provider credentials or session-variable values.
-        return digest({"provider_settings": cfg.get("provider_settings"),
+        # Only what AstrBot resolves per origin and that shapes the turn, including
+        # the runner's history compression and fallback models; the companion's
+        # enablement is required above. Digests only: never provider credentials
+        # or session-variable values.
+        return digest({"provider_settings": cfg.get("provider_settings"), "agent_runner": cfg.get("agent_runner"),
             "provider": provider.provider_config.get("id"), "model": provider.get_model(),
             "persona": selected[:3], "services": services, "variables": variables})
 
