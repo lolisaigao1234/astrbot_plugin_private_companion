@@ -49,16 +49,21 @@ unguarded against the shared CID. Fresh independent admission/unlink controls be
 ## Turn lifetime
 
 The shared gate is keyed by the AstrBot CID, independent of link ID/revision. Authenticated
-companion intake acquires it before preparation. A high-priority native waiting hook enforces
-or reuses it before AstrBot takes its physical origin lock and loads history. One pipeline task
-can reuse its permit for the same event; another event cannot borrow admission. Direct linked
-preparation without a live permit is refused.
+companion intake acquires it directly before reply preparation, and only for the message that
+survived the private duplicate check, follow-up fold and debounce: rapid messages from one
+linked chat merge exactly as in an unlinked chat, and no message waits for a sibling while
+holding the permit. Identity and debounce settings are read before the permit; that step never
+opens a replacement conversation on a linked endpoint. A high-priority native waiting hook
+enforces or reuses the permit before AstrBot takes its physical origin lock and loads history.
+One pipeline task can reuse its permit for the same event; another event cannot borrow
+admission. Direct linked preparation without a live permit is refused.
 
 The pipeline task's done callback starts a strongly referenced cleanup task. Cleanup collects
 abandoned async generators once, acquires/releases AstrBot's original physical-origin lock,
-and only then releases the conversation permit. No hook or timer releases it. Acquisition has
-a 15-second busy timeout. Timeout, cancellation, invalid records or stale selections stop the
-event explicitly, because AstrBot catches hook exceptions, including cancellation.
+and only then releases the conversation permit. No hook or timer releases it. A waiting turn
+waits without a time limit, as an unlinked chat's next message waits on AstrBot's own per-origin
+lock. Cancellation, invalid records or stale selections stop the event explicitly, because
+AstrBot catches hook exceptions, including cancellation.
 
 The pre-model tripwire never waits for a permit inside the native lock. It checks task
 ownership, revision, membership, anchor existence, selection and effective native settings.
@@ -68,17 +73,26 @@ physical authentication and existing companion permissions are rechecked before 
 and sends. The gate registry survives import retirement in its own process module; unload waits
 for admitted pipeline work, origin barriers and management operations before closing storage.
 
-Linked settings must match at creation and remain equal to the recorded snapshot: native profile
-configuration, provider/model, resolved and forced persona, session services and variables.
-The provider's mutable `max_context_tokens` cache is excluded because AstrBot fills it during
-request construction. Event/handler model overrides that change the selected model are refused.
+Linked members must agree with each other, at creation and on every turn, on what AstrBot
+resolves per origin and that shapes the turn: the local agent runner, provider settings, the
+selected provider and model, the resolved and forced persona, the companion's enablement, and
+session services and variables. Nothing is frozen at link time: a setting changed for all
+members is followed, a difference between members refuses turns until they agree again, and
+unrelated configuration (whitelist, admins, platforms, the provider list) is ignored.
+Event/handler model overrides that change the selected model are refused.
 
-Parsed chat commands are refused by default on linked endpoints, including third-party commands;
-the companion's literal binding/unbinding and full-reset commands are also refused. Native `/stop`
+AstrBot's own session-changing commands (`/reset`, `/new`, `/provider`, `/set`, `/unset`) and the
+companion's literal binding/unbinding and full-reset commands are refused on linked endpoints.
+Other plugins' commands and AstrBot's remaining commands pass untouched. Native `/stop`
 remains available, including during drain, and stops only its own physical origin. Coherent shared
 controls are #7. Live Mode is refused because it writes history twice. Native cron/background
 history-writing tools are filtered from linked turns. Companion room writers skip linked CIDs
 and cannot race first-link creation. Unlinked coordination and reply preparation stay unchanged.
+
+Linked origins are indexed in memory. An event from any other origin, including every group
+event, returns from the companion's link hooks without reading the link record. While the host
+is not running, linked origins stay refused from that index; a new process reads the one record
+once, and if that read fails AstrBot's own replies continue.
 
 ## Boundaries and follow-ups
 
@@ -119,7 +133,9 @@ nothing until A's save and the native barrier complete. Both turns are then stor
 and replies retain their physical origins. A stopped-yield test holds the native barrier after
 A's task finishes and proves that B stays blocked. Other cases cover streaming, tools/failure,
 provider error/exception, send/save errors, stop, cancellation while waiting/running/saving,
-revision/settings drift, restart, revoked origins, busy timeout and unload/reload.
+revision drift, member settings divergence and recovery, an unrelated configuration edit,
+debounced rapid messages, a turn queued past 15 seconds, other plugins' commands, restart,
+revoked origins, a stopped host and unload/reload.
 
 Run these suites with an AstrBot SDK environment that uses a temporary data root, never an
 installed plugin or a live data directory:

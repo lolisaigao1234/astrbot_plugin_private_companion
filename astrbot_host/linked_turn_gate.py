@@ -42,8 +42,11 @@ class LinkedTurnGate:
         return any(not task.done() and owned[0] == key and owned[1] is event
                    for task, owned in self.owners.items())
 
-    async def acquire(self, key, event, *, timeout=15):
-        """Called only before AstrBot takes its per-origin lock; fail closed."""
+    async def acquire(self, key, event):
+        """Called only before AstrBot takes its per-origin lock; fail closed.
+
+        Waits as long as the holder runs, like AstrBot's own per-origin lock.
+        """
         try:
             task = asyncio.current_task()
             if (task is None or task.get_coro().__qualname__ != "PipelineScheduler.execute"
@@ -55,8 +58,7 @@ class LinkedTurnGate:
                     raise RuntimeError("a pipeline task cannot serve a second linked event")
                 return
             lock = self.locks.setdefault(key, asyncio.Lock())
-            async with asyncio.timeout(timeout):
-                await lock.acquire()
+            await lock.acquire()
             # No suspension between acquisition, ownership and callback registration.
             self.owners[task] = (key, event, event.unified_msg_origin, lock)
             task.add_done_callback(self._finished)
@@ -91,7 +93,8 @@ class LinkedTurnGate:
             await asyncio.gather(*(asyncio.shield(task) for task in owners), return_exceptions=True)
             # Let synchronous done callbacks start their barrier tasks.
             await asyncio.sleep(0)
-            await asyncio.gather(*(asyncio.shield(task) for task in tuple(self.cleanups)))
+            await asyncio.gather(*(asyncio.shield(task) for task in tuple(self.cleanups)),
+                                 return_exceptions=True)
 
 
 @asynccontextmanager

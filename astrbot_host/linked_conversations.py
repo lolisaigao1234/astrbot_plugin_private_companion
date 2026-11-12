@@ -3,6 +3,7 @@ import asyncio
 from contextlib import AsyncExitStack
 from dataclasses import asdict
 import json
+import logging
 
 from astrbot.core import sp
 from astrbot.core.star.star_handler import EventType, star_handlers_registry
@@ -14,12 +15,20 @@ from companion_v2.execution.models import TaskError, digest
 from companion_v2.foundation.refs import ScopeKind, ScopeRef, SubjectRef, SubjectKind
 from .linked_turn_gate import LinkedTurnGate
 
+logger = logging.getLogger(__name__)
 KEY = "astrbot.private-conversation-links.v1"
 EXTRA = "companion_linked_turn_v1"
+# AstrBot 4.29.4's own commands that replace the conversation, switch the
+# provider or write session variables (handler names in its builtin_commands).
+SESSION_COMMANDS = frozenset({"reset", "new_conv", "provider", "set_variable", "unset_variable"})
 
 
 def origin(target):
     return f"{target.platform_id}:FriendMessage:{target.participant_id}"
+
+
+def linked_origins(records):
+    return {row["origin"] for link in records.values() for row in link["members"] + link.get("detached", [])}
 
 
 class LinkedConversations:
@@ -30,8 +39,11 @@ class LinkedConversations:
             self.gate.editing_origins = set()
         if not hasattr(self.gate, "linked_cids"):
             self.gate.linked_cids = set()
-        for link in self.records().values():
+        records = self.records()
+        for link in records.values():
             self.gate.linked_cids.add(link["conversation_id"])
+        # Every other origin is answered from memory, without reading the record.
+        self.gate.linked_origins = linked_origins(records)
         self.retiring = False
         self.management_tasks = set()
 
@@ -48,6 +60,8 @@ class LinkedConversations:
         return self.records().get(link_id)
 
     def for_origin(self, umo):
+        if umo not in self.gate.linked_origins:
+            return None
         return next((link for link in self.records().values()
                      if any(row["origin"] == umo for row in link["members"] + link.get("detached", []))), None)
 
@@ -89,18 +103,12 @@ class LinkedConversations:
             conversation_persona_id=conversation.persona_id)
         services = await sp.get_async(scope="umo", scope_id=umo, key="session_service_config", default={}) or {}
         variables = await sp.session_get(umo, "session_variables", {})
-        # Profile configuration includes LLM, streaming, tools and plugin enablement.
-        # Store digests, never provider credentials or session-variable values.
-        # AstrBot fills max_context_tokens from model metadata during build; it
-        # is a derived cache, not the operator's provider selection.
-        def configured_provider(document):
-            return {key: value for key, value in document.items() if key != "max_context_tokens"}
-        profile = dict(cfg)
-        if "provider" in profile:
-            profile["provider"] = [configured_provider(document) for document in profile["provider"]]
-        return digest({"config": profile, "provider": configured_provider(provider.provider_config),
-            "model": provider.get_model(), "persona": selected[:3], "services": services,
-            "variables": variables})
+        # Only what AstrBot resolves per origin and that shapes the turn; the runner
+        # and the companion's enablement are required above. Digests only: never
+        # provider credentials or session-variable values.
+        return digest({"provider_settings": cfg.get("provider_settings"),
+            "provider": provider.provider_config.get("id"), "model": provider.get_model(),
+            "persona": selected[:3], "services": services, "variables": variables})
 
     async def manage(self, body):
         required = {"schema_version", "link_id", "expected_revision", "conversation_id",
@@ -180,7 +188,7 @@ class LinkedConversations:
                     source_platform = session.bridge.context.get_platform_inst(source.platform_id)
                     source_settings = await self.settings(origin(source), source_platform.meta().name, cid)
                     signatures.append(source_settings)
-                if len(set(signatures)) != 1 or (old and signatures[0] != old["settings"]):
+                if len(set(signatures)) != 1:
                     raise TaskError("linked_settings_mismatch", "align native model, persona and session settings before linking")
                 detached = {row["origin"]: row for row in (old or {}).get("detached", []) + (old or {}).get("members", [])}
                 if source is not None and origin(source) not in {row["origin"] for row in members}:
@@ -190,7 +198,7 @@ class LinkedConversations:
                     detached.pop(row["origin"], None)
                 record = {"schema_version": 1, "link_id": body["link_id"],
                     "revision": body["expected_revision"] + 1, "conversation_id": cid,
-                    "anchor": anchor, "members": members, "detached": list(detached.values()), "settings": signatures[0]}
+                    "anchor": anchor, "members": members, "detached": list(detached.values())}
                 # Persist before selection: an interrupted operation remains closed,
                 # rather than allowing an endpoint to continue in a silent fork.
                 with session.runtime.transaction():
@@ -198,6 +206,7 @@ class LinkedConversations:
                     records[body["link_id"]] = record
                     session.authority.write(KEY, records)
                 self.gate.linked_cids.add(cid)
+                self.gate.linked_origins |= linked_origins(records)
                 for row in members:
                     await manager.switch_conversation(row["origin"], cid)
                 return record
@@ -249,10 +258,14 @@ class LinkedConversations:
             raise
 
     @staticmethod
-    def stop_only(event):
+    def native_command(event, names):
         handlers = event.get_extra("activated_handlers", ()) or ()
         return any(handler.handler_module_path == "astrbot.builtin_stars.builtin_commands.main"
-                   and handler.handler_name == "stop" for handler in handlers)
+                   and handler.handler_name in names for handler in handlers)
+
+    @staticmethod
+    def stop_only(event):
+        return LinkedConversations.native_command(event, ("stop",))
 
     def require_permit(self, event):
         link = self.for_event(event)
@@ -284,11 +297,15 @@ class LinkedConversations:
         manager = self.session.bridge.context.conversation_manager
         # All members keep their own transport. An offline former anchor is
         # irrelevant: settings and the CID are stored independently of that client.
+        # Members are compared with each other on every turn, never with a value
+        # frozen at link time: a setting changed for all of them is followed.
+        signatures = set()
         for row in link["members"]:
             if await manager.get_curr_conversation_id(row["origin"]) != link["conversation_id"]:
                 raise TaskError("linked_selection_changed", "a linked endpoint selected another conversation")
-            if await self.settings(row["origin"], row["platform_name"], link["conversation_id"]) != link["settings"]:
-                raise TaskError("linked_settings_changed", "native model or session settings changed")
+            signatures.add(await self.settings(row["origin"], row["platform_name"], link["conversation_id"]))
+        if len(signatures) != 1:
+            raise TaskError("linked_settings_mismatch", "align native model, persona and session settings between the linked endpoints")
         selected_provider, selected_model = event.get_extra("selected_provider"), event.get_extra("selected_model")
         if selected_provider or selected_model:
             provider = await self.session.bridge.context.get_using_provider_async(umo=event.unified_msg_origin)
@@ -334,35 +351,36 @@ class LinkedConversations:
 
 async def refuse_unavailable_link(controller, event):
     """Persisted links remain closed before startup and while the host is stopped."""
-    if LinkedConversations.stop_only(event):
+    umo = event.unified_msg_origin
+    if ":FriendMessage:" not in umo or LinkedConversations.stop_only(event):
         return False
     session = getattr(controller, "session", None)
     links = getattr(session, "linked_conversations", None)
     if (links is not None and not links.retiring
             and getattr(getattr(session, "application", None), "state", None) == "running"):
         return False
-    root = getattr(controller, "profile_root", None)
-    if root is None:
-        return False
-    from contextlib import closing
-    import sqlite3
-    from companion_v2.storage.runtime import StorageRuntime
-    path = root / "runtime" / StorageRuntime.DATABASE_FILENAME
-    if not path.is_file():
-        return False
-    # No migrations, creation or host startup: just the one management record.
-    # This also covers a cold restart where an adapter prevents host assembly.
-    try:
-        with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as connection:
-            row = connection.execute("SELECT value FROM runtime_metadata WHERE key = ?", (KEY,)).fetchone()
-        records = json.loads(row[0]) if row else {}
-        linked = any(any(member["origin"] == event.unified_msg_origin
-                         for member in link["members"] + link.get("detached", [])) for link in records.values())
-    except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):
-        # Unable to establish that this persisted installation is unlinked.
-        event.stop_event()
-        raise
-    if not linked:
+    gate = LinkedTurnGate.shared()
+    if getattr(gate, "linked_origins", None) is None:
+        # A new process whose host has not assembled yet: read the one
+        # management record once, with no migrations, creation or startup.
+        root = getattr(controller, "profile_root", None)
+        if root is None:
+            return False
+        from contextlib import closing
+        import sqlite3
+        from companion_v2.storage.runtime import StorageRuntime
+        path = root / "runtime" / StorageRuntime.DATABASE_FILENAME
+        if not path.is_file():
+            return False
+        try:
+            with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as connection:
+                row = connection.execute("SELECT value FROM runtime_metadata WHERE key = ?", (KEY,)).fetchone()
+            gate.linked_origins = linked_origins(json.loads(row[0]) if row else {})
+        except (OSError, sqlite3.Error, ValueError, TypeError, KeyError, AttributeError) as error:
+            # Nothing establishes a link for this origin: AstrBot's own reply continues.
+            logger.warning("[CompanionV2] 共享对话记录暂不可读 error_type=%s", type(error).__name__)
+            return False
+    if umo not in gate.linked_origins:
         return False
     event.stop_event()
     event.set_extra("companion_linked_failure", "linked_host_unavailable")
