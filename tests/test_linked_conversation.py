@@ -601,21 +601,24 @@ class LinkedConversationConcurrencyTests(LinkedReplyFixture, unittest.IsolatedAs
         self.assertEqual(result["data"]["code"], "dashboard_identity_required")
         self.assertEqual(self.controller.session.linked_conversations.records(), {})
 
-    async def test_busy_timeout_refuses_waiter_and_never_takes_away_holders_permit(self):
+    async def test_waiting_linked_turn_queues_without_a_time_limit(self):
         self.assertEqual((await self.link())["status"], "ok")
         self.pause_model = True
         first = await self.dispatch(self.event_for(0))
         await asyncio.wait_for(self.model_done.wait(), 15)
         waiter = self.event_for(1)
-        await asyncio.wait_for(await self.dispatch(waiter), 20)
-        self.assertTrue(waiter.is_stopped())
-        self.assertEqual(waiter.get_extra("companion_linked_failure"), "linked_busy")
-        self.assertFalse(first.done())
+        second = await self.dispatch(waiter)
+        # Longer than any tool or streaming turn was once allowed to take.
+        await asyncio.sleep(17)
+        self.assertFalse(second.done())
+        self.assertFalse(waiter.is_stopped())
         self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.sent, [])
         self.allow_model.set()
-        await first
+        await asyncio.wait_for(asyncio.gather(first, second), 20)
         await self.controller.session.linked_conversations.gate.drain()
-        self.assertEqual(self.contents(await self.history()), ["old", "old-reply", "A", "reply-A"])
+        self.assertEqual(self.contents(await self.history()),
+            ["old", "old-reply", "A", "reply-A", "B", "reply-B"])
 
     async def test_native_stop_can_abort_a_turn_while_unload_is_draining(self):
         from astrbot.builtin_stars.builtin_commands.commands.conversation import ConversationCommands
