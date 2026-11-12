@@ -12,7 +12,8 @@ from companion_v2.adapters.astrbot.application import AstrBotCompanionHost
 from companion_v2.adapters.astrbot.memory_owner import memory_owner_provider
 from companion_v2.adapters.astrbot.memory_push import memory_push_provider
 from companion_v2.adapters.astrbot.native import (
-    NativeConversationInput, NativePrivateBridge, bounded_native_lookup, event_account_id,
+    NativeConversationInput, NativePrivateBridge, NativeReplyEndpoint, NativeServedConversation,
+    bounded_native_lookup, event_account_id,
     event_peer_id, native_client_connected, native_id, native_user_subject_id,
     platform_client_matches,
     supported_platform_name,
@@ -149,6 +150,14 @@ class MultiPrivateBridge(NativePrivateBridge):
         self.target_for_scope(scope)
         return super().client(scope)
 
+    def resolve_core_conversation_owner(self, source_target):
+        """Identity default for ordinary private replies.
+
+        Existing role/primary window links belong to capture() and retain their
+        current semantics. Conversation linking can supply an owner here later.
+        """
+        return source_target
+
     async def capture_core_reply(self, event):
         """Authenticate a private route for AstrBot's reply path without reading attachments."""
         try:
@@ -180,13 +189,22 @@ class MultiPrivateBridge(NativePrivateBridge):
                                                    sender, account.bot_id, login)
             self.authority.ensure_actor(target)
             actor = require(self.identities.resolve_authenticated(principal, observed_at=at))
-            conversation_id, role, instruction = await self._role(account, sender)
+            owner = self.resolve_core_conversation_owner(target)
+            owner_platform, owner_login, owner_peer = owner.route_key
+            owner_account = self.accounts[(owner_platform, owner_login)]
+            conversation_id, role, instruction = await self._role(owner_account, owner_peer)
             scope = ScopeRef(self.installation_id, platform_id, ScopeKind.PRIVATE, sender,
                              account.bot_id, login, conversation_id, sender)
             if not platform_client_matches(self.platform(scope), event_client):
                 raise TaskError("host_client_mismatch", "private host account changed during persona lookup")
             self.client(scope)
             recipients = AudienceRef(scope, (actor.subject,))
+            source_endpoint = NativeReplyEndpoint(
+                principal, scope, target.target_id, self._umo(platform_id, sender), event_id, event_client)
+            owner_scope = ScopeRef(self.installation_id, owner_platform, ScopeKind.PRIVATE,
+                owner_peer, owner.bot_id, owner_login, conversation_id, owner_peer)
+            conversation = NativeServedConversation(
+                owner.target_id, self._umo(owner_platform, owner_peer), owner_scope, role)
             pieces = []
             for part in getattr(message, "message", ()):
                 kind = getattr(getattr(part, "type", None), "value", getattr(part, "type", None))
@@ -207,6 +225,7 @@ class MultiPrivateBridge(NativePrivateBridge):
             return Outcome.success(NativeConversationInput(
                 event_id, principal, ConversationRoute(scope, user=actor.subject), recipients,
                 text, at, role, instruction,
+                source_endpoint=source_endpoint, conversation=conversation,
             ))
         except TaskError as error:
             return Outcome.failed(error.code, str(error))
@@ -421,6 +440,14 @@ class CoreReplyPlan:
     captured: NativeConversationInput
     context: TaskContext
     debounce: PrivateDebouncePolicy | None = None
+
+    @property
+    def source_endpoint(self):
+        return self.captured.source_endpoint
+
+    @property
+    def conversation(self):
+        return self.captured.conversation
 
 
 class PrivateDialogueDenied(TaskError):
@@ -1287,7 +1314,7 @@ class MultiHostSession:
                 except Exception as error:
                     logger.warning("[CompanionV2] 私聊后台绑定调度降级 error_type=%s", type(error).__name__)
                 prepared_ok = True
-                return Outcome.success({
+                prepared = {
                     "context": context,
                     "instruction": captured.instruction,
                     "prompt_instruction": prompt_instruction,
@@ -1316,7 +1343,11 @@ class MultiHostSession:
                     "configured_voice_reply_policy": configured_voice_policy,
                     "voice_provider_instruction": voice_direction,
                     "reaction_reply_enabled": reaction_reply_enabled,
-                })
+                }
+                if captured.source_endpoint is not None:
+                    prepared["source_endpoint"] = captured.source_endpoint
+                    prepared["conversation"] = captured.conversation
+                return Outcome.success(prepared)
             except TaskError as error:
                 return CoreReplyOutcome.from_failure(error)
             except Exception as error:
