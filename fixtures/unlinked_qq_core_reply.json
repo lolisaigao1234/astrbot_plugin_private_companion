@@ -1,0 +1,142 @@
+{
+  "context_key": "35d0804893e0e589b0e8481e8115194db828c947d98d65ff23b037a89d2299fb",
+  "history": [
+    {
+      "content": "以前的消息",
+      "role": "user"
+    },
+    {
+      "content": "以前的回答",
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "text": "摸摸",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": null,
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{}",
+            "name": "companion_v2_turn_evidence"
+          },
+          "id": "ownership-tool",
+          "type": "function"
+        }
+      ]
+    },
+    {
+      "content": "{\"effect\":\"none\",\"evidence_handles\":[\"native-input:core-input-395b4abdd3ae0a15f32b9609c0ff5eb2df2477e314bd407e26ce8dd685d87142\"],\"memory_evidence_handle\":\"memory-source-a38467b299090b91be5bf11339d514050196cdb3456e65610b31472aa6966124\",\"state\":\"succeeded\"}",
+      "role": "tool",
+      "tool_call_id": "ownership-tool"
+    },
+    {
+      "content": [
+        {
+          "text": "嘿嘿，再摸一下！",
+          "type": "text"
+        }
+      ],
+      "role": "assistant"
+    }
+  ],
+  "instruction": "你是原来的角色，比折的陪伴者。",
+  "memory_owner": "a4d3b2e7e5e3942240293f9496f30d17c021b889fef6a7389b58c6f3a8b0922c",
+  "prepared_keys": [
+    "astrbot_animated_image_understanding_enabled",
+    "channel",
+    "configured_voice_reply_policy",
+    "context",
+    "context_materials",
+    "context_sections",
+    "event_id",
+    "event_ref",
+    "expression_signal_ids",
+    "group_tool_profile",
+    "instruction",
+    "laya_decision",
+    "native_input",
+    "native_source_future",
+    "origin_key",
+    "outbound_settings",
+    "perception_context",
+    "perception_guidance",
+    "perception_instructions",
+    "perception_options",
+    "platform_name",
+    "preparation_steps",
+    "presentation_settings",
+    "private_closing",
+    "prompt_instruction",
+    "reaction_reply_enabled",
+    "segmentation_settings",
+    "stable_prompt_instruction",
+    "target_id",
+    "text",
+    "turn_id",
+    "voice_provider_instruction",
+    "voice_reply_policy"
+  ],
+  "presentation": {
+    "content_cleanup_enabled": true,
+    "content_cleanup_mode": "words",
+    "content_cleanup_rule": "[\\n]",
+    "content_cleanup_scope": "trailing",
+    "content_cleanup_words": "[\"\\n\"]",
+    "content_replacement_enabled": false,
+    "content_replacements": "[]",
+    "enable_forbidden_word_recall": false,
+    "framework_error_guard_enabled": true,
+    "recall_forbidden_scope": "bot_and_group",
+    "recall_forbidden_word_case_sensitive": false,
+    "recall_forbidden_words": "[]"
+  },
+  "principal": {
+    "account_id": "100",
+    "bot_id": "bot-a",
+    "host_id": "astrbot-native",
+    "installation_id": "astrbot-private-companion-v2:multi:shared-test",
+    "native_account_id": "200",
+    "platform": "qq-main"
+  },
+  "role": "role-a",
+  "scope": {
+    "account_id": "100",
+    "bot_id": "bot-a",
+    "conversation_id": "astrbot-conversation:conversation-a:v2-role:3f8ef8c41379d3ab7d7da05ee45e7c0ee358d30808a9a0de923a0047ae2c0b96",
+    "installation_id": "astrbot-private-companion-v2:multi:shared-test",
+    "kind": "private",
+    "native_scope_id": "200",
+    "platform": "qq-main",
+    "session_id": "200"
+  },
+  "segmentation": {
+    "enabled": true,
+    "llm_controlled": false,
+    "match_width_variants": true,
+    "max_segments": 5,
+    "min_segment_chars": 5,
+    "part_gap_log_base": 2.1,
+    "part_gap_max_ms": 3500,
+    "part_gap_min_ms": 1500,
+    "part_gap_mode": "log",
+    "part_gap_ms": 0,
+    "prompt": "",
+    "rule_mode": "words",
+    "rule_regex": "(?<=[。！？!?…~～])\\s*|\\n+",
+    "rules_enabled": true,
+    "split_words": "[\"。\", \"？\", \"！\", \"~\", \"～\", \"?\", \"!\", \";\", \"；\", \"……\", \"…\"]",
+    "streaming": false,
+    "streaming_mode": "buffered",
+    "threshold": 500
+  },
+  "turn_id": "core-reply:7739bf5adddb4d19f84de94d9ae631bca37d8f215caeb787ab0a93b37ad0de3e",
+  "user": "onebot-user:200"
+}
