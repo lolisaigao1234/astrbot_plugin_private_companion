@@ -321,6 +321,43 @@ class StartupRetryTests(unittest.IsolatedAsyncioTestCase):
         staging.load_existing.assert_awaited_once()
         self.assertEqual(staging.serve_available_accounts.await_count, 3)
 
+    async def test_a_host_stopped_while_an_account_waits_is_not_started_again(self):
+        plugin = ENTRY.PrivateCompanionV2StagingPlugin.__new__(ENTRY.PrivateCompanionV2StagingPlugin)
+        plugin._host_start_task = None
+        plugin._session_settings_warm_task = None
+        plugin._qzone_life_publisher = object()
+        plugin._startup_failure_key = None
+        plugin._startup_failure_at = 0.0
+        application = NS(state="running")
+        staging = NS(
+            settings=NS(enabled=True),
+            _terminated=False,
+            _accepting=False,
+            session=None,
+            startup_readiness=Mock(return_value=None),
+            load_existing=AsyncMock(return_value=Outcome.success({"loaded": True})),
+        )
+
+        async def start():
+            staging._accepting, staging.session = True, NS(application=application)
+            return Outcome.success({"state": "running"})
+
+        async def serve_available_accounts():
+            # One account stays unavailable; a host that is not running has nothing to pick up.
+            return application.state != "running"
+        staging.start = AsyncMock(side_effect=start)
+        staging.serve_available_accounts = AsyncMock(side_effect=serve_available_accounts)
+        plugin.staging = staging
+
+        with patch.object(ENTRY, "warm_session_settings", new=AsyncMock()):
+            await plugin.initialize()
+            await asyncio.sleep(0.1)
+            self.assertFalse(plugin._host_start_task.done())
+            staging._accepting, application.state = False, "stopped"
+            await asyncio.wait_for(plugin._host_start_task, timeout=5)
+
+        staging.start.assert_awaited_once()
+
 
 if __name__ == "__main__":
     unittest.main()

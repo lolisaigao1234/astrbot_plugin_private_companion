@@ -510,9 +510,6 @@ class PrivateCompanionV2StagingPlugin(Star):
         if readiness is not None:
             self._note_startup_failure("readiness", readiness)
             return True
-        if self._host_serving():
-            # Already serving: only accounts that were unavailable are left to pick up.
-            return await self.staging.serve_available_accounts()
 
         initialized_profile = False
         if self.staging.session is None:
@@ -597,9 +594,13 @@ class PrivateCompanionV2StagingPlugin(Star):
         started_at = loop.time()
         delay = 0.5
         warned = False
+        serving = self._host_serving()
         while not self.staging._terminated:
             try:
-                finished = await self._try_start_host()
+                # Once the host serves, only accounts that were unavailable are left to
+                # pick up; a host that was stopped since then is not started again here.
+                finished = await (self.staging.serve_available_accounts() if serving
+                                  else self._try_start_host())
             except asyncio.CancelledError:
                 raise
             except Exception as error:
@@ -608,7 +609,8 @@ class PrivateCompanionV2StagingPlugin(Star):
                 return
             if finished:
                 return
-            if not warned and not self._host_serving() and loop.time() - started_at >= 30:
+            serving = serving or self._host_serving()
+            if not warned and not serving and loop.time() - started_at >= 30:
                 logger.warning("[CompanionV2] 运行档尚未进入接收状态，恢复任务仍在运行并会自动重试")
                 warned = True
             await asyncio.sleep(delay)
