@@ -88,6 +88,9 @@ class ChannelIsolationFixture(MultiFixture):
         observer = self.controller.session.core_reply_observations
         while pending := observer._pending - observer._intervention_tasks:
             await asyncio.gather(*tuple(pending))
+            # A task can be done with its own done callbacks still queued; gather then
+            # completes without yielding, so yield once to let them clear the set.
+            await asyncio.sleep(0)
 
     async def telegram_reply(self, text="我在 Telegram 这里", identifier=1):
         self.event = event = telegram_event(self.telegram, identifier=identifier)
