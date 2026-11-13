@@ -543,6 +543,54 @@ class LinkedOwnerTests(LinkedReplyFixture, unittest.IsolatedAsyncioTestCase):
         self.assertFalse(owner.read(self.window(first), fields).fields[field].value)
         self.assertEqual((allowed(first), allowed(second)), (True, False))
 
+    async def contact_editor(self, identifier):
+        """Both linked endpoints, an operator, and the contact section as the settings editor shows it."""
+        from astrbot_host.management_identity import dashboard_operator
+        from companion_v2.configuration.management import ProactiveContactManagement
+        from companion_v2.relationships.private_management import PrivateMemberSettings
+        self.assertEqual((await self.link())["status"], "ok")
+        first = (await self.turn(0, "Contact preferences", identifier + "-a"))["context"]
+        second = (await self.turn(1, "Contact preferences again", identifier + "-b"))["context"]
+        operator = dashboard_operator(self.app.runtime, "synthetic-admin", at=self.clock.now())
+        shared = ProactiveContactManagement(self.app, first)
+        require(shared.configure(operator, {"operation_key": "global-contact-defaults",
+            "edit_token": require(shared.status(operator))["edit_token"],
+            "changes": {"enabled": True, "interval_seconds": 600}}))
+
+        def contact(context):
+            status = require(PrivateMemberSettings(self.app, context).status(operator))
+            self.assertEqual(status["section_errors"], {})
+            return status["sections"]["contact"]
+
+        def save(writer, values, command=None):
+            """Save through the editor; the same command again is a repeat of that save."""
+            command = command or {"operation_key": "contact-override-%d" % values["interval_seconds"], "sections": {
+                "contact": {"edit_token": contact(writer)["edit_token"], "changes": values}}}
+            return command, require(PrivateMemberSettings(self.app, writer).configure(operator, command))
+        return first, second, contact, save
+
+    async def test_a_contact_override_saved_in_the_settings_editor_reads_the_same_on_both_endpoints(self):
+        from datetime import timedelta
+        first, second, contact, save = await self.contact_editor("contact-override")
+        pause = (self.clock.now() + timedelta(hours=1)).isoformat()
+        for writer, values in ((second, {"enabled": False, "interval_seconds": 1200, "pause_until": pause}),
+                               (first, {"enabled": False, "interval_seconds": 1800, "pause_until": ""})):
+            _, saved = save(writer, values)
+            for context in (first, second):
+                settings = contact(context)["settings"]
+                self.assertEqual({name: settings[name] for name in values}, values)
+            operation = require(self.app.configuration.operations.get(saved["results"]["contact"]["operation_id"]))
+            self.assertEqual(operation.operation.scope, writer.scope)
+
+    async def test_a_repeated_settings_save_from_a_joined_endpoint_finds_its_receipt(self):
+        first, second, _, save = await self.contact_editor("contact-replay")
+        for writer, values in ((second, {"interval_seconds": 1200}), (first, {"interval_seconds": 1800})):
+            command, saved = save(writer, values)
+            _, repeated = save(writer, values, command)
+            self.assertTrue(repeated["results"]["contact"]["replayed"])
+            self.assertEqual(repeated["results"]["contact"]["operation_id"],
+                             saved["results"]["contact"]["operation_id"])
+
     async def test_model_window_settings_are_shared_in_dashboard_and_runtime_reads(self):
         from astrbot_host.management_identity import dashboard_operator
         from astrbot_host.model_route_material import route_snapshot
