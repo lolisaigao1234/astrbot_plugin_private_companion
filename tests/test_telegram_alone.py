@@ -880,6 +880,29 @@ class LinkedMappingSaveTests(TelegramAloneFixture, unittest.IsolatedAsyncioTestC
         self.assertEqual((await self.history_seen_from(QQ))[-4:],
                          ["after the save", "reply-A", "after the save", "reply-B"])
 
+    async def test_a_mapping_save_that_removes_the_last_configured_endpoint_of_a_link_is_refused_before_anything_stops(self):
+        from companion_v2.execution.models import TaskError
+        self.assertEqual((await self.link())["status"], "ok")
+        await self.turn(0, "from QQ", "1")
+        await self.turn(1, "from Telegram", 2)
+        self.assertEqual((await self.link(revision=1, members=["second"]))["status"], "ok")
+        written, session, before = [], self.controller.session, deepcopy(self.controller.config)
+        self.controller.save_plugin_config = written.append
+        candidate = deepcopy(before)
+        host = candidate["multi_host"]
+        host["targets"] = [row for row in host["targets"] if row["platform_id"] != "tg-main"]
+        host["personas"] = [row for row in host["personas"] if row["bot_id"] != "bot-tg"]
+        with self.assertRaises(TaskError) as refused:
+            await self.controller.apply_bindings(candidate)
+        self.assertEqual(refused.exception.code, "conversation_link_last_endpoint")
+        self.assertIn("at least one", str(refused.exception))
+        # Nothing was stopped or saved: the same session goes on with the same mapping and link.
+        self.assertEqual((written, self.controller.config), ([], before))
+        self.assertIs(self.controller.session, session)
+        self.assertEqual(self.health()[0], ("running", True, None))
+        self.assertEqual([row["origin"] for row in self.link_record()["members"]], [TELEGRAM])
+        await self.turn(1, "still the conversation", 3)
+
     async def saved_with_a_removed_endpoint_still_configured(self, removed):
         remaining, names = 1 - removed, ("first", "second")
         self.assertEqual((await self.link())["status"], "ok")
