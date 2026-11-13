@@ -31,8 +31,9 @@ copied, merged or rekeyed.
 The returned document has `schema_version: 1` and an incremented `revision`. Account API GET
 includes `conversation_links`. To replace membership, POST the same link ID and conversation
 ID, the current `expected_revision`, the original `source_target_id`, and the complete desired
-member list. A stale revision is refused. Changing the conversation anchor is deferred to
-lifecycle controls (#7).
+member list. A stale revision is refused. The conversation ID in the document is the one
+the members currently select: AstrBot's `/new` from a member replaces it and increments the
+revision (see "Shared controls"), so read the current document before editing.
 
 The optional `preferred_target_id` names the member that receives the conversation's
 reminders and proactive text; it must be one of `member_target_ids`. A new link starts with
@@ -50,9 +51,42 @@ between these steps, selection validation refuses turns until management retries
 revision. It never silently creates a replacement conversation.
 
 The original endpoint need not remain connected or in the member list. The anchor retains
-conversation/role metadata rather than a live endpoint dependency. Detached endpoints remain
-refused, including when the initial source is omitted from membership. They cannot continue
-unguarded against the shared CID. Fresh independent admission/unlink controls belong to #7.
+conversation/role metadata rather than a live endpoint dependency.
+
+## Removing an endpoint
+
+Post the link again without the endpoint in `member_target_ids`. The operation needs the same
+quiescence as any link edit, so a turn in flight makes it busy; nothing is copied or rekeyed.
+
+- The endpoints that remain keep the conversation, its whole history, memory, settings and
+  records. Records the removed endpoint contributed stay where they are, with their source.
+- The removed endpoint is listed under `detached` and is closed: its messages and session
+  commands are refused, and no routine is started under it. It no longer selects the shared
+  conversation; AstrBot's `new_conversation()` gives it a new, empty one, and nothing of the
+  shared transcript is copied there.
+- Membership, not the storage key, decides what an endpoint reads. The membership index knows
+  the removed endpoints, so every permission decision and every saved task context of a removed
+  endpoint is refused (`conversation_link_revoked`, or `scope_not_granted` from a direct grant
+  check). This includes the endpoint the conversation started on, whose native bot, role and
+  human keys are the shared owner's.
+- The revision is incremented. Replies prepared, tools running and sends pending under an
+  earlier revision are refused, also after the endpoint is linked again: relinking is a new
+  revision and revives nothing.
+- A removed endpoint is used on its own only after an administrator admits it: post the link
+  with `"independent_target_ids": ["that-target"]` beside the unchanged member list. It then
+  leaves the link record, answers with its own native identity and continues in the new, empty
+  conversation.
+- The endpoint the conversation started on is not admitted independently
+  (`linked_anchor_endpoint_closed`): its native identity is the conversation's stored owner, so
+  beside the link it would read what the conversation learns later. It can be linked again.
+- Routines a running host had bound to the removed endpoint (diary, sleep, state maintenance,
+  proactive source maintenance) are refused from then on; a remaining endpoint takes them over
+  at the next host start. Restart the companion host after removing the endpoint that was bound
+  first. Reminders and proactive contact are not bound to an endpoint this way and need no
+  restart (see "Reminders and proactive text").
+- Removing the only remaining endpoint and running without QQ in configuration belong to #12.
+  A removed endpoint is not a member of the link record, is never the destination of
+  background text, and no send is authorized for it.
 
 ## Shared companion owners
 
@@ -134,8 +168,7 @@ until the record can be read again. Without an explicit link, owner resolution l
 existing addresses, stored record forms and query counts unchanged.
 
 This does **not** unify proactive contact preferences' legacy fallbacks or window budget
-accounts, which stay with exact-scope accounting. Exact-window diagnostic/legacy usage views also remain physical. A detached anchor
-endpoint keeps the owner it natively holds; revoking that belongs to #7.
+accounts, which stay with exact-scope accounting. Exact-window diagnostic/legacy usage views also remain physical.
 The plugin's existing Dashboard log-buffer behavior is unchanged; the tagged input log
 is available through AstrBot's plugin logging. Independent-channel startup permits the
 remaining endpoint to restart while the original platform is absent; the memory and
@@ -155,25 +188,35 @@ other.
 - Authority is never borrowed. The endpoint the work was recorded on still needs its own
   permission for it, as before. The destination needs its own permission for the same kind
   of text (`reminder.deliver`, `proactive.contact`) and for dialogue, a registered and
-  connected account, and its configured target. These and the link revision are checked
-  again immediately before the platform call.
+  connected account, and its configured target. Immediately before the platform call these
+  are checked again, together with the link: the same member must still be the preferred
+  one. The link revision is recorded with the route but is not the fence, because it also
+  advances when the members start a new conversation together (`/new`); pending reminders
+  and proactive text are kept across that.
 - Once dispatch has begun the attempt keeps its destination. Selecting another member affects
   texts that are dispatched afterwards; nothing already sent, failed or uncertain is sent again.
 - Nothing is broadcast and no other member is tried. A destination that refuses, or whose
   account is unavailable, leaves the text unsent: the delivery is `cancelled` with the
   refusal code as its reason (for example `authorization_revoked`, `host_account_changed`)
   when it is refused before dispatch, or `failed` with the sender's code in its receipt when
-  it is refused at the platform call (`delivery_route_changed` when the link changed in
-  between). A send that raises is `unknown` and is never repeated. `delivered` means the
+  it is refused at the platform call (`delivery_route_changed` when another member was
+  chosen, or the destination left, in between). A send that raises is `unknown` and is never repeated. `delivered` means the
   channel accepted the send; it says nothing about the human having read it.
-- When the preferred member leaves the link and no other is named, the conversation has no
-  destination (`background_destination: missing`). Texts that come due are recorded as
+- When the preferred member is removed from the link and no other is named, the conversation
+  has no destination (`background_destination: missing`). A removed endpoint is never a
+  destination, also not while it waits in the link's removed list. Texts that come due are recorded as
   `cancelled` with `delivery_destination_missing`; the reminder, its later occurrences and
   its history stay. This state is part of the stored link, so a restart keeps it. After an
   administrator selects a member, later texts go there; earlier ones are not sent.
+- A reminder whose time was last set from an endpoint that has since been removed is not
+  delivered (`blocked`, `scope_not_granted`): the removed endpoint's work is revoked
+  with it. The record stays shared, and setting its time again from a remaining member makes
+  it that member's work.
 - Proactive contact is planned for one window of the conversation: the one with its most
   recent turn. The other windows wait, and a contact planned on one endpoint is withdrawn
-  when the human speaks on another. Idle time, unanswered contacts, cooldown, budgets and
+  when the human speaks on another. Only current members count: when the window that
+  carried the schedule is removed, a remaining member's window carries it from the next
+  pass, with no restart. Idle time, unanswered contacts, cooldown, budgets and
   event history are those of that window. Preferences (master switch, quiet hours, pauses)
   are the conversation's and apply on every endpoint; consent to proactive contact is each
   endpoint's own.
@@ -254,13 +297,44 @@ members is followed, a difference between members refuses turns until they agree
 unrelated configuration (whitelist, admins, platforms, the provider list) is ignored.
 Event/handler model overrides that change the selected model are refused.
 
-AstrBot's own session-changing commands (`/reset`, `/new`, `/provider`, `/set`, `/unset`) and the
-companion's literal binding/unbinding and full-reset commands are refused on linked endpoints.
-Other plugins' commands and AstrBot's remaining commands pass untouched. Native `/stop`
-remains available, including during drain, and stops only its own physical origin. Coherent shared
-controls are #7. Live Mode is refused because it writes history twice. Native cron/background
+Live Mode is refused because it writes history twice. Native cron/background
 history-writing tools are filtered from linked turns. Companion room writers skip linked CIDs
 and cannot race first-link creation. Unlinked coordination and reply preparation stay unchanged.
+
+## Shared controls
+
+AstrBot 4.29.4 keys its session settings by origin and has no shared-session configuration, so
+the companion does not reimplement its commands: a member's command runs unchanged, by
+AstrBot's own handler and under AstrBot's own permission filter for that physical sender, inside
+the conversation permit. A command therefore waits for the turn that is being saved, and no
+turn loads history while it runs. Afterwards, still inside the permit, the companion makes the
+other members agree with the endpoint that ran the command, through AstrBot's public setters.
+
+| Control | On a linked endpoint |
+| --- | --- |
+| `/new` | First stops what is in flight on every member, as AstrBot does on its own origin. AstrBot creates the conversation and keeps the previous one; the link record takes the new conversation ID with a new revision and every member selects it. |
+| `/reset` | First stops what is in flight on every member. AstrBot clears the one shared history. |
+| `/set`, `/unset` | The session variables of the endpoint that ran the command become those of every member. |
+| `/provider` | AstrBot's administrator check applies to the physical sender. The chat provider then selected becomes that of every member (`provider_manager.set_provider`). Speech providers stay per channel. |
+| `/stop` | Not queued. It stops its own origin as before and also asks the turns running on the other members to stop. |
+| `陪伴 全部重置` | Runs inside the permit with its own rules: installation core tier of the physical endpoint (a joined endpoint never has it), preview, a confirmation code bound to the memory revision. It forgets the relationship's memory, which the members share, and ends the temporary context of every member's window. It is not a context reset: AstrBot's history is untouched. |
+| Binding and unbinding commands | Refused, as before. |
+| Other plugins' commands, AstrBot's remaining commands | Untouched. |
+
+`/new` and `/reset` leave long-term memory alone. They end the companion's temporary window
+context for every endpoint of the link, as they do for one window when unlinked.
+
+AstrBot has no persona or model chat command at this version. The conversation's persona is
+stored with the conversation and is therefore one value; a persona forced per session, a
+configuration profile or a provider chosen per origin in the Dashboard still has to be set
+alike for every member, and a difference refuses turns (`linked_settings_mismatch`) until a
+control or the Dashboard aligns them. A control is checked on its own origin only, so it can
+repair such a difference. If AstrBot's handler fails halfway, the members may disagree; turns
+are then refused, never forked, until the next control or link edit.
+
+Sharing a conversation grants nothing: AstrBot administrator status follows the physical
+sender, companion tiers and grants follow the physical endpoint, and other plugins (the stack
+updater among them) see the physical event as before.
 
 Linked origins are indexed in memory. An event from any other origin, including every group
 event, returns from the companion's link hooks without reading the link record. While the host
@@ -289,7 +363,7 @@ chats and chats that are not companion targets keep AstrBot's own replies.
   and continues with the new window's own contact history: a daily contact allowance or an
   event already shared on the previous endpoint is not counted on the new one.
 - The QQ proactive platform circuit is recorded for the account the contact was planned on.
-- Coherent controls (#7), cross-endpoint stop and operational recovery remain work.
+- Running without QQ (#12) and operational recovery remain work.
 
 ## Offline proof
 
@@ -325,6 +399,13 @@ the permit and checks that it loads no history, so it fails if the gate stops se
 fencing, send-failure and shared-owner cases with the joining endpoint on Telegram, and adds
 its tool boundary and each channel running without the other.
 
+`tests.test_linked_controls` links QQ and Telegram and registers AstrBot's own command
+handlers. It removes either endpoint, including the one the conversation started on, and
+checks what the removed endpoint can still read, select and start, admission to independent
+use, relinking and a restart. Each control is sent from one endpoint while a turn of the
+other is paused: the command stays queued on the permit and changes nothing until that turn
+has unwound.
+
 Run these suites with an AstrBot SDK environment that uses a temporary data root, never an
 installed plugin or a live data directory:
 
@@ -332,7 +413,8 @@ installed plugin or a live data directory:
 python -X utf8 -m unittest -q \
   tests.test_linked_owners tests.test_linked_conversation tests.test_astrbot_linked_turn_contract \
   tests.test_core_reply_conversation_ownership tests.test_telegram_private_reply \
-  tests.test_telegram_linked_conversation tests.test_telegram_text_tools tests.test_linked_text_stores
+  tests.test_telegram_linked_conversation tests.test_telegram_text_tools tests.test_linked_text_stores \
+  tests.test_linked_controls
 ```
 
 No network, installed plugin, deployment state or running AstrBot container is used.

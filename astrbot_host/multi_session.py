@@ -762,6 +762,9 @@ class MultiHostSession:
             seen.add(target.target_id)
             if not self.bridge.account_connected(self.bridge.accounts[(target.platform_id, target.account_id)]):
                 continue
+            if self.linked_conversations.removed(target):
+                # Closed until it is admitted on its own: no routine runs under it.
+                continue
             try:
                 context, instruction = await self.synchronize(target)
                 self.application.life_runtime.bind(context, instruction, guard=self.bridge.verify_role)

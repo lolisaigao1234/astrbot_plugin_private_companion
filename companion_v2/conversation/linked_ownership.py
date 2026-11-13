@@ -55,7 +55,7 @@ def preferred_target_id(record):
 
 class _Index:
     def __init__(self):
-        self.raw, self.rejected, self.members, self.scopes, self.current = None, None, {}, {}, False
+        self.raw, self.rejected, self.members, self.scopes, self.removed, self.current = None, None, {}, {}, set(), False
 
     def load(self, runtime):
         row = runtime.read_one("SELECT value FROM runtime_metadata WHERE key = ?", (LINKS_KEY,))
@@ -64,12 +64,14 @@ class _Index:
             if raw == self.rejected:
                 raise ValueError("the stored conversation links are malformed")
             self.rejected = raw
-            members, scopes = {}, {}
+            members, scopes, removed = {}, {}, set()
             for record in (json.loads(raw) if raw else {}).values():
                 link = _Link(record)
                 members.update(dict.fromkeys(link.endpoints, link))
                 scopes.update(dict.fromkeys(link.scopes, link))
-            self.raw, self.members, self.scopes = raw, members, scopes
+                removed.update((row["platform_id"], row["account_id"], row["participant_id"])
+                               for row in record.get("detached", []))
+            self.raw, self.members, self.scopes, self.removed = raw, members, scopes, removed - set(members)
         self.current = True
 
 
@@ -127,6 +129,19 @@ def conversation_link(runtime, scope):
     return _lookup(runtime, "scopes", scope) if scope.kind is ScopeKind.PRIVATE else None
 
 
+def endpoint_removed(runtime, platform, account, participant):
+    """An endpoint taken out of a link stays closed until it is admitted on its own.
+
+    Its native keys can be the shared owner's (the endpoint the conversation
+    started on), so membership, never the key, decides what it may read.
+    """
+    index = _INDEXES.get(_records_runtime(runtime))
+    if index is None:
+        return False
+    link_for_endpoint(runtime, platform, account, participant)
+    return (platform, account, participant) in index.removed
+
+
 def link_for_scope(runtime, scope):
     if scope.kind is not ScopeKind.PRIVATE:
         return None
@@ -156,6 +171,8 @@ def endpoint_scope(runtime, principal, scope):
     """
     if scope.kind is ScopeKind.PRIVATE:
         endpoint = (principal.platform, principal.account_id, principal.native_account_id)
+        if endpoint_removed(runtime, *endpoint):
+            return None
         link = link_for_endpoint(runtime, *endpoint)
         if link is not None and scope in link.scopes:
             return link.scope_at(*endpoint)

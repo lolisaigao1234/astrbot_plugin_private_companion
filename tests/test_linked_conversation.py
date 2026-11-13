@@ -235,7 +235,7 @@ class LinkedConversationConcurrencyTests(LinkedReplyFixture, unittest.IsolatedAs
     async def test_cancel_during_save_unwinds_native_lock_before_successor(self):
         await self.cancel_active_pair("saving")
 
-    async def test_native_stop_bypasses_gate_and_preserves_native_abort_persistence(self):
+    async def test_native_stop_bypasses_gate_reaches_every_member_and_preserves_native_abort_persistence(self):
         from astrbot.builtin_stars.builtin_commands.commands.conversation import ConversationCommands
         commands = ConversationCommands(self.core_context)
         self.builtin("stop", commands.stop)
@@ -244,41 +244,48 @@ class LinkedConversationConcurrencyTests(LinkedReplyFixture, unittest.IsolatedAs
         a = self.event_for(0)
         first = await self.dispatch(a)
         await asyncio.wait_for(self.model_done.wait(), 15)
-        second = await self.dispatch(self.event_for(1))
+        b = self.event_for(1)
+        second = await self.dispatch(b)
         stop = self.event_for(0, "/stop", "stop-command")
         await asyncio.wait_for(await self.dispatch(stop), 5)
         await asyncio.wait_for(asyncio.gather(first, second), 20)
         await self.controller.session.linked_conversations.gate.drain()
         self.assertTrue(any("Requested to stop" in str(payload) for _, payload in self.sent))
         self.assertFalse(a.is_stopped())
+        # One conversation: the turn queued on the other member is asked to stop too, as
+        # AstrBot stops everything in flight on one origin. Each keeps AstrBot's own
+        # persistence of an aborted turn, in order.
+        self.assertFalse(b.is_stopped())
         self.assertEqual([write[0] for write in self.manager.writes], list(ORIGINS))
-        self.assertEqual(self.contents(await self.history())[-2:], ["B", "reply-B"])
+        self.assertNotIn("reply-B", self.contents(await self.history()))
 
-    async def test_session_commands_are_refused_and_other_plugins_commands_pass(self):
-        from astrbot.core.message.message_event_result import MessageChain
+    async def test_session_commands_run_inside_the_permit_and_other_plugins_commands_pass(self):
+        from astrbot.core.message.message_event_result import MessageChain, MessageEventResult
         called = []
+        gate = self.controller.session.linked_conversations.gate
         for command, name in (("reset", "reset"), ("new", "new_conv"), ("provider", "provider"),
                               ("set", "set_variable"), ("unset", "unset_variable")):
-            async def destructive(event):
-                called.append(event.message_str)
-                await self.manager.update_conversation(event.unified_msg_origin, "conversation-a", history=[])
-            self.builtin(command, destructive, name)
+            async def session_command(event):
+                called.append(gate.holds("conversation-a", event))
+                event.set_result(MessageEventResult().message("done"))  # as each of AstrBot's does
+            self.builtin(command, session_command, name)
         async def update_stack(event):
             called.append(event.message_str)
             await event.send(MessageChain().message("stack updated"))
         self.config["plugin_set"].append("synthetic_updater")
         self.builtin("update_stack", update_stack, module="synthetic_updater.main")
         self.assertEqual((await self.link())["status"], "ok")
-        for index, text in enumerate(("/reset", "/new", "/provider", "/set", "/unset", "陪伴 全部重置")):
+        for index, text in enumerate(("/reset", "/new", "/provider", "/set", "/unset")):
             with self.subTest(text=text):
                 event = self.event_for(1, text, "command-" + str(index))
                 await asyncio.wait_for(await self.dispatch(event), 10)
-                self.assertTrue(event.is_stopped())
-        self.assertEqual(called, [])
+                self.assertFalse(event.is_stopped())
+        # AstrBot's own handler ran each time, holding the conversation permit.
+        self.assertEqual(called, [True] * 5)
         event = self.event_for(1, "/update_stack", "third-party-command")
         await asyncio.wait_for(await self.dispatch(event), 10)
         self.assertFalse(event.is_stopped())
-        self.assertEqual(len(called), 1)
+        self.assertEqual(called[5:], ["update_stack"])
         self.assertIn("stack updated", str(self.sent[-1]))
         self.assertEqual(self.calls, [])
         self.assertEqual(self.manager.writes, [])

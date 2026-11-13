@@ -162,6 +162,9 @@ class PreferredReminderTests(PreferredChannelFixture, unittest.IsolatedAsyncioTe
         chosen = await self.link(revision=1, preferred_target_id="first")
         self.assertEqual((chosen["status"], chosen["data"]["preferred_target_id"], chosen["data"]["revision"]),
                          ("ok", "first", 2))
+        edited = await self.link(revision=2, members=["second", "first"])
+        self.assertEqual((edited["status"], edited["data"]["preferred_target_id"]), ("ok", "first"))
+        self.assertEqual((await self.link_view())["background_destination"], "selected")
         context, occurrence = await self.remind(1, "call home", identifier="from-telegram")
         self.sent.clear()
         self.qq_calls().clear()
@@ -228,6 +231,25 @@ class PreferredReminderTests(PreferredChannelFixture, unittest.IsolatedAsyncioTe
         self.assertEqual(report["delivery"], "delivered", report)
         self.assertEqual(self.telegram_texts(), [(str(TELEGRAM_OWNER), "moved reminder")])
 
+    async def test_a_pending_reminder_is_still_delivered_after_a_member_starts_a_new_conversation(self):
+        from astrbot.builtin_stars.builtin_commands.commands.conversation import ConversationCommands
+        self.builtin("new", ConversationCommands(self.core_context).new_conv)
+        context, occurrence = await self.remind(0, "after the new conversation", identifier="before-new")
+        self.assertEqual((await self.link())["status"], "ok")
+        event = self.event_for(1, "/new", "new-conversation")
+        await asyncio.wait_for(await self.dispatch(event), 30)
+        await self.controller.session.linked_conversations.gate.drain()
+        view = await self.link_view()
+        self.assertEqual((view["revision"], view["preferred_target_id"], view["background_destination"]),
+                         (2, "second", "selected"))
+        self.assertNotEqual(view["conversation_id"], "conversation-a")
+        self.sent.clear()
+        self.qq_calls().clear()
+        report = await self.settled(context, occurrence)
+        self.assertEqual(report["delivery"], "delivered", report)
+        self.assertEqual((self.telegram_texts(), self.qq_texts()),
+                         ([(str(TELEGRAM_OWNER), "after the new conversation")], []))
+
 
 class PreferredOutcomeTests(PreferredChannelFixture, unittest.IsolatedAsyncioTestCase):
     """What became of a text is recorded as it happened; the other endpoint is never used instead."""
@@ -283,6 +305,16 @@ class PreferredOutcomeTests(PreferredChannelFixture, unittest.IsolatedAsyncioTes
         self.assertEqual((report["delivery"], report["reason"]), ("cancelled", "host_account_changed"))
         clients.update(connected)
         await self.idle()
+        self.assertEqual((self.telegram_texts(), self.qq_texts()), ([], []))
+
+    async def test_a_reminder_last_set_from_an_endpoint_that_was_removed_is_not_delivered_anywhere(self):
+        _, context, occurrence = await self.linked_reminder(1, "from the removed endpoint")
+        self.assertEqual((await self.link(revision=1, members=["first"], preferred_target_id="first"))["status"], "ok")
+        self.clock.advance(timedelta(minutes=10, seconds=1))
+        await self.idle()
+        dispatch = self.app.runtime.read_one("SELECT state, reason FROM agenda_dispatches WHERE occurrence_id = ?",
+                                             (occurrence,))
+        self.assertEqual((dispatch["state"], dispatch["reason"]), ("blocked", "scope_not_granted"))
         self.assertEqual((self.telegram_texts(), self.qq_texts()), ([], []))
 
     async def test_a_telegram_send_that_raises_is_unknown_and_is_never_sent_again_on_either_endpoint(self):
@@ -388,6 +420,16 @@ class LinkedContactScheduleTests(PreferredChannelFixture, unittest.IsolatedAsync
         decided = self.evaluated(qq, telegram)
         self.assertNotEqual(decided[0], superseded)
         self.assertEqual(decided[1], superseded)
+
+    async def test_unlinking_the_window_that_held_the_schedule_hands_it_to_a_remaining_member_at_once(self):
+        superseded = "linked_conversation_continues_on_another_endpoint"
+        self.assertEqual((await self.link())["status"], "ok")
+        qq = await self.spoken(0, "qq-1")
+        telegram = await self.spoken(1, "tg-1")
+        self.assertEqual(self.evaluated(qq, telegram)[0], superseded)
+        self.assertEqual((await self.link(revision=1, members=["first"], preferred_target_id="first"))["status"], "ok")
+        self.clock.advance(timedelta(minutes=2))
+        self.assertNotEqual(self.evaluated(qq)[0], superseded)
 
     async def test_a_contact_planned_on_one_endpoint_is_withdrawn_when_the_human_speaks_on_the_other(self):
         from companion_v2.execution.models import TaskError

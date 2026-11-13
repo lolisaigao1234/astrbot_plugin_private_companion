@@ -97,23 +97,31 @@ class RoutedContactTests(LinkedConversation, ContactFixture, unittest.IsolatedAs
         self.assertEqual(row["reason"], "authorization_revoked")
         self.assertEqual(self.sent, [])
 
-    async def test_a_link_revision_that_changes_before_the_platform_call_stops_the_contact(self):
-        app = await self.enabled()
+    async def at_the_platform_call(self, app, change):
+        """Edit the link after the route was resolved; say what the sender's last check answers."""
+        refused = []
 
-        async def relinked(envelope):
-            self.link_revision = 2
+        async def edited(envelope):
+            change()
             self.link(app.runtime)
             try:
                 envelope.before_dispatch()
             except TaskError as error:
-                return self.receipt_for(envelope, error.code)
+                refused.append(error.code)
+                return self.receipt(envelope, "not_sent")
             return self.receipt(envelope)
-        self.send_behavior = relinked
+        self.send_behavior = edited
         task = (await self.contact(app)).unwrap().task
-        row = await self.delivery_state(app, task.task_id, "failed")
-        self.assertEqual(self.refused, ["delivery_route_changed"])
-        self.assertIsNotNone(row["operation_id"])
+        await self.until(lambda: (app.proactive._delivery_row(task.task_id) or {"state": ""})["state"]
+                         in ("delivered", "failed"))
+        return app.proactive._delivery_row(task.task_id)["state"], refused
 
-    def receipt_for(self, envelope, code):
-        self.refused = [code]
-        return self.receipt(envelope, "not_sent")
+    async def test_a_new_link_revision_with_the_same_preferred_member_does_not_stop_a_contact(self):
+        app = await self.enabled()
+        self.assertEqual(await self.at_the_platform_call(app, lambda: setattr(self, "link_revision", 2)),
+                         ("delivered", []))
+
+    async def test_another_preferred_member_chosen_before_the_platform_call_stops_the_contact(self):
+        app = await self.enabled()
+        self.assertEqual(await self.at_the_platform_call(app, lambda: setattr(self, "preferred", None)),
+                         ("failed", ["delivery_route_changed"]))

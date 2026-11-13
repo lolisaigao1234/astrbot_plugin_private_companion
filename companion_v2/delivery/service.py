@@ -110,7 +110,9 @@ class DeliveryRoute:
 
     @property
     def key(self):
-        return (self.context.key, self.link_id, self.link_revision)
+        # The revision is recorded, not fenced on: it also advances when the members
+        # start a new conversation together, which changes no destination.
+        return (self.context.key, self.link_id)
 
 
 class OutboundDelivery:
@@ -233,7 +235,7 @@ class OutboundDelivery:
         return DeliveryRoute(context, link["link_id"], link["revision"])
 
     def _fence(self, run, request, route):
-        """Before the platform call: the task, the link and the destination are what was resolved."""
+        """Before the platform call: the same member is still preferred, and is still what was resolved."""
         def check():
             run.validate()
             current = self._route(request)

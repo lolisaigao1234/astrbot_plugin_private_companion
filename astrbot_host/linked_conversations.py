@@ -22,6 +22,9 @@ EXTRA = "companion_linked_turn_v1"
 # AstrBot 4.29.4's own commands that replace the conversation, switch the
 # provider or write session variables (handler names in its builtin_commands).
 SESSION_COMMANDS = frozenset({"reset", "new_conv", "provider", "set_variable", "unset_variable"})
+# The two that end the current context: like AstrBot on its own origin, they
+# first stop what is in flight, here on every member.
+CONTEXT_COMMANDS = frozenset({"reset", "new_conv"})
 
 
 def origin(target):
@@ -71,6 +74,11 @@ class LinkedConversations:
             return None
         return next((link for link in self.records().values()
                      if any(row["origin"] == umo for row in link["members"] + link.get("detached", []))), None)
+
+    def removed(self, target):
+        """Taken out of a link and not admitted on its own since."""
+        link = self.for_origin(origin(target))
+        return link is not None and all(row["origin"] != origin(target) for row in link["members"])
 
     def for_event(self, event):
         try:
@@ -143,9 +151,13 @@ class LinkedConversations:
     async def manage(self, body):
         required = {"schema_version", "link_id", "expected_revision", "conversation_id",
                     "source_target_id", "member_target_ids"}
-        # Optional: the member that receives the conversation's reminders and proactive text.
+        # Optional: removed endpoints the administrator admits to independent use, and
+        # the member that receives the conversation's reminders and proactive text.
+        admitted = body.get("independent_target_ids", [])
         preferred = body.get("preferred_target_id")
-        if (set(body) - {"preferred_target_id"} != required or type(body["schema_version"]) is not int or body["schema_version"] != 1
+        if (set(body) - {"independent_target_ids", "preferred_target_id"} != required or type(admitted) is not list
+                or any(type(value) is not str for value in admitted)
+                or type(body["schema_version"]) is not int or body["schema_version"] != 1
                 or type(body["expected_revision"]) is not int or body["expected_revision"] < 0
                 or any(type(body[key]) is not str or not body[key].strip() or len(body[key]) > 128
                        for key in ("link_id", "conversation_id", "source_target_id"))
@@ -181,6 +193,7 @@ class LinkedConversations:
         origins = {row["origin"] for row in members + (old["members"] if old else [])}
         if source is not None:
             origins.add(origin(source))
+        origins.update(origin(session.settings.target(identifier)) for identifier in admitted)
         if origins & self.gate.editing_origins:
             raise TaskError("linked_busy", "another link operation is in progress")
         if any(active_event_registry._events.get(umo) for umo in origins):
@@ -230,6 +243,14 @@ class LinkedConversations:
                                                "platform_name": source_platform.meta().name}
                 for row in members:
                     detached.pop(row["origin"], None)
+                released = [detached.pop(origin(session.settings.target(identifier)), None) for identifier in admitted]
+                if None in released:
+                    raise TaskError("conversation_link_invalid", "only a removed endpoint can be admitted independently")
+                if any(row["origin"] == anchor["origin"] for row in released):
+                    # Its native bot, role and human keys are the shared owner's: opened
+                    # beside the link it would read what the conversation learns later.
+                    raise TaskError("linked_anchor_endpoint_closed",
+                                    "the endpoint the conversation started on cannot be admitted independently")
                 record = {"schema_version": 1, "link_id": body["link_id"],
                     "revision": body["expected_revision"] + 1, "conversation_id": cid,
                     "anchor": anchor, "members": members, "detached": list(detached.values())}
@@ -255,9 +276,14 @@ class LinkedConversations:
                                 record["revision"]]), principal=principal, subject=subject,
                                 valid_from=session.now(), expected_revision=directory.revision)
                 self.gate.linked_cids.add(cid)
-                self.gate.linked_origins |= linked_origins(records)
+                self.gate.linked_origins = linked_origins(records)
                 for row in members:
                     await manager.switch_conversation(row["origin"], cid)
+                # A removed endpoint keeps no reference to the shared conversation. It
+                # stays refused; what it selects instead is new, empty and its own.
+                for row in record["detached"] + released:
+                    if await manager.get_curr_conversation_id(row["origin"]) in (cid, None):
+                        await manager.new_conversation(row["origin"], row["platform_id"])
                 return record
         finally:
             # The committed record, never a rolled-back attempt, is what owners resolve from.
@@ -266,7 +292,12 @@ class LinkedConversations:
             self.gate.editing_cids.discard(cid)
             self.management_tasks.discard(management_task)
 
-    async def admit(self, controller, event):
+    async def admit(self, controller, event, *, control=False):
+        """Admit a turn, or with ``control`` one of AstrBot's own session commands.
+
+        The command then runs unchanged on its own origin, under the same
+        conversation permit as a turn, and ``settle`` makes the members agree.
+        """
         umo = event.unified_msg_origin
         link = self.for_event(event)
         if link is None and umo not in self.gate.editing_origins:
@@ -282,13 +313,18 @@ class LinkedConversations:
             # /stop is per physical origin and must be able to reach a running turn.
             if self.stop_only(event):
                 return True
+            if control and self.native_command(event, CONTEXT_COMMANDS):
+                for row in link["members"]:
+                    active_event_registry.stop_all(row["origin"], exclude=event)
             stamp = event.get_extra(EXTRA)
             if stamp is None:
                 stamp = {"link_id": link["link_id"], "revision": link["revision"],
-                         "conversation_id": link["conversation_id"]}
+                         "conversation_id": link["conversation_id"], "control": control}
                 event.set_extra(EXTRA, stamp)
             await self.gate.acquire(link["conversation_id"], event)
-            await self.validate(event, pipeline=True)
+            if event.is_stopped():
+                raise TaskError("linked_turn_stopped", "a conversation control stopped this queued turn")
+            await self.validate(event, pipeline=True, parity=not control)
             if not stamp.get("admitted"):
                 from .private_debounce import PrivateDeliveryDedup
                 if not hasattr(self.gate, "deliveries"):
@@ -303,7 +339,7 @@ class LinkedConversations:
             event.set_extra("companion_linked_failure", getattr(error, "code", "linked_busy"))
             if isinstance(error, Exception):
                 from astrbot.core.message.message_event_result import MessageChain
-                if getattr(error, "code", "") != "linked_duplicate_delivery":
+                if getattr(error, "code", "") not in ("linked_duplicate_delivery", "linked_turn_stopped"):
                     await event.send(MessageChain().message("共享对话暂不可用，请等待当前对话结束或由管理员检查连接。"))
                 return False
             raise
@@ -318,6 +354,15 @@ class LinkedConversations:
     def stop_only(event):
         return LinkedConversations.native_command(event, ("stop",))
 
+    def stop_members(self, event):
+        """AstrBot's /stop reaches its own origin; a member's also asks the others' turns to stop."""
+        link = self.for_event(event)
+        if (link is not None and self.stop_only(event)
+                and any(row["origin"] == event.unified_msg_origin for row in link["members"])):
+            for row in link["members"]:
+                if row["origin"] != event.unified_msg_origin:
+                    active_event_registry.request_agent_stop_all(row["origin"])
+
     def require_permit(self, event):
         link = self.for_event(event)
         if link is None:
@@ -331,7 +376,7 @@ class LinkedConversations:
             event.stop_event()
             raise TaskError("linked_permit_required", "linked preparation requires its live pipeline permit")
 
-    async def validate(self, event, *, pipeline=False):
+    async def validate(self, event, *, pipeline=False, parity=True):
         link = self.for_event(event)
         stamp = event.get_extra(EXTRA)
         if link is None:
@@ -350,11 +395,16 @@ class LinkedConversations:
         # irrelevant: settings and the CID are stored independently of that client.
         # Members are compared with each other on every turn, never with a value
         # frozen at link time: a setting changed for all of them is followed.
+        # A control is checked on its own origin only: it is what makes the others agree.
         signatures = set()
-        for row in link["members"]:
+        for row in link["members"] if parity else ():
             if await manager.get_curr_conversation_id(row["origin"]) != link["conversation_id"]:
                 raise TaskError("linked_selection_changed", "a linked endpoint selected another conversation")
             signatures.add(await self.settings(row["origin"], row["platform_name"], link["conversation_id"]))
+        if not parity:
+            if await manager.get_curr_conversation_id(event.unified_msg_origin) != link["conversation_id"]:
+                raise TaskError("linked_selection_changed", "this endpoint selected another conversation")
+            return
         if len(signatures) != 1:
             raise TaskError("linked_settings_mismatch", "align native model, persona and session settings between the linked endpoints")
         selected_provider, selected_model = event.get_extra("selected_provider"), event.get_extra("selected_model")
@@ -370,6 +420,52 @@ class LinkedConversations:
                 raise TaskError("linked_selection_changed", "a handler requested a different conversation")
         if event.get_extra("action_type") == "live":
             raise TaskError("linked_live_unsupported", "Live Mode writes history twice and is unavailable on linked endpoints")
+
+    async def settle(self, event):
+        """After AstrBot's own command ran on one member: every member agrees with it.
+
+        Still inside the command's conversation permit. A new conversation becomes
+        the link's, with a new revision; session variables and the chat provider
+        are applied to the others through AstrBot's own setters.
+        """
+        stamp = event.get_extra(EXTRA)
+        if not isinstance(stamp, dict) or not stamp.get("control"):
+            return
+        try:
+            link, umo = self.for_event(event), event.unified_msg_origin
+            if (link is None or link["revision"] != stamp["revision"]
+                    or not self.gate.holds(link["conversation_id"], event)):
+                raise TaskError("linked_revision_changed", "the link changed while the command ran")
+            context = self.session.bridge.context
+            manager = context.conversation_manager
+            cid = await manager.get_curr_conversation_id(umo)
+            if cid != link["conversation_id"]:
+                if not cid or await manager.get_conversation(umo, cid) is None:
+                    raise TaskError("linked_anchor_missing", "the command left no conversation selected")
+                with self.session.runtime.transaction():
+                    records = self.records()
+                    records[link["link_id"]] = {**link, "conversation_id": cid, "revision": link["revision"] + 1}
+                    self.session.authority.write(KEY, records)
+                link_records_changed(self.session.runtime)
+                self.gate.follow(link["conversation_id"], cid)
+                self.gate.linked_cids.add(cid)
+                stamp.update(conversation_id=cid, revision=link["revision"] + 1)
+            variables = await sp.session_get(umo, "session_variables", {})
+            provider = await context.get_using_provider_async(umo=umo)
+            for other in (row["origin"] for row in link["members"] if row["origin"] != umo):
+                if await manager.get_curr_conversation_id(other) != cid:
+                    await manager.switch_conversation(other, cid)
+                if await sp.session_get(other, "session_variables", {}) != variables:
+                    await sp.session_put(other, "session_variables", variables)
+                selected = await context.get_using_provider_async(umo=other)
+                if provider is not None and (selected is None
+                        or selected.provider_config.get("id") != provider.provider_config.get("id")):
+                    from astrbot.core.provider.entities import ProviderType
+                    await context.provider_manager.set_provider(provider.provider_config["id"],
+                        ProviderType.CHAT_COMPLETION, umo=other)
+        except BaseException:
+            event.stop_event()
+            raise
 
     async def tripwire(self, event, req):
         if self.for_event(event) is None:

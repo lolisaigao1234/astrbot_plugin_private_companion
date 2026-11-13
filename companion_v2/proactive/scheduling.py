@@ -305,8 +305,11 @@ class ContactSchedule:
         if link is None or latest is None:
             return False
         own = (latest["created_at"], latest["batch_id"])
+        # Only current members carry the schedule: an endpoint that left the link
+        # never holds it back, whatever it last said.
+        members = (link.scope_at(*endpoint) for endpoint in link.endpoints)
         return any((newer["created_at"], newer["batch_id"]) > own
-                   for newer in (latest_scope(self.runtime, scope) for scope in link.scopes if scope != context.scope)
+                   for newer in (latest_scope(self.runtime, scope) for scope in members if scope != context.scope)
                    if newer is not None)
 
     def _origin(self, context, batch_id, at):
