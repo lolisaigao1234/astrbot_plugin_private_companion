@@ -45,9 +45,28 @@ class PreferredChannelFixture(LinkedTelegramFixture):
         result = [json.loads(entry["content"]) for entry in history if entry["role"] == "tool"][-1]
         self.assertEqual(result["state"], "succeeded", result)
         self.tool_script = []
-        occurrence = self.app.runtime.read_one("SELECT occurrence_id FROM agenda_occurrences WHERE reminder_id = ?",
-                                               (result["payload"]["object_id"],))["occurrence_id"]
-        return context, occurrence
+        self.reminder_id = result["payload"]["object_id"]
+        return context, self.occurrence()
+
+    def occurrence(self):
+        return self.app.runtime.read_one("""SELECT occurrence_id FROM agenda_occurrences WHERE reminder_id = ?
+            ORDER BY rowid DESC LIMIT 1""", (self.reminder_id,))["occurrence_id"]
+
+    async def reschedule(self, index, *, identifier, minutes=10):
+        """The human moves the last reminder from this endpoint, whichever endpoint it was made on."""
+        self.steer(index)
+        self.model_rounds.clear()
+        due = self.clock.now() + timedelta(minutes=minutes)
+        revision = self.app.agenda.repository.reminder(self.reminder_id).revision
+        self.tool_script = [(native_tool_name("reminder.reschedule"), {"reminder_id": self.reminder_id,
+            "expected_revision": revision, "schedule": {"anchor": due.isoformat(), "timezone_name": "UTC"}})]
+        context = (await self.turn(index, "move the reminder", identifier))["context"]
+        cid = await self.manager.get_curr_conversation_id(self.origins[index])
+        history = json.loads((await self.manager.get_conversation(self.origins[index], cid)).history)
+        result = [json.loads(entry["content"]) for entry in history if entry["role"] == "tool"][-1]
+        self.assertEqual(result["state"], "succeeded", result)
+        self.tool_script = []
+        return context, self.occurrence()
 
     def status(self, context, occurrence):
         """The reminder's scheduling and delivery report, as its creator may read it."""
@@ -177,6 +196,36 @@ class PreferredReminderTests(PreferredChannelFixture, unittest.IsolatedAsyncioTe
         self.assertEqual((await self.settled(later, following))["delivery"], "delivered")
         self.assertEqual(self.qq_texts(), [("200", "feed the cat")])
         self.assertEqual(self.telegram_texts(), [])
+
+    async def test_a_qq_reminder_moved_from_telegram_is_still_delivered_once_through_the_preferred_endpoint(self):
+        for preferred, expected in (("second", ([(str(TELEGRAM_OWNER), "moved reminder")], [])),
+                                    ("first", ([], [("200", "moved reminder")]))):
+            with self.subTest(preferred=preferred):
+                revision = (await self.link_view())["revision"] if preferred == "first" else 0
+                await self.remind(0, "moved reminder", identifier="made-" + preferred)
+                self.assertEqual((await self.link(revision=revision, preferred_target_id=preferred))["status"], "ok")
+                context, occurrence = await self.reschedule(1, identifier="moved-" + preferred, minutes=20)
+                self.sent.clear()
+                self.qq_calls().clear()
+                report = await self.settled(context, occurrence, minutes=20)
+                self.assertEqual(report["delivery"], "delivered", report)
+                await self.idle()
+                self.assertEqual((self.telegram_texts(), self.qq_texts()), expected)
+
+    async def test_a_moved_reminder_is_delivered_when_the_endpoints_role_bindings_differ_in_revision(self):
+        from dataclasses import replace
+        qq = (await self.turn(0, "hello", "older-window"))["context"]
+        authority = self.controller.authority
+        binding = authority.personas.binding(authority.binding_id(qq.scope))
+        authority.personas.set_binding(replace(binding, revision=binding.revision + 1),
+                                       expected_revision=binding.revision, observed_at=self.clock.now())
+        await self.remind(0, "moved reminder", identifier="made")
+        self.assertEqual((await self.link())["status"], "ok")
+        context, occurrence = await self.reschedule(1, identifier="moved", minutes=20)
+        self.sent.clear()
+        report = await self.settled(context, occurrence, minutes=20)
+        self.assertEqual(report["delivery"], "delivered", report)
+        self.assertEqual(self.telegram_texts(), [(str(TELEGRAM_OWNER), "moved reminder")])
 
 
 class PreferredOutcomeTests(PreferredChannelFixture, unittest.IsolatedAsyncioTestCase):
