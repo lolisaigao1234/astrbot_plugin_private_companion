@@ -788,6 +788,20 @@ class RejoinFenceTests(TelegramAloneFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual([text for _, text in delivered][-1], "set before leaving")
 
     async def test_work_of_the_endpoint_the_conversation_started_on_stays_refused_after_it_rejoins(self):
+    async def test_work_of_an_endpoint_left_out_when_its_conversation_was_linked_stays_refused_after_it_joins(self):
+        _, stale = await self.attempt(0, "before the link", "1")
+        captured = stale["context"]
+        self.assertEqual(self.access(captured, "memory.read"), "allowed")
+        # The conversation is linked without the endpoint it started on, which is closed from then on.
+        created = await self.link(members=["second"])
+        self.assertEqual((created["status"], [row["origin"] for row in created["data"]["detached"]]), ("ok", [QQ]))
+        self.assertEqual(self.access(captured, "memory.read"), "conversation_link_revoked")
+        self.assertEqual((await self.link(revision=1, members=["second", "first"]))["status"], "ok")
+        self.assertEqual(self.access(captured, "memory.read"), "role_binding_changed")
+        fresh = await self.turn(0, "a member now", "2")
+        self.assertEqual(self.access(fresh["context"], "memory.read"), "allowed")
+        await self.turn(1, "and the other member", 3)
+
         await self.work_captured_before_a_removal_stays_refused_after_rejoining(leaving=0)
 
     async def test_work_of_the_joined_endpoint_stays_refused_after_it_rejoins(self):

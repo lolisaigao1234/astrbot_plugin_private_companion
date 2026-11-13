@@ -1,7 +1,7 @@
 """Explicit, revisioned links for native model history (no shared V2 state)."""
 import asyncio
 from contextlib import AsyncExitStack
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import json
 import logging
 
@@ -294,9 +294,13 @@ class LinkedConversations:
                 # Persist before selection: an interrupted operation remains closed,
                 # rather than allowing an endpoint to continue in a silent fork.
                 with session.runtime.transaction():
-                    for row in (old or {}).get("members", []):
-                        if all(row["origin"] != member["origin"] for member in members):
-                            session.authority.fence_removed_endpoint(row)
+                    closed = {row["origin"] for row in (old or {}).get("detached", [])}
+                    for row in record["detached"] + released:
+                        if row["origin"] not in closed:
+                            # It leaves the conversation with this edit: what it captured stays behind.
+                            session.authority.fence_removed_endpoint(replace(ScopeRef.restore(anchor["scope"]),
+                                platform=row["platform_id"], account_id=row["account_id"],
+                                native_scope_id=row["participant_id"], session_id=row["participant_id"]))
                     records = self.records()
                     records[body["link_id"]] = record
                     session.authority.write(KEY, records)

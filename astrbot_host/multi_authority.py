@@ -188,17 +188,15 @@ class MultiAuthority:
         return link_for_endpoint(self.runtime, target.platform_id, target.account_id,
                                  participant_id if participant_id is not None else target.participant_id)
 
-    def fence_removed_endpoint(self, member):
-        """Called with the link edit that removes a member, before the record is written.
+    def fence_removed_endpoint(self, scope):
+        """Called with the link edit that closes an endpoint, for its scope on the conversation.
 
-        Everything the endpoint captured on the linked scope (saved contexts,
-        queued sends, prepared replies, tool calls, reminders it set) carries
-        the revision of its own role binding there. Advancing it keeps that
-        work refused when the endpoint is linked again; it needs fresh work.
+        Everything the endpoint captured there (saved contexts, queued sends,
+        prepared replies, tool calls, reminders it set) carries the revision of
+        its own role binding on that scope. Advancing it keeps that work refused
+        when the endpoint is linked again; it needs fresh work.
         """
-        endpoint = (member["platform_id"], member["account_id"], member["participant_id"])
-        resolution = self.personas.resolve(link_for_endpoint(self.runtime, *endpoint).scope_at(*endpoint),
-                                           observed_at=self.now())
+        resolution = self.personas.resolve(scope, observed_at=self.now())
         # The binding of this one window only; an endpoint that never spoke here captured nothing.
         binding = resolution.unwrap().selected if resolution.is_success else None
         if binding is not None and binding.selector.kind is SelectorKind.SESSION:
