@@ -39,8 +39,11 @@ The optional `preferred_target_id` names the member that receives the conversati
 reminders and proactive text; it must be one of `member_target_ids`. A new link starts with
 its Telegram member, else the endpoint it was created on, else its first member. A later
 operation that does not name it leaves it unchanged. Each link in the account API GET carries
-`preferred_target_id` and `background_destination`: `selected`, or `missing` while the named
-target is not a member.
+`preferred_target_id` and `background_destination`: `selected`; `missing` while the named
+target is not a member or is no longer a configured target; `unavailable` while it is both and
+its account is not connected. Text that comes due in the last two states is left unsent with
+its reason (see "Reminders and proactive text"), until the account returns or an
+administrator selects another member.
 
 An existing turn or companion room history writer makes the operation busy. During creation,
 new work is refused on the affected origins. The operation verifies quiescence behind native
@@ -84,9 +87,13 @@ quiescence as any link edit, so a turn in flight makes it busy; nothing is copie
   at the next host start. Restart the companion host after removing the endpoint that was bound
   first. Reminders and proactive contact are not bound to an endpoint this way and need no
   restart (see "Reminders and proactive text").
-- Removing the only remaining endpoint and running without QQ in configuration belong to #12.
-  A removed endpoint is not a member of the link record, is never the destination of
+- A removed endpoint is not a member of the link record, is never the destination of
   background text, and no send is authorized for it.
+- The last endpoint cannot be removed. An edit with an empty member list is refused with
+  `conversation_link_last_endpoint` and changes nothing: the conversation is reached only
+  through its endpoints, so link another private endpoint first. The endpoint the conversation
+  started on has no special standing here; it can leave while another member remains (see
+  "Retiring the endpoint the conversation started on").
 
 ## Shared companion owners
 
@@ -211,7 +218,8 @@ other.
 - A reminder whose time was last set from an endpoint that has since been removed is not
   delivered (`blocked`, `scope_not_granted`): the removed endpoint's work is revoked
   with it. The record stays shared, and setting its time again from a remaining member makes
-  it that member's work.
+  it that member's work, also when the record was made on the removed endpoint's window.
+  An occurrence that was already blocked is not sent afterwards.
 - Proactive contact is planned for one window of the conversation: the one with its most
   recent turn. The other windows wait, and a contact planned on one endpoint is withdrawn
   when the human speaks on another. Only current members count: when the window that
@@ -260,6 +268,67 @@ formats, splits and sends, and AstrBot's whitelist still decides which chats rea
   AstrBot has stored the reply in the shared history by then, as it does on QQ.
 - Either channel can be disconnected or removed. The other keeps the conversation, including
   across a host restart.
+
+## Retiring the endpoint the conversation started on
+
+The conversation belongs to the companion, not to the endpoint it started on. That endpoint
+(QQ in the first deployment) can be disconnected, removed from the link, or removed from
+configuration altogether, and the remaining endpoint (Telegram) keeps the conversation: its
+history, memory, relationships, state, settings, schedule and logs. In none of these states
+is anything copied, rekeyed or reset. The stored anchor keeps naming the original endpoint as
+the owner address; records it contributed keep it as their source and are read by the
+remaining endpoint under that endpoint's own permissions. No start-up, turn, tool, reminder or
+proactive text of the remaining endpoint needs the retired endpoint's client, platform or
+configuration.
+
+Do it in this order:
+
+1. Make sure the remaining endpoint is the preferred one: the link shows its target as
+   `preferred_target_id` with `background_destination: selected`. Otherwise post the link
+   with that `preferred_target_id`.
+2. From the remaining endpoint, set again the time of every reminder that was last set from
+   the endpoint being retired (list the reminders, then reschedule each). While that endpoint
+   is still a member they are delivered through the preferred endpoint as they are; once it is
+   removed they are `blocked / scope_not_granted` until a member sets their time again, which
+   also works after the removal.
+3. Remove it from the link: post the link with the remaining endpoint as the only member. The
+   revision is incremented and everything prepared, running or unsent under the removed
+   endpoint is refused from then on.
+4. Remove its account, targets and persona rows from the account mapping and save. First
+   check that the remaining account's own persona row names the conversation's role id (the
+   `role` in the link's `anchor`): a row that only matched it because the mapping merged two
+   generated role ids of one persona stops matching when the other row is deleted. The
+   remaining endpoint then still answers, but its routines, reminders and proactive text are
+   refused (`host_persona_changed`, a reminder ends `failed`) until the row names that role
+   id. The save
+   restarts the host with the remaining account only; a link member is not provisioned again
+   on its own native scope, so a mapping save with links in place starts as any other.
+
+What each state looks like:
+
+| State of the original endpoint | The remaining endpoint | Reminders and proactive text | What the administrator sees |
+| --- | --- | --- | --- |
+| Disconnected, still linked and configured | Replies, text tools and commands, controls and settings as before. When the client returns it continues the same conversation, including one started with `/new` meanwhile. | Go to the preferred endpoint. If the disconnected one is preferred: `background_destination: unavailable`, and a text that comes due is `cancelled / host_account_changed`; select another member and later texts go there. Reminders it had set are still delivered through the preferred endpoint. | Host status keeps `running` and accepting; its row under `accounts` has `available: false` with `host_account_unavailable` or `host_platform_unavailable`. |
+| Removed from the link | Keeps the conversation and every record. | Its reminders are blocked until set again (step 2). The proactive schedule is carried by a remaining member's window from the next pass. If it was preferred and no member was named: `background_destination: missing`, `cancelled / delivery_destination_missing`. | The link lists it under `detached`; its messages get the "shared conversation unavailable" notice and start no turn. |
+| Removed from configuration | Starts and runs with one identity, one set of owners and one schedule. | As above. If it is still a stored member and preferred: `background_destination: missing`, `cancelled / delivery_destination_missing`. | `accounts` lists only the configured accounts. A link edit can name only configured targets (`host_target_unavailable` otherwise), so the next edit leaves it out, which removes it from the link. |
+
+A member that is still stored in the link takes part in the per-turn agreement check with its
+stored AstrBot selection and settings, also while it is disconnected or no longer configured.
+Take a retired endpoint out of the link (step 3) rather than leaving it there: a later
+difference in what AstrBot stores for its origin would refuse the remaining endpoint's turns
+(`linked_settings_mismatch`, `linked_selection_changed`) until it is removed.
+
+After that:
+
+- The life routines and state maintenance run under the remaining endpoint with that
+  endpoint's own grants.
+- QQ-only capabilities (poke, QZone, QQ status, merged forwards, OneBot history and recall)
+  are not offered to a Telegram turn and are not attempted for it.
+- The retired endpoint cannot be admitted independently (`linked_anchor_endpoint_closed`).
+  It, or any other exact private target, is linked later through the normal operation: it
+  must be a configured target again, the link gets a new revision, the endpoint selects the
+  same conversation and reads what was learned meanwhile, and nothing prepared or left unsent
+  under its earlier membership is revived.
 
 ## Turn lifetime
 
@@ -363,7 +432,20 @@ chats and chats that are not companion targets keep AstrBot's own replies.
   and continues with the new window's own contact history: a daily contact allowance or an
   event already shared on the previous endpoint is not counted on the new one.
 - The QQ proactive platform circuit is recorded for the account the contact was planned on.
-- Running without QQ (#12) and operational recovery remain work.
+- While the member that had the conversation's latest turn is disconnected or no longer
+  configured, but still linked, no proactive contact is composed for the conversation: its
+  window carries the schedule and its account is needed to compose. The schedule moves with
+  the human's next message on another member, or at once when that endpoint is removed from
+  the link.
+- A text that came due while the preferred endpoint was unavailable is recorded and not sent
+  later; there is no retry when the account returns.
+- A joined endpoint has the standard tier. When the endpoint that held the installation core
+  tier is retired, no chat endpoint holds it: core-only chat commands and interventions stay
+  refused, and administration goes through the Dashboard.
+- Link management does not look at the account mapping. Removing the configured target of
+  the last linked endpoint there leaves the conversation stored and linked but unreachable
+  until that target is configured again.
+- Operational recovery, and the live check with a channel actually stopped, remain work.
 
 ## Offline proof
 
@@ -406,6 +488,16 @@ use, relinking and a restart. Each control is sent from one endpoint while a tur
 other is paused: the command stays queued on the permit and changes nothing until that turn
 has unwound.
 
+`tests.test_telegram_alone` builds one conversation on QQ and Telegram and then retires QQ three
+ways: its client disconnected (also across a restart without its channel), the endpoint
+removed from the link, and its account, targets and personas removed from the account mapping.
+In each state it continues on Telegram: the same history, a fact, a note, a diary entry and a
+setting that QQ contributed with QQ still recorded as their source, the text tools, a calendar
+command, a session variable, `/new`, a reminder and a proactive text. It also covers the
+preferred endpoint being the one that is gone, reminders last set from QQ, the fences on QQ's
+earlier work, relinking QQ, the refusal to remove the last endpoint, and a start with no QQ
+channel configured.
+
 Run these suites with an AstrBot SDK environment that uses a temporary data root, never an
 installed plugin or a live data directory:
 
@@ -414,7 +506,7 @@ python -X utf8 -m unittest -q \
   tests.test_linked_owners tests.test_linked_conversation tests.test_astrbot_linked_turn_contract \
   tests.test_core_reply_conversation_ownership tests.test_telegram_private_reply \
   tests.test_telegram_linked_conversation tests.test_telegram_text_tools tests.test_linked_text_stores \
-  tests.test_linked_controls
+  tests.test_linked_controls tests.test_telegram_alone
 ```
 
 No network, installed plugin, deployment state or running AstrBot container is used.

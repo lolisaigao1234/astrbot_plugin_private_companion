@@ -282,6 +282,10 @@ class RetiredQQScenario(TelegramAloneFixture):
             self.assertFalse(any(qq_only in name for name in offered), (qq_only, offered))
         for qq_only in ("interaction.poke", "qzone", "relay"):
             self.assertNotIn(qq_only, prompt.lower())
+        # A QQ status asked for the Telegram window is not started and reaches no client.
+        from astrbot_host.multi_session import MultiPresence
+        status = await MultiPresence(self.controller.session).custom_status(context, "在")
+        self.assertEqual(status["state"], "not_started")
         self.assertEqual(self.telegram.client.onebot_accesses, [])
         return context
 
@@ -656,4 +660,3 @@ class LinkedMappingSaveTests(TelegramAloneFixture, unittest.IsolatedAsyncioTestC
 
 if __name__ == "__main__":
     unittest.main()
-
