@@ -57,6 +57,9 @@ async def receive_calendar_command(controller, event, session, *, target=None):
             report = await session.plan_calendar(event, target, mode=command.mode, refresh=command.refresh)
         text = calendar_result_text(report)
     except TaskError as error:
+        if error.code in ("linked_revision_changed", "linked_endpoint_revoked"):
+            # The link changed under this command: nothing more is sent on it.
+            return Outcome.failed(error.code, str(error))
         text = calendar_error_text(error.code)
     except (ValueError, TypeError, KeyError, AttributeError):
         text = "日程生成暂时无法完成，请检查陪伴小屋中的日程配置后重试。"
