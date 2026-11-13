@@ -133,6 +133,52 @@ class TelegramAloneFixture(PreferredChannelFixture):
     def link_record(self):
         return self.controller.session.linked_conversations.get("owner-dialogue")
 
+    def consent_to_contact(self, *contexts):
+        """Consent to proactive contact is each endpoint's own."""
+        from companion_v2.identity_policy.models import AuthorizationTier
+        identities = self.controller.authority.identities
+        for context in contexts:
+            if not identities.authorize(context.actor, scope=context.scope, capability="proactive.contact",
+                                        observed_at=self.clock.now()).is_success:
+                identities.issue_grant(grant_id="consent-" + context.key, subject=context.actor.subject,
+                    scope=context.scope, capability="proactive.contact", tier=AuthorizationTier.STANDARD,
+                    valid_from=self.clock.now(), expected_revision=identities.revision)
+
+    def enable_contact(self, context):
+        from companion_v2.foundation.refs import OperationRef, VersionRef
+        from companion_v2.proactive.configuration import GROUP, target_for
+        target, now = target_for(context), self.clock.now()
+        snapshot = require(self.app.configuration.read(context.actor, target=target, group_id=GROUP, observed_at=now))
+        identifier = "contact-settings-" + snapshot.edit_token[:16]
+        require(self.app.configuration.patch(context.actor, target=target, group_id=GROUP,
+            expected_edit_token=snapshot.edit_token, changes={GROUP + ".enabled": True}, reset_to_inherit=(),
+            operation=OperationRef(identifier, GROUP, target.authorization_scope, VersionRef(identifier, 1), identifier),
+            observed_at=now))
+
+    async def proactive_text(self, prepared, text):
+        """The host composes one proactive text for this window; what became of its delivery."""
+        from companion_v2.proactive.contact_models import ContactIntent
+        from companion_v2.proactive.models import EvidenceSnapshot, Opportunity, Thought, ThoughtKind
+        from tests.native_adapter_support import completion
+
+        async def compose(payload, tools):
+            return completion(json.dumps({"decision": "send", "text": text}))
+        self.native.provider.client.state.behavior = compose
+        context, now = prepared["context"], self.clock.now()
+        opportunity = Opportunity("opportunity-" + text, context.scope, now, now + timedelta(minutes=5))
+        intent = ContactIntent("chat", Thought("thought-" + text, opportunity, ThoughtKind.CONVERSATION,
+            "a thought not yet sent", EvidenceSnapshot(context.scope, now, ()), 1.0))
+        task = require(await self.app.proactive.contact(context, opportunity, (intent,),
+            role_instruction=prepared["instruction"], selection_seed="seed-" + text)).task
+        async with asyncio.timeout(30):
+            while True:
+                self.app.notify()
+                row = self.app.proactive._delivery_row(task.task_id)
+                if row is not None and row["state"] not in ("pending", "dispatched"):
+                    return row["state"]
+                self.assertEqual(self.app.state, "running", self.app.failure_code)
+                await asyncio.sleep(0.05)
+
     def nothing_goes_to_qq_from_here(self):
         self.sent.clear()
         self.qq_calls().clear()
@@ -412,6 +458,187 @@ class PreferredQQUnavailableTests(TelegramAloneFixture, unittest.IsolatedAsyncio
         self.assertEqual(self.status(context, first)["delivery"], "cancelled")
 
 
+class ProactiveAfterRetirementTests(TelegramAloneFixture, unittest.IsolatedAsyncioTestCase):
+    superseded = "linked_conversation_continues_on_another_endpoint"
+
+    async def both_have_spoken(self, last):
+        """Both windows have a completed turn and their own consent; ``last`` spoke most recently."""
+        self.assertEqual((await self.link())["status"], "ok")
+        prepared = {}
+        for index, identifier in ((1 - last, "1"), (last, "2")):
+            self.clock.advance(timedelta(seconds=5))
+            prepared[index] = await self.turn(index, "hello", identifier if index == 0 else int(identifier))
+            observer = self.controller.session.core_reply_observations
+            while pending := observer._pending - observer._intervention_tasks:
+                await asyncio.gather(*tuple(pending))
+                await asyncio.sleep(0)
+        self.consent_to_contact(prepared[0]["context"], prepared[1]["context"])
+        self.enable_contact(prepared[0]["context"])
+        self.nothing_goes_to_qq_from_here()
+        return prepared[0], prepared[1]
+
+    def schedule_decision(self, prepared):
+        self.app.contact_schedule.advance()
+        return self.app.contact_schedule.diagnostic_for(prepared["context"])["evaluation"]["reason_code"]
+
+    async def test_a_proactive_text_arrives_on_telegram_while_the_qq_client_is_disconnected(self):
+        _, telegram = await self.both_have_spoken(last=1)
+        self.qq_disconnect()
+        self.assertNotEqual(self.schedule_decision(telegram), self.superseded)
+        self.assertEqual(await self.proactive_text(telegram, "thinking of you"), "delivered")
+        self.assertEqual((self.telegram_texts(), self.sent_to_qq()), ([(OWNER, "thinking of you")], []))
+
+    async def test_a_proactive_text_arrives_on_telegram_after_qq_is_unlinked(self):
+        qq, telegram = await self.both_have_spoken(last=0)
+        # QQ had the conversation's most recent turn, so its window carried the schedule.
+        self.assertEqual(self.schedule_decision(telegram), self.superseded)
+        self.assertEqual((await self.link(revision=1, members=["second"]))["status"], "ok")
+        self.clock.advance(timedelta(minutes=2))
+        self.assertNotEqual(self.schedule_decision(telegram), self.superseded)
+        self.assertEqual(await self.proactive_text(telegram, "thinking of you"), "delivered")
+        self.assertEqual((self.telegram_texts(), self.sent_to_qq()), ([(OWNER, "thinking of you")], []))
+        # Nothing is composed for the removed endpoint any more.
+        refused = await self.app.proactive.contact(qq["context"], *self.thought(qq["context"]),
+            role_instruction=qq["instruction"], selection_seed="removed")
+        self.assertEqual(refused.failure.code, "conversation_link_revoked")
+
+    def thought(self, context):
+        from companion_v2.proactive.contact_models import ContactIntent
+        from companion_v2.proactive.models import EvidenceSnapshot, Opportunity, Thought, ThoughtKind
+        now = self.clock.now()
+        opportunity = Opportunity("opportunity-removed", context.scope, now, now + timedelta(minutes=5))
+        return opportunity, (ContactIntent("chat", Thought("thought-removed", opportunity, ThoughtKind.CONVERSATION,
+            "a thought not yet sent", EvidenceSnapshot(context.scope, now, ()), 1.0)),)
+
+    async def test_a_proactive_text_arrives_on_telegram_with_qq_removed_from_configuration(self):
+        _, telegram = await self.both_have_spoken(last=1)
+        await self.remove_qq_from_configuration()
+        self.sent.clear()
+        self.assertNotEqual(self.schedule_decision(telegram), self.superseded)
+        self.assertEqual(await self.proactive_text(telegram, "thinking of you"), "delivered")
+        self.assertEqual(self.telegram_texts(), [(OWNER, "thinking of you")])
+
+
+class UnlinkAndRelinkQQTests(TelegramAloneFixture, unittest.IsolatedAsyncioTestCase):
+    def access(self, context, action):
+        result = self.app.tasks.check_context_access(context, action=action, observed_at=self.clock.now())
+        return "allowed" if result.is_success else result.failure.code
+
+    async def test_unlinking_qq_fences_its_earlier_work_and_relinking_it_joins_the_same_conversation(self):
+        self.assertEqual((await self.link())["status"], "ok")
+        event, stale = await self.attempt(0, "from QQ", "1")
+        qq = stale["context"]
+        _, unsent = await self.remind(0, "set on QQ, never sent", identifier="2")
+        anchor = deepcopy(self.link_record()["anchor"])
+        self.assertEqual(self.access(qq, "memory.read"), "allowed")
+
+        unlinked = await self.link(revision=1, members=["second"])
+        self.assertEqual((unlinked["status"], unlinked["data"]["revision"]), ("ok", 2))
+        self.nothing_goes_to_qq_from_here()
+        record = self.link_record()
+        self.assertEqual(([row["origin"] for row in record["members"]], [row["origin"] for row in record["detached"]],
+                          record["anchor"]), ([TELEGRAM], [QQ], anchor))
+        # Its saved context reads, replies, contacts and delivers nothing more.
+        for action in ("memory.read", "conversation.reply", "proactive.contact", "reminder.deliver"):
+            self.assertEqual(self.access(qq, action), "conversation_link_revoked", action)
+        refused = await self.controller.authorize_core_reply(event, stale)
+        self.assertIn(refused.failure.code, ("linked_revision_changed", "linked_endpoint_revoked"))
+        closed, prepared = await self.attempt(0, "still here?", "3")
+        self.assertTrue(closed.is_stopped())
+        self.assertIsNone(prepared)
+        self.assertNotIn(await self.manager.get_curr_conversation_id(QQ), (None, "conversation-a"))
+        # Telegram goes on, and learns something while QQ is out.
+        on_telegram = await self.turn(1, "from Telegram", 4)
+        coffee = self.learn(on_telegram, "coffee", "learned-while-qq-was-out")
+        self.clock.advance(timedelta(minutes=10, seconds=1))
+        await self.idle()
+        dispatch = self.app.runtime.read_one("SELECT state, reason FROM agenda_dispatches WHERE occurrence_id = ?",
+                                             (unsent,))
+        self.assertEqual((dispatch["state"], dispatch["reason"]), ("blocked", "scope_not_granted"))
+        self.assertEqual((self.telegram_texts(), self.qq_texts()), ([(OWNER, "reply\\-B")], []))
+
+        # Linked again through the normal operation: the same conversation, owners and history.
+        relinked = await self.link(revision=2, members=["second", "first"])
+        self.assertEqual((relinked["status"], relinked["data"]["revision"], relinked["data"]["detached"]),
+                         ("ok", 3, []))
+        self.assertEqual((self.link_record()["anchor"], self.link_record()["conversation_id"]),
+                         (anchor, "conversation-a"))
+        self.assertEqual(await self.manager.get_curr_conversation_id(QQ), "conversation-a")
+        back = await self.turn(0, "back on QQ", "5")
+        self.assertEqual(await self.spoken_on(QQ), ["old", "old-reply", "from QQ", "reply-A", "remind me", "reply-A",
+            "from Telegram", "reply-B", "back on QQ", "reply-A"])
+        self.assertEqual(back["context"].actor.subject, qq.actor.subject)
+        self.assertEqual(self.fact(back["context"], coffee), "coffee")
+        # Nothing prepared or left unsent under the earlier membership comes back.
+        revived = await self.controller.authorize_core_reply(event, stale)
+        self.assertEqual(revived.failure.code, "linked_revision_changed")
+        await self.idle()
+        self.assertEqual(self.status(qq, unsent)["delivery"], "not_started")
+        self.assertEqual(self.qq_texts(), [])
+        # While it was removed QQ was told the conversation is unavailable; since then, its new reply.
+        self.assertEqual([sent["message"][0]["data"]["text"] for platform, sent in self.sent if platform == "qq-main"],
+                         ["共享对话暂不可用，请等待当前对话结束或由管理员检查连接。", "reply-A"])
+
+    async def test_removing_the_only_remaining_endpoint_is_refused_with_its_reason_and_changes_nothing(self):
+        self.assertEqual((await self.link())["status"], "ok")
+        await self.turn(0, "from QQ", "1")
+        self.assertEqual((await self.link(revision=1, members=["second"]))["status"], "ok")
+        before = deepcopy(self.link_record())
+        refused = await self.link(revision=2, members=[])
+        self.assertEqual((refused["status"], refused["data"]["code"]), ("error", "conversation_link_last_endpoint"))
+        self.assertIn("at least one endpoint", refused["reason"])
+        # Neither can the last member be turned loose as an independent endpoint.
+        independent = await self.link(revision=2, members=[], independent_target_ids=["second"])
+        self.assertEqual(independent["data"]["code"], "conversation_link_last_endpoint")
+        self.assertEqual(self.link_record(), before)
+        await self.turn(1, "still the conversation", 2)
+        self.assertEqual(await self.spoken_on(TELEGRAM),
+                         ["old", "old-reply", "from QQ", "reply-A", "still the conversation", "reply-B"])
+        # A link that does not exist yet keeps the general validation answer.
+        invalid = await self.link(link_id="another", members=[])
+        self.assertEqual(invalid["data"]["code"], "conversation_link_invalid")
+
+
+class OneCompanionWithoutQQTests(TelegramAloneFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_a_start_without_any_qq_channel_has_one_identity_one_set_of_owners_and_one_schedule(self):
+        from companion_v2.conversation.linked_ownership import owner_scope
+        from companion_v2.execution.models import TaskError
+        from companion_v2.role_work.state.ownership import role_owner, role_schedule_key
+        self.assertEqual((await self.link())["status"], "ok")
+        qq = (await self.turn(0, "from QQ", "1"))["context"]
+        before = (await self.turn(1, "from Telegram", 2))["context"]
+        await self.remove_qq_from_configuration()
+        await self.new_process()
+
+        self.assertEqual(self.health(), (("running", True, None), {"tg-main": (True, None)}))
+        self.assertEqual([target.target_id for target in self.controller.settings.targets], ["second"])
+        telegram = self.controller.authority.context("second", "role-a")
+        # One identity and one set of owners: those the conversation had on QQ.
+        self.assertEqual((telegram.actor.subject, telegram.role_binding.role), (qq.actor.subject, qq.role_binding.role))
+        self.assertEqual(telegram.scope, before.scope)
+        self.assertEqual(owner_scope(self.app.runtime, telegram.scope), qq.scope)
+        self.assertEqual((role_owner(telegram), role_schedule_key(telegram)), (role_owner(qq), role_schedule_key(qq)))
+        # One background schedule, bound to the endpoint that is there.
+        life = self.app.life_runtime
+        routines = {id(routine): routine for routine in life.routines.values() if routine.instruction is not None}
+        self.assertEqual([routine.context.scope.platform for routine in routines.values()], ["tg-main"])
+        self.assertEqual([context.scope.platform for context, _, _ in self.app.state_maintenance.bindings.values()],
+                         ["tg-main"])
+        # Nothing can be scheduled or sent under the endpoint that is no longer configured.
+        with self.assertRaises(TaskError) as gone:
+            self.controller.authority.context("first", "role-a")
+        self.assertEqual(gone.exception.code, "host_context_unavailable")
+        view = await self.link_view()
+        self.assertEqual((view["revision"], view["preferred_target_id"], view["background_destination"]),
+                         (1, "second", "selected"))
+        # The administrator can still take the unconfigured QQ endpoint out of the link.
+        unlinked = await self.link(revision=1, members=["second"])
+        self.assertEqual((unlinked["status"], [row["origin"] for row in unlinked["data"]["detached"]]), ("ok", [QQ]))
+        prepared = await self.turn(1, "alone", 3)
+        self.assertEqual((await self.spoken_on(TELEGRAM))[-2:], ["alone", "reply-B"])
+        self.assertEqual(prepared["context"].actor.subject, qq.actor.subject)
+
+
 class LinkedMappingSaveTests(TelegramAloneFixture, unittest.IsolatedAsyncioTestCase):
     async def test_saving_the_unchanged_account_mapping_of_a_linked_conversation_restarts_the_host(self):
         self.assertEqual((await self.link())["status"], "ok")
@@ -429,3 +656,4 @@ class LinkedMappingSaveTests(TelegramAloneFixture, unittest.IsolatedAsyncioTestC
 
 if __name__ == "__main__":
     unittest.main()
+

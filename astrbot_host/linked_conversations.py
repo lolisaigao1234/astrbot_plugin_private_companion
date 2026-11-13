@@ -174,8 +174,7 @@ class LinkedConversations:
                 or type(body["expected_revision"]) is not int or body["expected_revision"] < 0
                 or any(type(body[key]) is not str or not body[key].strip() or len(body[key]) > 128
                        for key in ("link_id", "conversation_id", "source_target_id"))
-                or type(body["member_target_ids"]) is not list or not body["member_target_ids"]
-                or len(body["member_target_ids"]) > 32
+                or type(body["member_target_ids"]) is not list or len(body["member_target_ids"]) > 32
                 or any(type(value) is not str for value in body["member_target_ids"])
                 or len(set(body["member_target_ids"])) != len(body["member_target_ids"])
                 or ("preferred_target_id" in body and preferred not in body["member_target_ids"])):
@@ -184,6 +183,13 @@ class LinkedConversations:
             raise TaskError("linked_busy", "the companion is stopping")
         session, cid = self.session, body["conversation_id"]
         old = self.get(body["link_id"])
+        if not body["member_target_ids"]:
+            if old is None:
+                raise TaskError("conversation_link_invalid", "supply a versioned conversation link and exact private members")
+            # The conversation belongs to the companion and is reached through its
+            # endpoints: without one it would stay stored and silently unreachable.
+            raise TaskError("conversation_link_last_endpoint", "a linked conversation keeps at least one endpoint: "
+                            "link another private endpoint before removing the last one")
         if (old["revision"] if old else 0) != body["expected_revision"]:
             raise TaskError("conversation_link_revision_conflict", "reload the current conversation link before editing")
         if old and old["conversation_id"] != cid:
