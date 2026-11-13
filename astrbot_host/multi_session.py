@@ -140,7 +140,12 @@ class MultiPrivateBridge(NativePrivateBridge):
         target = self.targets.get((scope.platform, scope.account_id, scope.native_scope_id))
         if target is None and scope.kind is ScopeKind.PRIVATE:
             target = self.settings.private_target(scope.platform, scope.account_id, scope.native_scope_id)
-        if scope.kind is not ScopeKind.PRIVATE or target is None or self.authority.bot_id(target) != scope.bot_id:
+        if scope.kind is not ScopeKind.PRIVATE or target is None:
+            raise TaskError("host_target_unavailable", "the native private target is not configured")
+        # A bridge without an authority (assembled before the host attaches one) has
+        # no linked conversations: the target's own bot is then the only owner.
+        authority = getattr(self, "authority", None)
+        if (authority.bot_id(target) if authority is not None else target.bot_id) != scope.bot_id:
             raise TaskError("host_target_unavailable", "the native private target is not configured")
         return target
 
