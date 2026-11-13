@@ -46,7 +46,7 @@ class RoleLifeRuntime:
         if self.context is not None:
             if self.instruction not in (None, role_instruction):
                 raise TaskError("life_binding_changed", "a live routine cannot change its authority")
-            if self.context.key != context.key and self._route(self.context) != self._route(context):
+            if self.context.key != context.key and not self.app.life_runtime.same_owner(self.context, context):
                 raise TaskError("life_binding_changed", "a live routine cannot change its authority")
             if self.context.key == context.key:
                 # Refresh the same context's policy/audience snapshot.
