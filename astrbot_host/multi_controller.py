@@ -18,6 +18,7 @@ from companion_v2.adapters.astrbot.group import group_event_route
 from companion_v2.adapters.astrbot.provider import provider_fingerprint
 from companion_v2.adapters.astrbot.provider_catalog import TextProviderSettings, assemble_providers
 from companion_v2.execution.models import TaskContext, TaskError, digest, require
+from companion_v2.conversation.linked_ownership import endpoint_removed
 from companion_v2.conversation.pokes import PokePolicy
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.foundation.refs import ScopeKind, SubjectKind, SubjectRef
@@ -997,9 +998,11 @@ class AstrBotMultiController:
                 target = conversation["target"]
                 if not self.authority.platform_known(target):
                     continue
-                if self.authority.conversation_link(target) is not None:
+                if (self.authority.conversation_link(target) is not None or endpoint_removed(
+                        self.runtime, target.platform_id, target.account_id, target.participant_id)):
                     # A link member answers on the conversation's stored scope, which
                     # start-up selects; its own native scope is not provisioned again.
+                    # An endpoint removed from a link is closed until it is admitted.
                     continue
                 for role_id in conversation["role_ids"]:
                     role = SubjectRef(self.settings.installation_id, SubjectKind.BOT, role_id)

@@ -839,6 +839,29 @@ class LinkedMappingSaveTests(TelegramAloneFixture, unittest.IsolatedAsyncioTestC
         self.assertEqual((await self.history_seen_from(QQ))[-4:],
                          ["after the save", "reply-A", "after the save", "reply-B"])
 
+    async def saved_with_a_removed_endpoint_still_configured(self, removed):
+        remaining, names = 1 - removed, ("first", "second")
+        self.assertEqual((await self.link())["status"], "ok")
+        await self.turn(0, "from QQ", "1")
+        await self.turn(1, "from Telegram", 2)
+        self.assertEqual((await self.link(revision=1, members=[names[remaining]]))["status"], "ok")
+        self.controller.save_plugin_config = lambda document: None
+        saved = await self.controller.apply_bindings(deepcopy(self.controller.config))
+        self.assertEqual((saved["started"], saved.get("startup_error")), (True, None), saved)
+        self.assertEqual(self.health()[0], ("running", True, None))
+        self.app = self.controller.session.application
+        # The remaining endpoint goes on; the removed one is as closed as before the save.
+        await self.turn(remaining, "after the save", "3")
+        closed, prepared = await self.attempt(removed, "still closed", "4")
+        self.assertTrue(closed.is_stopped())
+        self.assertIsNone(prepared)
+
+    async def test_saving_the_mapping_starts_the_host_while_the_removed_qq_endpoint_stays_configured(self):
+        await self.saved_with_a_removed_endpoint_still_configured(removed=0)
+
+    async def test_saving_the_mapping_starts_the_host_while_the_removed_telegram_endpoint_stays_configured(self):
+        await self.saved_with_a_removed_endpoint_still_configured(removed=1)
+
 
 if __name__ == "__main__":
     unittest.main()
