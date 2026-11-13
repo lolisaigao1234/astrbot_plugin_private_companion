@@ -323,7 +323,8 @@ class OutboundDelivery:
     def record_receipt(self, receipt: DeliveryReceipt):
         with self.runtime.transaction() as connection:
             row = self._row(receipt.part_id)
-            route = self.route(receipt.part_id)
+            # A routed attempt answers from its destination; an unrouted one costs no lookup.
+            route = self.route(receipt.part_id) if row["origin_key"] != receipt.origin_key else None
             if (row["operation_id"] != receipt.operation_id
                     or (route["route_key"] if route is not None else row["origin_key"]) != receipt.origin_key
                     or row["payload_hash"] != receipt.payload_hash or row["sender_json"] != encode(receipt.sender)

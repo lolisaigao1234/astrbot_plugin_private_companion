@@ -28,8 +28,9 @@ class _Link(dict):
         self.scopes = tuple(dict.fromkeys((self.anchor, *(self.scope_at(member["platform_id"],
             member["account_id"], member["participant_id"])
             for member in record["members"] + record.get("detached", [])))))
+        wanted = preferred_target_id(record)
         self.preferred = next((endpoint for member, endpoint in zip(record["members"], self.endpoints)
-                               if member["target_id"] == preferred_target_id(record)), None)
+                               if wanted is not None and member.get("target_id") == wanted), None)
 
     def scope_at(self, platform, account, participant):
         return replace(self.anchor, platform=platform, account_id=account,
@@ -48,8 +49,8 @@ def preferred_target_id(record):
         return record["preferred_target_id"]
     members = record["members"]
     initial = ([row for row in members if row.get("platform_name") == "telegram"]
-               or [row for row in members if row["target_id"] == record["anchor"]["target_id"]] or members)
-    return initial[0]["target_id"]
+               or [row for row in members if row.get("target_id") == record["anchor"].get("target_id")] or members)
+    return initial[0].get("target_id") if initial else None
 
 
 class _Index:
