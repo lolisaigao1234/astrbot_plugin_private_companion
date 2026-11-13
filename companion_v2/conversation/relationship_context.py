@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 import json
 
+from companion_v2.conversation.linked_ownership import shared_scopes
 from companion_v2.execution.models import TaskContext, TaskError, require
 from companion_v2.foundation.refs import RoleOwnerRef, ScopeKind
 from companion_v2.relationships.models import RelationshipMemory, RelationshipMemoryState
@@ -40,13 +41,14 @@ class RelationshipContext:
         return (context.scope.kind is ScopeKind.PRIVATE
                 and context.audience.recipients == (context.actor.subject,))
 
-    @staticmethod
-    def _in_scope(memory: RelationshipMemory, context: TaskContext) -> bool:
+    def _in_scope(self, memory: RelationshipMemory, context: TaskContext) -> bool:
+        # The same private route, or another endpoint of the same linked conversation.
+        linked = shared_scopes(self.service.runtime, context.scope)
         return (memory.owner == RoleOwnerRef(context.scope.installation_id,
                     context.scope.bot_id, context.role_binding.role.subject_id)
                 and memory.subject == context.actor.subject
-                and same_private_route(memory.scope, context.scope)
-                and all(same_private_route(source.scope, context.scope) for source in memory.sources))
+                and all(same_private_route(scope, context.scope) or scope in linked
+                        for scope in (memory.scope, *(source.scope for source in memory.sources))))
 
     @staticmethod
     def _payload(memory: RelationshipMemory) -> str:

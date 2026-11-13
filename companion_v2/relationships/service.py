@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from companion_v2.conversation.linked_ownership import shared_scopes
 from companion_v2.execution.models import TaskError
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.foundation.refs import (
@@ -215,8 +216,11 @@ class RelationshipMemoryService:
             if not authorization.is_success:
                 return Outcome(failure=authorization.failure)
             try:
-                values = self._ledger.for_relationship(authorization.unwrap(), actor.subject,
-                    state=state, kind=kind, route=scope, limit=limit, after_id=after_id)
+                # One private route, or every endpoint's route of the same linked conversation.
+                found = {memory.memory_id: memory for route in shared_scopes(self.runtime, scope)
+                         for memory in self._ledger.for_relationship(authorization.unwrap(), actor.subject,
+                             state=state, kind=kind, route=route, limit=limit, after_id=after_id)}
+                values = tuple(found[key] for key in sorted(found)[:limit])
             except ReferenceValidationError as error:
                 return Outcome.failed("relationship_query_invalid", str(error))
             for memory in values:
