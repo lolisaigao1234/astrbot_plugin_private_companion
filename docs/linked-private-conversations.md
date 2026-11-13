@@ -65,7 +65,11 @@ Post the link again without the endpoint in `member_target_ids`. The operation n
 quiescence as any link edit, so a turn in flight makes it busy; nothing is copied or rekeyed.
 
 - The endpoints that remain keep the conversation, its whole history, memory, settings and
-  records. Records the removed endpoint contributed stay where they are, with their source.
+  records. Records the removed endpoint contributed stay where they are, with their source,
+  and stay the conversation's: a record's owner is resolved from the scopes stored with the
+  link, which keep removed endpoints, not from its creator's current membership. Whichever
+  member is removed, the remaining ones list, read, edit and cancel its notes, reminders,
+  calendar records, growth records and diagnostic proposals.
 - The removed endpoint is listed under `detached` and is closed: its messages and session
   commands are refused, and no routine is started under it. It no longer selects the shared
   conversation; AstrBot's `new_conversation()` gives it a new, empty one, and nothing of the
@@ -78,10 +82,17 @@ quiescence as any link edit, so a turn in flight makes it busy; nothing is copie
 - The revision is incremented. Replies prepared, tools running and sends pending under an
   earlier revision are refused, also after the endpoint is linked again: relinking is a new
   revision and revives nothing.
+- The same edit advances the revision of the removed endpoint's own role binding on the linked
+  scope (in the persona directory, in the transaction that writes the link record). Every
+  context the endpoint saved there carries that revision: its queued sends, tool calls,
+  planned contacts and the reminders it set are refused with `role_binding_changed` from then
+  on, also after it is linked again. It needs fresh work: a new turn, and a reminder set
+  again. Nothing of this touches the other members, and a `/new` does not advance it.
 - A removed endpoint is used on its own only after an administrator admits it: post the link
-  with `"independent_target_ids": ["that-target"]` beside the unchanged member list. It then
-  leaves the link record, answers with its own native identity and continues in the new, empty
-  conversation.
+  with `"independent_target_ids": ["that-target"]` beside the unchanged member list. It is
+  then no longer closed, answers with its own native identity and continues in the new, empty
+  conversation. The link lists it under `former`, only so that what it recorded as a member
+  stays the conversation's.
 - The endpoint the conversation started on is not admitted independently
   (`linked_anchor_endpoint_closed`): its native identity is the conversation's stored owner, so
   beside the link it would read what the conversation learns later. It can be linked again.
@@ -96,9 +107,13 @@ quiescence as any link edit, so a turn in flight makes it busy; nothing is copie
   background text, and no send is authorized for it.
 - The last endpoint cannot be removed. An edit with an empty member list is refused with
   `conversation_link_last_endpoint` and changes nothing: the conversation is reached only
-  through its endpoints, so link another private endpoint first. The endpoint the conversation
+  through its endpoints, so link another private endpoint first. A save of the account
+  mapping that would leave a link without any configured member is refused with the same
+  code, before the host is stopped or anything is saved. The endpoint the conversation
   started on has no special standing here; it can leave while another member remains (see
   "Retiring the endpoint the conversation started on").
+- A removed endpoint that is still configured is skipped by start-up, profile initialization
+  and a mapping save, so the host starts with it closed.
 
 ## Shared companion owners
 
@@ -125,7 +140,8 @@ copies the joining endpoint's old records nor rewrites either endpoint's history
   subject to the caller's reminder permissions. Evidence and operation scopes stay physical.
 - Growth tools list records from both linked scopes in one ordered, paginated view. A pending
   proposal can be revised from the other endpoint; each revision keeps its actual evidence.
-  Confirmed growth in reply context uses the same shared view and rechecks the reader's grants.
+  Confirmed growth in reply context uses the same shared view, most recent first, and rechecks
+  the reader's grants.
 - Text diagnostics inspect the shared settings with the requesting endpoint's permissions.
   Repair proposals can be read and cancelled from either endpoint; their original review stays
   intact. A review seals its originating actor's edit token, so a peer sees it as stale and must
@@ -177,16 +193,20 @@ Identity and stored owners are shared across a link. Authority is not.
   the grant family its settings owner revokes) and refused stays refused; a per-person default
   that was off counts as refused, and its capability consents (image, Reality, screen and the
   like) are copied with their state. This happens once, before any default is issued. An
-  endpoint that never had a conversation of its own starts from the defaults of a new one.
+  endpoint that never had a conversation of its own starts from the per-person defaults of a
+  new one; the grants that settings derive it gets by saving the setting itself.
   A removed endpoint has no authority at all while it is closed. Admitted on its own it is
   judged by its own settings and grants again, and if it is linked once more its earlier
-  grants on the linked scope stand only where it is allowed on its own as well.
+  grants and capability consents on the linked scope stand only where it holds them on its
+  own as well: a consent it withdrew on its own is withdrawn on the linked scope too, and a
+  refusal that cannot be recorded stops the endpoint instead of passing silently.
 - Inside a link the settings are shared and the grants are not. The provisioners that derive
-  grants from settings (life, growth, state, typing and presence) issue and revoke nothing for
-  a member. A later change of a shared setting issues or revokes the grant of the endpoint
-  that saved it, when turned on and when turned off, and leaves every other endpoint's grants
-  as they were, also after its next turn. An operator's decision on an endpoint applies to
-  that endpoint.
+  grants from settings (life, growth, state, typing and presence) refuse a member themselves,
+  whoever calls them: a read, the Dashboard state page included, changes no endpoint's
+  grants, and the role-wide walk of a state save does not reach the other members. A later
+  change of a shared setting issues or revokes the grant of the endpoint that saved it, when
+  turned on and when turned off, and leaves every other endpoint's grants as they were, also
+  after its next turn. An operator's decision on an endpoint applies to that endpoint.
 - The pre-send check re-reads the joined endpoint's own dialogue permission, so a revocation
   made during a turn stops that turn's reply.
 
@@ -240,17 +260,30 @@ other.
   administrator selects a member, later texts go there; earlier ones are not sent.
 - A reminder whose time was last set from an endpoint that has since been removed is not
   delivered (`blocked`, `scope_not_granted`): the removed endpoint's work is revoked
-  with it. The record stays shared, and setting its time again from a remaining member makes
-  it that member's work, also when the record was made on the removed endpoint's window.
+  with it, and stays revoked after that endpoint rejoins (`blocked`,
+  `role_binding_changed`). The record stays shared, and setting its time again from a member
+  makes it that member's work, whichever endpoint's window the record was made on.
   An occurrence that was already blocked is not sent afterwards.
-- Proactive contact is planned for one window of the conversation: the one with its most
-  recent turn. The other windows wait, and a contact planned on one endpoint is withdrawn
-  when the human speaks on another. Only current members count: when the window that
-  carried the schedule is removed, a remaining member's window carries it from the next
-  pass, with no restart. Idle time, unanswered contacts, cooldown, budgets and
-  event history are those of that window. Preferences (master switch, quiet hours, pauses)
-  are the conversation's and apply on every endpoint; consent to proactive contact is each
-  endpoint's own.
+- Proactive contact is planned for one window of the conversation. Among the members that
+  are available (configured, account connected) and hold the contact permission themselves,
+  it is the window with the most recent turn; when no member qualifies, the window with the
+  most recent turn keeps the schedule and reports its own reason. The other windows wait
+  (`linked_conversation_continues_on_another_endpoint`), and a contact planned on one
+  endpoint is withdrawn when the human speaks on another. Only current members count: when
+  the window that carried the schedule is removed, a remaining member's window carries it
+  from the next pass, with no restart. The destination is the preferred endpoint in every
+  case; which window carries the schedule never changes it.
+- Three decisions are made for the conversation and read the rows of all its windows in
+  place: the daily contact allowance (`max_contacts_24h`, and the delivery usage shown for
+  it), the pause after an attempt, and the detection of a text that was already sent. The
+  idle period starts at the human's last message on any member. Everything else the
+  schedule keeps is the carrying window's own (see "Boundaries and follow-ups").
+  Preferences (master switch, quiet hours, pauses) are the conversation's and apply on
+  every endpoint; consent to proactive contact is each endpoint's own.
+- The companion's background history (what it sent as reminders and proactive text, given to
+  it as context) is the conversation's: a member reads what was sent for any window of the
+  conversation, once, under its own permission, validated against the stored route and
+  marked with the channel it was delivered on (`delivered_on`).
 - A linked Telegram destination receives the text only. A QQ poke or a voice plan sealed
   with a contact is dropped, no voice is rendered, and a text that carries an image is not
   sent (`telegram_text_only`). With QQ as the destination the existing QQ voice, poke and
@@ -334,13 +367,15 @@ Do it in this order:
    refused (`host_persona_changed`, a reminder ends `failed`) until the row names that role
    id. The save
    restarts the host with the remaining account only; a link member is not provisioned again
-   on its own native scope, so a mapping save with links in place starts as any other.
+   on its own native scope, and a removed endpoint that is still configured is skipped, so a
+   mapping save with links in place starts as any other. A save that would remove the last
+   configured member of the link is refused (`conversation_link_last_endpoint`).
 
 What each state looks like:
 
 | State of the original endpoint | The remaining endpoint | Reminders and proactive text | What the administrator sees |
 | --- | --- | --- | --- |
-| Disconnected, still linked and configured | Replies, text tools and commands, controls and settings as before. When the client returns it continues the same conversation, including one started with `/new` meanwhile. | Go to the preferred endpoint. If the disconnected one is preferred: `background_destination: unavailable`, and a text that comes due is `cancelled / host_account_changed` (`host_platform_unavailable` when its channel is not loaded); select another member and later texts go there. That edit can keep the disconnected endpoint as a member. Reminders it had set are still delivered through the preferred endpoint. | Host status keeps `running` and accepting; its row under `accounts` has `available: false` with `host_account_unavailable` or `host_platform_unavailable`. |
+| Disconnected, still linked and configured | Replies, text tools and commands, controls and settings as before. When the client returns it continues the same conversation, including one started with `/new` meanwhile. | Go to the preferred endpoint. If the disconnected one is preferred: `background_destination: unavailable`, and a text that comes due is `cancelled / host_account_changed` (`host_platform_unavailable` when its channel is not loaded); select another member and later texts go there. That edit can keep the disconnected endpoint as a member. Reminders it had set are still delivered through the preferred endpoint. The proactive schedule is carried by the remaining endpoint's window, also when the disconnected one had the latest turn; when it returns it finds what was sent meanwhile and nothing is sent twice. | Host status keeps `running` and accepting; its row under `accounts` has `available: false` with `host_account_unavailable` or `host_platform_unavailable`. |
 | Removed from the link | Keeps the conversation and every record. | Its reminders are blocked until set again (step 2). The proactive schedule is carried by a remaining member's window from the next pass. If it was preferred and no member was named: `background_destination: missing`, `cancelled / delivery_destination_missing`. | The link lists it under `detached`; its messages get the "shared conversation unavailable" notice and start no turn. |
 | Removed from configuration | Starts and runs with one identity, one set of owners and one schedule. | As above. If it is still a stored member and preferred: `background_destination: missing`, `cancelled / delivery_destination_missing`. | `accounts` lists only the configured accounts. A link edit can name only configured targets (`host_target_unavailable` otherwise), so the next edit leaves it out, which removes it from the link. |
 
@@ -463,23 +498,35 @@ chats and chats that are not companion targets keep AstrBot's own replies.
 - Send exceptions retain existing unknown-outcome accounting. There is no automatic replay.
 - The open-item section and text tools see the linked conversation's notes and reminder records.
   Changing a record does not change where it is delivered; the link's preferred endpoint does.
-- When the human moves from one endpoint to another, the proactive schedule moves with them
-  and continues with the new window's own contact history: a daily contact allowance or an
-  event already shared on the previous endpoint is not counted on the new one.
+- Proactive contact history is stored per window and is not rekeyed. The allowance, the
+  pause after an attempt and repeat detection read all windows of the conversation; the
+  other reads stay with the window that carries the schedule: which events it already shared
+  (the day's greeting, meal, weather and date check-ins, news items and official alerts
+  seen, calendar, diary, growth, activity and reminiscence events, the morning chain),
+  unanswered contacts since the last message, follow-up and burst chains, the voice and poke
+  cooldowns, material rotation, and the rhythm figures given to the model. When the carrying
+  window changes during a day, such an event can therefore be composed once more from the
+  new window, within the conversation's daily allowance and never with the same text inside
+  the repeat window; the slowdown after unanswered contacts starts again there.
+- The windows of a conversation are found through each scope's latest turn. A window an
+  endpoint had before its role binding changed (it was removed and came back, its persona
+  changed) is counted and shown no longer once that endpoint has a new turn, as for any
+  single window.
+- A member that has not had a turn in the conversation cannot carry the proactive schedule:
+  the schedule is anchored on a completed turn of the carrying window.
 - The QQ proactive platform circuit is recorded for the account the contact was planned on.
-- While the member that had the conversation's latest turn is disconnected or no longer
-  configured, but still linked, no proactive contact is composed for the conversation: its
-  window carries the schedule and its account is needed to compose. The schedule moves with
-  the human's next message on another member, or at once when that endpoint is removed from
-  the link.
 - A text that came due while the preferred endpoint was unavailable is recorded and not sent
   later; there is no retry when the account returns.
 - A joined endpoint has the standard tier. When the endpoint that held the installation core
   tier is retired, no chat endpoint holds it: core-only chat commands and interventions stay
   refused, and administration goes through the Dashboard.
-- Link management does not look at the account mapping. Removing the configured target of
-  the last linked endpoint there leaves the conversation stored and linked but unreachable
-  until that target is configured again.
+- A link member that is not the last configured one can still be removed from the account
+  mapping while it stays in the link (see "Retiring the endpoint the conversation started
+  on"): take it out of the link as well.
+- Background history shows a text only while the endpoint it was sent for (the one that set
+  the reminder, or whose window the contact was composed for) still holds the context and
+  the permission it was sent under. Once that endpoint is removed, the text is hidden from
+  every member, also from the one it was delivered to.
 - Operational recovery, and the live check with a channel actually stopped, remain work.
 
 ## Offline proof
@@ -531,7 +578,11 @@ setting that QQ contributed with QQ still recorded as their source, the text too
 command, a session variable, `/new`, a reminder and a proactive text. It also covers the
 preferred endpoint being the one that is gone, reminders last set from QQ, the fences on QQ's
 earlier work, relinking QQ, the refusal to remove the last endpoint, and a start with no QQ
-channel configured, including the daily routine running under Telegram.
+channel configured, including the daily routine running under Telegram. Further cases: work
+captured before a removal staying refused after either endpoint rejoins, the conversation-wide
+allowance, pause and repeat detection, Telegram carrying the proactive schedule while the QQ
+that spoke last is disconnected, a mapping save with a removed endpoint still configured, and
+the refusal of a save that removes the last configured member.
 
 Run these suites with an AstrBot SDK environment that uses a temporary data root, never an
 installed plugin or a live data directory:
