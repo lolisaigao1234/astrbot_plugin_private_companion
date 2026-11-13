@@ -350,7 +350,9 @@ difference in what AstrBot stores for its origin would refuse the remaining endp
 After that:
 
 - The life routines and state maintenance run under the remaining endpoint with that
-  endpoint's own grants.
+  endpoint's own grants. Settings are shared and grants are not: a routine the remaining
+  endpoint never held the permission for (`role.life.run` for diary and sleep) does not run
+  until that endpoint saves the setting itself, which issues its grant.
 - QQ-only capabilities (poke, QZone, QQ status, merged forwards, OneBot history and recall)
   are not offered to a Telegram turn and are not attempted for it.
 - The retired endpoint cannot be admitted independently (`linked_anchor_endpoint_closed`).
@@ -526,7 +528,7 @@ setting that QQ contributed with QQ still recorded as their source, the text too
 command, a session variable, `/new`, a reminder and a proactive text. It also covers the
 preferred endpoint being the one that is gone, reminders last set from QQ, the fences on QQ's
 earlier work, relinking QQ, the refusal to remove the last endpoint, and a start with no QQ
-channel configured.
+channel configured, including the daily routine running under Telegram.
 
 Run these suites with an AstrBot SDK environment that uses a temporary data root, never an
 installed plugin or a live data directory:

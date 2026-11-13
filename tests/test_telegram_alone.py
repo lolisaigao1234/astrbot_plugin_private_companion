@@ -643,6 +643,38 @@ class OneCompanionWithoutQQTests(TelegramAloneFixture, unittest.IsolatedAsyncioT
         self.assertEqual(prepared["context"].actor.subject, qq.actor.subject)
 
 
+class RoutinesWithoutQQTests(TelegramAloneFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_the_daily_routine_runs_under_telegram_after_a_start_without_any_qq_channel(self):
+        from companion_v2.configuration.models import ConfigLayer, ConfigTarget
+        from companion_v2.role_work.life.configuration import LifeConfigurationOwner, configuration_fields
+        # Each endpoint enables its routines itself, before any link exists: grants are never shared.
+        for index, name, identifier in ((0, "first", "1"), (1, "second", 2)):
+            context = (await self.turn(index, "before linking", identifier))["context"]
+            target = ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW, context.role_binding.role,
+                                  context.scope)
+            owner = LifeConfigurationOwner(self.app.runtime)
+            owner.write(target, configuration_fields(), changes={"role.life.enabled": True}, reset=(),
+                expected_revision=owner.read(target, configuration_fields()).revision, observed_at=self.clock.now())
+            self.controller.authority.select(self.controller.settings.target(name), context.scope,
+                                             context.role_binding.role)
+        self.assertEqual((await self.link())["status"], "ok")
+        await self.turn(0, "good morning", "3")
+        await self.turn(1, "good morning again", 4)
+        await self.remove_qq_from_configuration()
+        await self.new_process()
+
+        telegram = self.controller.authority.context("second", "role-a")
+        routine = self.app.life_runtime.for_context(telegram)
+        routine.advance()
+        ran = require(await routine.diary(local_date=self.clock.now().date().isoformat()))
+        task = self.app.runtime.read_one("SELECT origin_key FROM execution_tasks WHERE task_id = ?",
+                                         (ran.writing_task_id,))
+        self.assertEqual(task["origin_key"], telegram.key)
+        # One routine and one daily schedule for the conversation, under the endpoint that is there.
+        self.assertEqual([key for key in self.app.journal_schedule._schedules if key.startswith("role.life.daily:")],
+                         ["role.life.daily:" + telegram.key])
+
+
 class LinkedMappingSaveTests(TelegramAloneFixture, unittest.IsolatedAsyncioTestCase):
     async def test_saving_the_unchanged_account_mapping_of_a_linked_conversation_restarts_the_host(self):
         self.assertEqual((await self.link())["status"], "ok")
