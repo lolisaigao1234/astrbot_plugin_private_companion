@@ -22,9 +22,11 @@ from astrbot.core.message.components import At, Plain
 from astrbot.core.persona_mgr import PersonaManager
 from astrbot.core.pipeline.context import PipelineContext
 from astrbot.core.pipeline.scheduler import PipelineScheduler
+from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
+from astrbot.core.platform.sources.telegram.tg_adapter import TelegramPlatformAdapter
 from astrbot.core.provider.entities import LLMResponse
 from astrbot.core.provider.func_tool_manager import FunctionToolManager
 from astrbot.core.star.context import Context
@@ -32,8 +34,9 @@ from astrbot.core.star.filter.event_message_type import EventMessageTypeFilter, 
 from astrbot.core.star.star import StarMetadata, star_map
 from astrbot.core.star.star_handler import EventType, StarHandlerMetadata, star_handlers_registry
 
-from tests.multi_host_support import MultiFixture
+from tests.multi_host_support import MultiFixture, multi_config
 from tests.test_main_no_reply import ENTRY
+from tests.test_telegram_private_reply import OWNER as TELEGRAM_OWNER, TelegramPlatform, telegram_event
 
 NAME = "linked_reply_test"
 ORIGINS = ("qq-main:FriendMessage:200", "qq-second:FriendMessage:200")
@@ -47,6 +50,7 @@ class RecordedConversations(ConversationManager):
         self.saving, self.allow_save = asyncio.Event(), asyncio.Event()
         self.pause_save = False
         self.save_error = False
+        self.steered = ORIGINS[0]
 
     async def get_conversation(self, umo, cid, *args, **kwargs):
         self.reads.append((umo, cid))
@@ -54,10 +58,10 @@ class RecordedConversations(ConversationManager):
 
     async def update_conversation(self, umo, cid, **kwargs):
         self.tasks.append(asyncio.current_task())
-        if self.pause_save and umo == ORIGINS[0]:
+        if self.pause_save and umo == self.steered:
             self.saving.set()
             await self.allow_save.wait()
-        if self.save_error and umo == ORIGINS[0]:
+        if self.save_error and umo == self.steered:
             raise OSError("synthetic save failure")
         result = await super().update_conversation(umo, cid, **kwargs)
         self.writes.append((umo, cid, deepcopy(kwargs.get("history"))))
@@ -107,9 +111,10 @@ class LinkedQQEvent(AiocqhttpMessageEvent):
 
 class LinkedReplyFixture(MultiFixture):
     origins = ORIGINS
+    event_type = LinkedQQEvent
 
     async def asyncSetUp(self):
-        self.types = replace(self.types, event=LinkedQQEvent, session_persona_override_lookup=None)
+        self.types = replace(self.types, event=self.event_type, session_persona_override_lookup=None)
         self.config = deepcopy(DEFAULT_CONFIG)
         self.config["t2i"] = False
         self.config["plugin_set"] = [NAME]
@@ -158,29 +163,35 @@ class LinkedReplyFixture(MultiFixture):
         self.model_rounds = {}
         self.final_model_done, self.allow_final_model = asyncio.Event(), asyncio.Event()
         self.pause_final_model = False
+        # The origin whose turn a test pauses or fails; replies stay "reply-A" for the
+        # first endpoint and "reply-B" for the second unless a test supplies its own.
+        self.steered, self.replies = self.origins[0], {}
+        self.tool_call = None  # (name, arguments) for the "tool" mode; default reads the turn's evidence
 
         async def text_chat(**args):
             self.calls.append({key: deepcopy(args.get(key)) for key in
                                ("contexts", "prompt", "session_id", "conversation_id", "model")})
             origin = args["session_id"]
-            if self.pause_model and origin == self.origins[0]:
+            if self.pause_model and origin == self.steered:
                 self.model_done.set()
                 await self.allow_model.wait()
             self.model_rounds[origin] = self.model_rounds.get(origin, 0) + 1
-            if origin == self.origins[0] and self.model_rounds[origin] == 1:
+            if origin == self.steered and self.model_rounds[origin] == 1:
                 if self.provider_mode == "provider_error":
                     return LLMResponse(role="err", completion_text="synthetic provider error")
                 if self.provider_mode in ("tool", "tool_failure"):
                     from astrbot_host.core_reply_tools import native_tool_name
+                    name, arguments = self.tool_call or (native_tool_name("turn.evidence")
+                        if self.provider_mode == "tool" else "synthetic_failure", {})
                     return LLMResponse(role="assistant", completion_text="", tools_call_ids=["synthetic-tool-call"],
-                        tools_call_name=[native_tool_name("turn.evidence") if self.provider_mode == "tool"
-                                         else "synthetic_failure"], tools_call_args=[{}])
-            if self.pause_final_model and origin == self.origins[0]:
+                        tools_call_name=[name], tools_call_args=[deepcopy(arguments)])
+            if self.pause_final_model and origin == self.steered:
                 self.final_model_done.set()
                 await self.allow_final_model.wait()
-            if self.model_error and origin == self.origins[0]:
+            if self.model_error and origin == self.steered:
                 raise self.model_error
-            return LLMResponse(role="assistant", completion_text="reply-A" if origin == self.origins[0] else "reply-B")
+            return LLMResponse(role="assistant", completion_text=self.replies.get(origin,
+                "reply-A" if origin == self.origins[0] else "reply-B"))
 
         async def text_chat_stream(**args):
             self.stream_calls.append(args["session_id"])
@@ -197,11 +208,14 @@ class LinkedReplyFixture(MultiFixture):
         self.native.get_using_provider_async = provider
         for platform_id, platform in self.native.platforms.items():
             async def send(*, _platform_id=platform_id, **kwargs):
-                if self.send_error and _platform_id == "qq-main":
+                if self.send_error and _platform_id == self.steered.split(":")[0]:
                     raise OSError("synthetic send error")
                 self.sent.append((_platform_id, kwargs))
                 return {"message_id": len(self.sent)}
-            platform.client.send_private_msg = platform.client.send_group_msg = send
+            if platform.meta().name == "telegram":
+                platform.client.send_message = send
+            else:
+                platform.client.send_private_msg = platform.client.send_group_msg = send
         self.controller = self.make_controller()
         self.app = await self.start_host()
         self.reply_settings(private_debounce_enabled=False)
@@ -215,6 +229,9 @@ class LinkedReplyFixture(MultiFixture):
         core_context._config = self.config
         core_context.astrbot_config_mgr = self.acm
         core_context.kb_manager = None
+        # AstrBot's own session send finds its platform among the synthetic ones.
+        core_context.platform_manager = type("Platforms", (), {
+            "platform_insts": property(lambda _: list(self.native.platforms.values()))})()
         self.core_context = core_context
         # Register exactly as a plugin loader does. No patched registry/dispatch.
         star_map[NAME] = StarMetadata(name=NAME, module_path=NAME)
@@ -232,10 +249,16 @@ class LinkedReplyFixture(MultiFixture):
         ):
             self.register(kind, method)
         async def pause_completed_model(event, response):
-            if self.pause_after_response and event.unified_msg_origin == self.origins[0]:
+            if self.pause_after_response and event.unified_msg_origin == self.steered:
                 self.model_done.set()
                 await self.allow_model.wait()
         self.register(EventType.OnLLMResponseEvent, pause_completed_model, priority=2000000)
+        self.requests = []
+        async def record_final_request(event, req):
+            # After every other request hook: what AstrBot's runner is about to use.
+            self.requests.append((event.unified_msg_origin, sorted(req.func_tool.names()) if req.func_tool else [],
+                                  req.system_prompt or ""))
+        self.register(EventType.OnLLMRequestEvent, record_final_request, priority=-2000000)
         self.register(EventType.AdapterMessageEvent, self.plugin.guard_linked_companion_commands,
             [EventMessageTypeFilter(EventMessageType.PRIVATE_MESSAGE)], priority=1000000)
         self.register(EventType.OnLLMRequestEvent, self.plugin.check_linked_companion_permit, priority=1000000)
@@ -257,6 +280,10 @@ class LinkedReplyFixture(MultiFixture):
             owner.write(target, fields,
                 changes={"conversation.presentation." + name: value for name, value in changes.items()},
                 reset=(), expected_revision=owner.read(target, fields).revision, observed_at=self.clock.now())
+
+    def steer(self, index):
+        """Pauses and failures apply to the turn arriving on this endpoint."""
+        self.steered = self.manager.steered = self.origins[index]
 
     def register(self, kind, handler, filters=None, priority=0):
         metadata = StarHandlerMetadata(kind, NAME + "." + handler.__name__, handler.__name__, NAME,
@@ -344,3 +371,41 @@ class LinkedReplyFixture(MultiFixture):
         star_handlers_registry.append(metadata)
         self.addCleanup(star_handlers_registry.remove, metadata)
         return metadata
+
+
+class SyntheticTelegramChannel(TelegramPlatform, TelegramPlatformAdapter):
+    """A synthetic application and client behind the channel's own metadata and session sender."""
+    config = {"id": "tg-main"}
+    meta = TelegramPlatformAdapter.meta
+
+
+class LinkedTelegramFixture(LinkedReplyFixture):
+    """The same real path with the second endpoint on AstrBot's Telegram channel.
+
+    Only the Telegram application and its client are synthetic; the event is
+    AstrBot's own TelegramPlatformEvent, which formats and sends by itself.
+    """
+    origins = (ORIGINS[0], f"tg-main:FriendMessage:{TELEGRAM_OWNER}")
+    event_type = AstrMessageEvent
+
+    def make_controller(self, config=None):
+        if not hasattr(self, "telegram"):
+            # Once per test: a channel a test removes stays removed across a restart.
+            self.telegram = self.native.platforms["tg-main"] = SyntheticTelegramChannel()
+        config = config or multi_config()
+        config["multi_host"]["targets"][1] = dict(target_id="second", platform_id="tg-main",
+            account_id="tg-main", bot_id="bot-tg", participant_id=str(TELEGRAM_OWNER))
+        config["multi_host"]["personas"] = [row for row in config["multi_host"]["personas"]
+            if row["bot_id"] == "bot-a"] + [dict(bot_id="bot-tg", persona_id="original", role_id="role-a")]
+        return super().make_controller(config)
+
+    def event_for(self, index, text=None, identifier="7", group=None, sender=None, **telegram_fields):
+        if index != 1:
+            return super().event_for(index, text, identifier, group, sender)
+        # Telegram message ids are integers; a named synthetic id keeps one number.
+        numbers = self.__dict__.setdefault("telegram_message_numbers", {})
+        number = int(identifier) if str(identifier).isdigit() else numbers.setdefault(identifier, 1000 + len(numbers))
+        event = telegram_event(self.telegram, identifier=number, sender=int(sender or TELEGRAM_OWNER),
+                               text=text or "B", **telegram_fields)
+        event.created_at = self.clock.now().timestamp()
+        return event
