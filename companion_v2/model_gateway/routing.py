@@ -150,8 +150,7 @@ class ModelRouter:
         if profile is None:
             raise TaskError("model_task_unregistered", "model task type has no registered profile")
         target = ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW,
-                              context.role_binding.role, context.scope,
-                              storage_scope=getattr(context, "storage_scope", None))
+                              context.role_binding.role, context.scope)
         snapshot = require(self.configuration.read(context.actor, target=target,
             group_id=profile.group, observed_at=at))
         snapshot = self.apply_provider_default(profile, snapshot, self.provider_default(context, profile, snapshot))
@@ -178,8 +177,7 @@ class ModelRouter:
                 or request.event.principal != context.actor.principal):
             raise TaskError("model_context_mismatch", "model request must retain its original identity and role")
         target = ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW,
-                              context.role_binding.role, context.scope,
-                              storage_scope=getattr(context, "storage_scope", None))
+                              context.role_binding.role, context.scope)
         snapshot = require(self.configuration.read(context.actor, target=target,
                            group_id=profile.group, observed_at=run.supervisor.now()))
         provider_default = self.provider_default(context, profile, snapshot) if provider_id is None else None

@@ -116,7 +116,7 @@ class ScreenContactEvents:
         *when*: a delivered goodnight line after its delay, or a delivered proactive
         message that stayed unanswered.
         """
-        if (context.scope.kind is not ScopeKind.PRIVATE or not is_core(self.runtime, context.actor.subject)
+        if (context.scope.kind is not ScopeKind.PRIVATE or not is_core(self.runtime, context.actor)
                 or not preferences.values["automatic_enabled"]
                 or not preferences.values["screen_glance_enabled"] or preferences.reason("screen")):
             return None
@@ -224,7 +224,7 @@ class ScreenContactEvents:
                 or self.runtime.read_one("SELECT 1 FROM proactive_contacts WHERE task_id = ?", (task_id,)))
 
     def select(self, context, preferences, at):
-        if (context.scope.kind is not ScopeKind.PRIVATE or not is_core(self.runtime, context.actor.subject)
+        if (context.scope.kind is not ScopeKind.PRIVATE or not is_core(self.runtime, context.actor)
                 or not preferences.values["screen_glance_enabled"]
                 or preferences.reason("screen") or not preferences.values["automatic_enabled"]
                 or self._cooling_down(context, preferences, at)

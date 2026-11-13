@@ -114,8 +114,7 @@ class GroupEditor:
             # ordinary window settings on the same key their runtime readers use;
             # relationship-aware groups override this with an explicit subject.
             return ConfigTarget(self.context.scope.installation_id, ConfigLayer.WINDOW,
-                                self.context.role_binding.role, self.context.scope,
-                                storage_scope=getattr(self.context, "storage_scope", None))
+                                self.context.role_binding.role, self.context.scope)
         if layer is ConfigLayer.RELATIONSHIP:
             raise RuntimeError(f"{self.group} must provide a relationship target")
         return ConfigTarget(self.context.scope.installation_id, ConfigLayer.ROLE,

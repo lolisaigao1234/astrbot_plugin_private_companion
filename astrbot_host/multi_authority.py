@@ -17,7 +17,7 @@ from companion_v2.relationships.private_access import (DEFAULT_FOR_CAPABILITY, R
 from companion_v2.storage.codec import scope_values
 from companion_v2.adapters.astrbot.native import native_user_subject_id
 from .group_settings import GroupTarget
-from companion_v2.conversation.linked_ownership import with_owner, link_for_endpoint, PRIVATE_HOST_ID
+from companion_v2.conversation.linked_ownership import link_for_endpoint, PRIVATE_HOST_ID
 
 
 logger = logging.getLogger(__name__)
@@ -355,6 +355,7 @@ class MultiAuthority:
         actor = self.ensure_actor(target)
         at = datetime.fromisoformat(self.require_manifest()["valid_from"])
         with self.runtime.transaction():
+            self._keep_endpoint_refusals(target, scope, actor, at)
             exact = self.runtime.read_one(
                 """SELECT role_id, revision FROM role_bindings WHERE installation_id = ? AND platform = ?
                    AND scope_kind = ? AND native_scope_id = ? AND bot_id = ? AND account_id = ?
@@ -389,7 +390,7 @@ class MultiAuthority:
             # 私聊权限的默认值：决定"新用户一开始有没有这两项权限"。
             # 默认关的能力**不签发**——没有授权就是没有权限，页面也会如实显示"未授权"；
             # 默认开的能力即使不在配置能力表里也签发（表管的是宿主能力，不是这两项按人权限）。
-            context = with_owner(self.runtime, TaskContext(actor, resolution.binding, AudienceRef(scope, (actor.subject,))))
+            context = TaskContext(actor, resolution.binding, AudienceRef(scope, (actor.subject,)))
             pending = self._defaults(context)
             decided = {grant.capability for grant in self.identities.grants_for_subject(actor.subject)
                        if grant.subject == actor.subject and grant.scope == scope
@@ -436,6 +437,33 @@ class MultiAuthority:
                 self.write(self.context_key(template, role.subject_id), scope.document())
             return context
 
+    def _keep_endpoint_refusals(self, target, scope, actor, at):
+        """Joining a conversation gives an endpoint a new scope, not a clean slate.
+
+        Whatever this endpoint had been refused in its own conversation is
+        recorded as refused on its linked scope before any default is issued.
+        """
+        previous = self.read("host.multi.active:" + target.target_id)
+        if actor.principal.host_id != PRIVATE_HOST_ID or not previous or previous == scope.document():
+            return
+        previous = ScopeRef.restore(previous)
+        own = self.identities.resolve_authenticated(
+            replace(actor.principal, host_id=HOST_ID, bot_id=target.bot_id), observed_at=self.now())
+        if own.failure is not None:
+            return
+        decided = {grant.capability for grant in self.identities.grants_for_subject(actor.subject)
+                   if grant.scope == scope}
+        for capability in sorted({grant.capability for grant in self.identities.grants_for_subject(own.unwrap().subject)
+                                  if grant.scope == previous} - decided):
+            if self.identities.authorize(own.unwrap(), scope=previous, capability=capability,
+                                         observed_at=self.now()).is_success:
+                continue
+            identifier = self.grant_id(scope, capability)
+            self.identities.issue_grant(grant_id=identifier, subject=actor.subject, scope=scope, capability=capability,
+                tier=AuthorizationTier.STANDARD, valid_from=at, expected_revision=self.identities.revision)
+            self.identities.revoke_grant(identifier, revoked_at=self.now(),
+                                         expected_revision=self.identities.revision)
+
     def _grant_core_admin(self, context, scope):
         """Keep the Dashboard-confirmed administrator window actually administrative.
 
@@ -445,8 +473,7 @@ class MultiAuthority:
         the upgrade path.  Only fill a missing tier/grant: an explicit downgrade or
         revoke is a decision and must survive restarts.
         """
-        from companion_v2.conversation.linked_ownership import joined_principal
-        if joined_principal(context.actor.principal):
+        if context.actor.principal.host_id == PRIVATE_HOST_ID:
             return
         policy = ObjectAccessPolicy(self.runtime)
         tier = self.runtime.read_one(
@@ -569,7 +596,7 @@ class MultiAuthority:
             if binding.role != role:
                 raise TaskError("host_persona_binding_changed", "the private persona binding changed")
             self.write(self.context_key(target, role_id), scope.document())
-        return with_owner(self.runtime, TaskContext(actor, binding, AudienceRef(scope, (actor.subject,))))
+        return TaskContext(actor, binding, AudienceRef(scope, (actor.subject,)))
 
     def authorize_delivery(self, target_id, expires_at):
         """正式版：不再需要投递授权，这里只回报"无需授权"。"""

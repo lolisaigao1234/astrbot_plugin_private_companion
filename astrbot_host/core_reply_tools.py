@@ -315,7 +315,7 @@ class CoreReplyToolSession:
         if context.scope.kind in (ScopeKind.GROUP, ScopeKind.PRIVATE):
             offered.append(_OfferedTool(POKE_SPEC, "interaction"))
         if self.context.scope.kind is ScopeKind.GROUP and self.group_tool_profile in ("lean", "standard"):
-            allow_camera = is_core(self.application.runtime, self.context.actor.subject)
+            allow_camera = is_core(self.application.runtime, self.context.actor)
             return group_tool_manifest(offered, self.group_tool_profile, allow_camera=allow_camera)
         return tuple(offered)
 

@@ -4,7 +4,7 @@ import json
 import re
 
 from companion_v2.execution.models import digest, encode
-from companion_v2.conversation.linked_ownership import link_for_scope, scopes_for_link
+from companion_v2.conversation.linked_ownership import link_for_scope
 from companion_v2.storage.core_reply_telemetry_schema import STATEMENTS, TABLE
 from .usage import CORE_CHAIN_KIND, USAGE_FIELDS
 
@@ -98,7 +98,7 @@ def observations_for_role(runtime, context, *, start=None, end=None, private_onl
     link = link_for_scope(runtime, context.scope)
     keys = tuple(dict.fromkeys(digest([scope.installation_id, scope.platform, scope.bot_id, scope.account_id,
                                      context.role_binding.role])
-                               for scope in (scopes_for_link(link) if link else (context.scope,))))
+                               for scope in (link.scopes if link else (context.scope,))))
     where, values = ["role_key IN (" + ",".join("?" for _ in keys) + ")"], list(keys)
     if start is not None:
         where.append("julianday(received_at) >= julianday(?)")

@@ -139,8 +139,7 @@ def configuration_fields():
 
 def target_for(context):
     return ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW,
-                        context.role_binding.role, context.scope,
-                        storage_scope=getattr(context, "storage_scope", None))
+                        context.role_binding.role, context.scope)
 
 
 class QzoneConfigurationOwner(RoleSharedSettingsOwner):
