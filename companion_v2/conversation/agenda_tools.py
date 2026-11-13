@@ -157,10 +157,11 @@ class AgendaRoleSession:
             # Recheck the original operation authority, not a new permission inferred from a tool result.
             def reader():
                 domain = action.split(".", 1)[0]
-                require(self.service.policy.authorize(self.actor, scope=self.target.scope, action=action, owner=self.target.owner,
+                scope = self.service.object_scope(self.target, domain, receipt.object_id)
+                require(self.service.policy.authorize(self.actor, scope=scope, action=action, owner=self.target.owner,
                                                       object_key=self.service.object_key(domain, receipt.object_id), observed_at=self.now()))
                 current = self.service.repository.memo(receipt.object_id) if domain == "memo" else self.service.repository.reminder(receipt.object_id)
-                if current is None or current.target != self.target:
+                if current is None or not self.service.same_owner(current.target, self.target):
                     raise AgendaError("tool_result_changed", "original object is unavailable")
                 return receipt
         return value, reader
@@ -258,12 +259,13 @@ class AgendaRoleSession:
     def _validate_receipt(self, result: AgendaToolResult) -> AgendaReceipt:
         receipt = AgendaReceipt(**json.loads(result.payload_json))
         domain = result.action.split(".", 1)[0]
+        scope = self.service.object_scope(self.target, domain, receipt.object_id)
         require(self.service.policy.authorize(
-            self.actor, scope=self.target.scope, action=result.action, owner=self.target.owner,
+            self.actor, scope=scope, action=result.action, owner=self.target.owner,
             object_key=self.service.object_key(domain, receipt.object_id), observed_at=self.now()))
         current = (self.service.repository.memo(receipt.object_id) if domain == "memo"
                    else self.service.repository.reminder(receipt.object_id))
-        if current is None or current.target != self.target or current.state == "deleted":
+        if current is None or not self.service.same_owner(current.target, self.target) or current.state == "deleted":
             raise AgendaError("tool_result_changed", "original operation object is unavailable")
         original = require(self.service.receipt(self.actor, target=self.target,
                            operation_id=receipt.operation_id, observed_at=self.now()))

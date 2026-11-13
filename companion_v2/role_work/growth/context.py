@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import json
 
 from companion_v2.execution.models import TaskError, require
+from companion_v2.conversation.linked_ownership import same_conversation, shared_scopes
 from companion_v2.foundation.refs import RoleOwnerRef, ScopeKind, SubjectKind
 from companion_v2.sources.repositories import SourceRepository
 
@@ -58,15 +59,21 @@ class RoleGrowthContextReader:
 
     def _verify(self, record, context, at):
         """Every availability rule that applies to a record, for any revision."""
-        if (record.owner != self.owner(context) or record.scope != context.scope
+        if (record.owner != self.owner(context) or not same_conversation(self.runtime, context.scope, record.scope)
                 or record.state not in (GrowthState.ACTIVE, GrowthState.PAUSED)
                 or record.updated_at > at):
             raise TaskError("growth_context_changed", "growth record is no longer available in its original scope")
         for source in record.sources:
-            if source.scope != context.scope:
+            if not same_conversation(self.runtime, context.scope, source.scope):
                 raise TaskError("growth_context_scope", "growth evidence belongs to another private conversation")
             require(self.sources.validate_reference_for_audience(
                 source, recipient=context.actor.subject, observed_at=at))
+
+    def records_for_conversation(self, context, *, limit, **filters):
+        """Bounded inventory over the existing linked source scopes; no rows move."""
+        return tuple(sorted((record for scope in shared_scopes(self.runtime, context.scope)
+            for record in self.ledger.for_role(self.owner(context), scope=scope, limit=limit, **filters)),
+            key=lambda record: record.growth_id))[:limit]
 
     def _history(self, record, context, at):
         """Earlier progress notes whose evidence is *still* valid for this audience.
@@ -121,9 +128,8 @@ class RoleGrowthContextReader:
     def candidates(self, context, at):
         with self.runtime.read_snapshot():
             self._authorize(context, at)
-            owner = self.owner(context)
-            active = self.ledger.for_role(owner, scope=context.scope, state=GrowthState.ACTIVE, limit=SCAN_LIMIT)
-            paused = self.ledger.for_role(owner, scope=context.scope, state=GrowthState.PAUSED, limit=SCAN_LIMIT)
+            active = self.records_for_conversation(context, state=GrowthState.ACTIVE, limit=SCAN_LIMIT)
+            paused = self.records_for_conversation(context, state=GrowthState.PAUSED, limit=SCAN_LIMIT)
             # Most recently developed first, then active before paused, then by id so
             # the order is total. Ordering by id alone could spend a limited context
             # budget on whichever record happened to sort first.

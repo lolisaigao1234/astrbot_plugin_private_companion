@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 import json
 
 from companion_v2.execution.models import TaskError, digest, encode, require, stamp
+from companion_v2.conversation.linked_ownership import link_for_scope
 from companion_v2.foundation.refs import OperationRef, VersionRef
 from companion_v2.identity_policy.private_domain import source_ref
 from .calendar_access import CalendarAccess
@@ -222,12 +223,17 @@ class CalendarService:
     def _cancel_reminder(self, context, record, key):
         owner_context = record.get("reminder_context_key")
         storage_key = self.records.storage_key_for(context, record["id"])
-        if ((owner_context is not None and owner_context != context.key)
-                or (owner_context is None and storage_key == self.records.role_key(context))):
+        mismatch = ((owner_context is not None and owner_context != context.key)
+                    or (owner_context is None and storage_key == self.records.role_key(context)))
+        linked = link_for_scope(self.runtime, context.scope) is not None
+        if mismatch and not linked:
             raise TaskError("calendar_reminder_context_mismatch",
                             "change this reminder from the conversation that created it")
         identifier = record["reminder_id"]
         reminder = self.agenda.repository.reminder(identifier)
+        if mismatch and (reminder is None or not self.agenda.same_owner(reminder.target, self._target(context))):
+            raise TaskError("calendar_reminder_context_mismatch",
+                            "change this reminder from the conversation that created it")
         if reminder and reminder.state not in ("cancelled", "completed"):
             require(self.agenda.change_reminder(context.actor, target=self._target(context), reminder_id=identifier, action="cancel",
                 expected_revision=reminder.revision, operation=self._operation(context, key + ":cancel"),
@@ -264,9 +270,10 @@ class CalendarService:
     def validate_reminder(self, context, reminder_id, at):
         if not reminder_id.startswith("calendar-reminder-"):
             return
-        rows = self.runtime.read_all("""SELECT record_json FROM calendar_records
-            WHERE owner_key IN (?, ?) AND json_extract(record_json, '$.reminder_id') = ?""",
-            (self.records.role_key(context), self.records.conversation_key(context), reminder_id))
+        keys = (self.records.role_key(context), *self.records.conversation_keys(context))
+        rows = self.runtime.read_all(f"""SELECT record_json FROM calendar_records
+            WHERE owner_key IN ({', '.join('?' for _ in keys)}) AND json_extract(record_json, '$.reminder_id') = ?""",
+            (*keys, reminder_id))
         if len(rows) != 1:
             raise TaskError("calendar_reminder_changed", "original event no longer owns this reminder")
         record = json.loads(rows[0]["record_json"])

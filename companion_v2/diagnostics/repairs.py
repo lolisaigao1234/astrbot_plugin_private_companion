@@ -9,8 +9,9 @@ from typing import Mapping
 
 from companion_v2.configuration.models import ConfigurationError, encode, fingerprint
 from companion_v2.foundation.outcome import Outcome
-from companion_v2.foundation.refs import OperationRef, VersionRef
+from companion_v2.foundation.refs import OperationRef, ScopeRef, VersionRef
 from companion_v2.identity_policy.models import _opaque
+from companion_v2.conversation.linked_ownership import link_for_scope, same_conversation
 
 from .models import DiagnosticContext, DiagnosticError, DiagnosticQuery, RepairProposal, require, restore_target
 from .service import DiagnosticService, report_document
@@ -31,11 +32,19 @@ class RepairProposalService:
 
     def _row(self, context: DiagnosticContext, proposal_id: str):
         _opaque(proposal_id, field="proposal_id")
-        row = self.runtime.read_one("SELECT * FROM diagnostic_repair_proposals WHERE proposal_id = ? AND origin_key = ?",
-                                    (proposal_id, context.key))
+        linked = link_for_scope(self.runtime, context.scope) is not None
+        row = self.runtime.read_one("SELECT * FROM diagnostic_repair_proposals WHERE proposal_id = ?" +
+                                   ("" if linked else " AND origin_key = ?"),
+                                   (proposal_id,) if linked else (proposal_id, context.key))
         if row is None:
             raise DiagnosticError("repair_proposal_unavailable", "original proposal is unavailable in this context")
-        return row, json.loads(row["record_json"])
+        data = json.loads(row["record_json"])
+        if row["origin_key"] != context.key:
+            original = data["review"]["original_role"]
+            if (original["role"]["subject_id"] != context.role_binding.role.subject_id
+                    or not same_conversation(self.runtime, context.scope, ScopeRef.restore(original["scope"]))):
+                raise DiagnosticError("repair_proposal_unavailable", "original proposal is unavailable in this context")
+        return row, data
 
     def _authorize(self, context: DiagnosticContext, target, group_id, *, write: bool):
         now = self.diagnostics.current(context)
@@ -192,7 +201,7 @@ class RepairProposalService:
                 data["finished_at"] = now.isoformat()
                 updated = connection.execute("UPDATE diagnostic_repair_proposals SET state = ?, revision = revision + 1, record_json = ? "
                                              "WHERE proposal_id = ? AND origin_key = ? AND revision = 1 AND state = 'pending'",
-                                             (terminal, encode(data), proposal_id, context.key))
+                                             (terminal, encode(data), proposal_id, row["origin_key"]))
                 if updated.rowcount != 1:
                     raise DiagnosticError("repair_review_conflict", "proposal changed before final local commit")
                 row, data = self._row(context, proposal_id)
