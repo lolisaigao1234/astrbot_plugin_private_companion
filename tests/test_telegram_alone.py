@@ -622,6 +622,87 @@ class OneContactLedgerTests(ContactLedgerFixture, unittest.IsolatedAsyncioTestCa
         self.assertEqual((self.telegram_texts(), self.sent_to_qq()), ([(OWNER, "thinking of you")], []))
 
 
+class OtherConversationTests(ContactLedgerFixture, unittest.IsolatedAsyncioTestCase):
+    """What an endpoint is told outside a linked conversation neither counts nor shows inside it."""
+
+    # One bot on both channels: only the conversation tells a member's window from its own.
+    telegram_bot_id = "bot-a"
+
+    def sent_in_the_background(self, context):
+        return [item["text"] for item in require(self.app.background_history.recent(context))]
+
+    async def test_a_contact_in_the_own_conversation_of_an_endpoint_that_left_stays_out_of_the_linked_one(self):
+        qq, telegram = await self.both_have_spoken(last=1)
+        self.contact_settings(qq["context"], max_contacts_24h=1)
+        self.assertEqual((await self.link(revision=1, members=["first"], preferred_target_id="first"))["status"], "ok")
+        self.assertEqual((await self.link(revision=2, members=["first"],
+                                          independent_target_ids=["second"]))["status"], "ok")
+        own = await self.turn(1, "on my own", 3)
+        self.assertNotEqual(own["context"].scope.conversation_id, telegram["context"].scope.conversation_id)
+        self.consent_to_contact(own["context"])
+        self.enable_contact(own["context"])
+        self.assertEqual(await self.proactive_text(own, "only for the other conversation"), "delivered")
+        await self.idle()
+        self.assertEqual(self.sent_in_the_background(own["context"]), ["only for the other conversation"])
+        self.assertEqual((self.deliveries_today(qq["context"]), self.sent_in_the_background(qq["context"])),
+                         ((0, 1), []))
+
+    async def test_what_an_endpoint_was_told_before_it_joined_stays_out_of_the_linked_conversation(self):
+        own = await self.turn(1, "before joining", 1)
+        self.consent_to_contact(own["context"])
+        self.enable_contact(own["context"])
+        self.assertEqual(await self.proactive_text(own, "told before joining"), "delivered")
+        await self.idle()
+        # Telegram joins and does not speak: its member window has no turn yet.
+        self.assertEqual((await self.link())["status"], "ok")
+        qq = await self.turn(0, "hello", "2")
+        self.consent_to_contact(qq["context"])
+        self.contact_settings(qq["context"], enabled=True, max_contacts_24h=1)
+        self.assertEqual((self.deliveries_today(qq["context"]), self.sent_in_the_background(qq["context"])),
+                         ((0, 1), []))
+
+
+class TwoLinkedConversationsTests(ContactLedgerFixture, unittest.IsolatedAsyncioTestCase):
+    """Two humans each have a linked conversation on the one QQ bot; Telegram moves from one to the other."""
+
+    extra_targets = ({"target_id": "outside", "platform_id": "qq-main", "account_id": "100",
+                      "bot_id": "bot-a", "participant_id": "999"},)
+    sent_in_the_background = OtherConversationTests.sent_in_the_background
+
+    async def telegram_moved_to_the_other_conversation(self):
+        """QQ's linked conversation, and Telegram's window in the other one with what it was told there."""
+        qq, _ = await self.both_have_spoken(last=1)
+        self.contact_settings(qq["context"], max_contacts_24h=1)
+        self.assertEqual((await self.link(revision=1, members=["first"], preferred_target_id="first"))["status"], "ok")
+        self.assertEqual((await self.link(revision=2, members=["first"],
+                                          independent_target_ids=["second"]))["status"], "ok")
+        await self.turn(1, "on my own", 3)
+        # The other human's conversation, on the same QQ bot; Telegram joins it.
+        other = "qq-main:FriendMessage:999"
+        await self.db.create_conversation(other, "qq-main", cid="conversation-other", persona_id="original", content=[])
+        await self.manager.switch_conversation(other, "conversation-other")
+        from astrbot.core import sp
+        self.addAsyncCleanup(sp.session_remove, other, "sel_conv_id")  # AstrBot keeps the selection per process
+        joined = await self.link(link_id="other-dialogue", conversation_id="conversation-other",
+                                 source_target_id="outside", members=["outside", "second"])
+        self.assertEqual(joined["status"], "ok", joined)
+        there, occurrence = await self.remind(1, "for the other human", identifier=4)
+        self.assertNotEqual(there.scope.conversation_id, qq["context"].scope.conversation_id)
+        self.assertEqual((await self.settled(there, occurrence))["delivery"], "delivered")
+        self.consent_to_contact(there)
+        self.enable_contact(there)
+        prepared = await self.turn(1, "still in the other conversation", 5)
+        self.assertEqual(await self.proactive_text(prepared, "also for the other human"), "delivered")
+        await self.idle()
+        self.assertEqual(sorted(self.sent_in_the_background(prepared["context"])),
+                         ["also for the other human", "for the other human"])
+        return qq["context"], prepared["context"]
+
+    async def test_what_an_endpoint_is_told_in_its_next_linked_conversation_stays_out_of_the_one_it_left(self):
+        qq, _ = await self.telegram_moved_to_the_other_conversation()
+        self.assertEqual((self.deliveries_today(qq), self.sent_in_the_background(qq)), ((0, 1), []))
+
+
 class ScheduleCarrierTests(ContactLedgerFixture, unittest.IsolatedAsyncioTestCase):
     """One proactive schedule per conversation, carried by a member that can carry it now."""
 

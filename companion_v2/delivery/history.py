@@ -8,7 +8,7 @@ import json
 
 from companion_v2.execution.models import TaskContext, TaskError, digest, require, stamp
 from companion_v2.execution.service import outcome
-from companion_v2.conversation.linked_ownership import conversation_windows, window_filter
+from companion_v2.conversation.linked_ownership import conversation_windows, same_conversation, window_filter
 from companion_v2.conversation.reset import background_current, boundary
 from companion_v2.foundation.refs import ScopeRef
 from companion_v2.conversation.private_history import PrivateConversationHistory
@@ -162,6 +162,9 @@ class BackgroundHistory:
         if (request.context.key != origin or request.delivery_id != identifier
                 or request.payload_hash != row["payload_hash"] or owner is None or owner.history_read is None):
             raise TaskError("delivery_history_unavailable", "history has no original authorized owner")
+        if not same_conversation(self.runtime, context.scope, request.context.scope):
+            # Whatever window it is filed under, text sent in another conversation is never shown in this one.
+            raise TaskError("delivery_history_unavailable", "history belongs to another conversation")
         self._authorize(request.context if origin == context.key else context, owner.action, at)
         receipt = self.runtime.read_one("""SELECT receipt_json FROM background_delivery_receipts
             WHERE delivery_id = ? AND receipt_ref = ?""", (identifier, row["receipt_ref"]))

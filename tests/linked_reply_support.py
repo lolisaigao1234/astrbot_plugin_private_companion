@@ -398,6 +398,8 @@ class LinkedTelegramFixture(LinkedReplyFixture):
     """
     origins = (ORIGINS[0], f"tg-main:FriendMessage:{TELEGRAM_OWNER}")
     event_type = AstrMessageEvent
+    telegram_bot_id = "bot-tg"  # "bot-a": both endpoints are accounts of the one bot
+    extra_targets = ()
 
     def make_controller(self, config=None):
         if not hasattr(self, "telegram"):
@@ -405,9 +407,13 @@ class LinkedTelegramFixture(LinkedReplyFixture):
             self.telegram = self.native.platforms["tg-main"] = SyntheticTelegramChannel()
         config = config or multi_config()
         config["multi_host"]["targets"][1] = dict(target_id="second", platform_id="tg-main",
-            account_id="tg-main", bot_id="bot-tg", participant_id=str(TELEGRAM_OWNER))
+            account_id="tg-main", bot_id=self.telegram_bot_id, participant_id=str(TELEGRAM_OWNER))
         config["multi_host"]["personas"] = [row for row in config["multi_host"]["personas"]
-            if row["bot_id"] == "bot-a"] + [dict(bot_id="bot-tg", persona_id="original", role_id="role-a")]
+            if row["bot_id"] == "bot-a"] + [dict(bot_id=bot, persona_id="original", role_id="role-a")
+                                            for bot in {self.telegram_bot_id} - {"bot-a"}]
+        for target in self.extra_targets:
+            if not any(row["target_id"] == target["target_id"] for row in config["multi_host"]["targets"]):
+                config["multi_host"]["targets"].append(dict(target))
         return super().make_controller(config)
 
     def event_for(self, index, text=None, identifier="7", group=None, sender=None, **telegram_fields):

@@ -38,7 +38,13 @@ def latest(runtime, context_key):
         ORDER BY observed_at DESC, rowid DESC LIMIT 1""", (context_key,)))
 
 
-def latest_scope(runtime, scope):
+def latest_scope(runtime, scope, *, conversation=False):
+    """The newest turn of this endpoint; with ``conversation``, only one recorded with this scope in full.
+
+    An endpoint outlives its conversations. Whoever asks for a linked
+    conversation's turn names the conversation too, so that a turn the same
+    endpoint had in another conversation is never taken for it.
+    """
     if not turns_available(runtime):
         return None
     return project(runtime.read_one("""SELECT * FROM conversation_native_turns
@@ -48,9 +54,11 @@ def latest_scope(runtime, scope):
           AND json_extract(context_json, '$.audience.scope.native_scope_id') = ?
           AND json_extract(context_json, '$.audience.scope.bot_id') = ?
           AND json_extract(context_json, '$.audience.scope.account_id') = ?
-          AND json_extract(context_json, '$.audience.scope.session_id') = ?
+          AND json_extract(context_json, '$.audience.scope.session_id') = ?""" + ("""
+          AND json_extract(context_json, '$.audience.scope.conversation_id') = ?""" if conversation else "") + """
         ORDER BY observed_at DESC, rowid DESC LIMIT 1""", (scope.installation_id, scope.platform,
-        scope.kind.value, scope.native_scope_id, scope.bot_id, scope.account_id, scope.session_id)))
+        scope.kind.value, scope.native_scope_id, scope.bot_id, scope.account_id, scope.session_id,
+        *((scope.conversation_id,) if conversation else ()))))
 
 
 def latest_input(runtime, context_key):

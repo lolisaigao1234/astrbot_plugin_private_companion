@@ -206,12 +206,14 @@ def conversation_windows(runtime, context):
     ``None`` outside a link: one window, read as it always was. A member reads,
     in place, what was recorded for the other scopes of its link as well, each
     under the window of that scope's latest turn; nothing is copied or rekeyed.
+    A window is the conversation's only when the scope recorded with it is one
+    of the link's in full: the same endpoint in another conversation is not.
     """
     link = link_for_scope(runtime, context.scope)
     if link is None:
         return None
     from companion_v2.conversation.native_turns import latest_scope
-    latest = (latest_scope(runtime, scope) for scope in link.scopes if scope != context.scope)
+    latest = (latest_scope(runtime, scope, conversation=True) for scope in link.scopes if scope != context.scope)
     return tuple(dict.fromkeys((context.key, *(row["context_key"] for row in latest if row is not None))))
 
 
