@@ -145,6 +145,20 @@ class AgendaService:
             raise AgendaError("agenda_object_not_found", "object is unavailable in the authorized view")
         return reminder
 
+    def requester_target(self, reminder: Reminder) -> AgendaTarget:
+        """The reminder's target as its requester holds it.
+
+        A linked endpoint may move a reminder another endpoint made. The record
+        keeps the window it was made on; the requester, and the role binding
+        revision recorded with it, belong to the endpoint that last set the time.
+        """
+        link = link_for_scope(self.runtime, reminder.target.scope)
+        if link is None:
+            return reminder.target
+        principal = reminder.requester.principal
+        scope = link.scope_at(principal.platform, principal.account_id, principal.native_account_id)
+        return replace(reminder.target, scope=scope) if scope in link.scopes else reminder.target
+
     def same_owner(self, source: AgendaTarget, target: AgendaTarget) -> bool:
         return self.repository.storage_key(source) == self.repository.storage_key(target)
 
@@ -518,7 +532,9 @@ class AgendaService:
         reminder = self.repository.reminder(row["reminder_id"])
         if reminder.state != "active" or row["state"] == "cancelled" or reminder.revision != row["reminder_revision"]:
             raise AgendaError("occurrence_superseded", "occurrence was cancelled or replaced")
-        binding_revision = self._authorize(reminder.requester, reminder.target, reminder.authorization_action, now,
+        # The recorded revision is that of the window the requester set the time from.
+        binding_revision = self._authorize(reminder.requester, self.requester_target(reminder),
+                                           reminder.authorization_action, now,
                                            self.object_key("reminder", reminder.reminder_id))
         self._authorize(reminder.requester, reminder.target, "reminder.deliver", now, self.object_key("reminder", reminder.reminder_id))
         binding = require(self.identity.resolve_role(reminder.target.scope, observed_at=now))
