@@ -8,6 +8,7 @@ import json
 import sqlite3
 
 from companion_v2.storage.runtime import StorageRuntime
+from companion_v2.conversation.linked_ownership import owner_scope, shared_scopes
 
 from .models import (AgendaError, AgendaTarget, Memo, Reminder, Schedule, encode, fingerprint,
                      open_item_expiry, restore_identity, stamp)
@@ -16,6 +17,18 @@ from .models import (AgendaError, AgendaTarget, Memo, Reminder, Schedule, encode
 class AgendaRepository:
     def __init__(self, runtime: StorageRuntime) -> None:
         self.runtime = runtime
+
+    def storage_key(self, target: AgendaTarget) -> str:
+        """Only the partition key is shared; target_json keeps the physical endpoint."""
+        return replace(target, scope=owner_scope(self.runtime, target.scope)).key
+
+    def target_filter(self, target: AgendaTarget):
+        """Read linked records in place, including ones written before sharing."""
+        scopes = shared_scopes(self.runtime, target.scope)
+        if len(scopes) == 1:
+            return "target_key = ?", target.key
+        return "target_key IN (SELECT value FROM json_each(?))", encode(tuple(
+            replace(target, scope=scope).key for scope in scopes))
 
     def memo(self, memo_id: str) -> Memo | None:
         row = self.runtime.read_one("SELECT * FROM agenda_memos WHERE memo_id = ?", (memo_id,))
@@ -138,7 +151,7 @@ class AgendaRepository:
         with self.runtime.transaction() as connection:
             if expected_revision == 0:
                 connection.execute("INSERT INTO agenda_memos VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (
-                    memo.memo_id, memo.target.key, encode(memo.target), memo.revision, memo.state,
+                    memo.memo_id, self.storage_key(memo.target), encode(memo.target), memo.revision, memo.state,
                     int(memo.pinned), encode(memo), stamp(now), stamp(now),
                 ))
             else:
@@ -153,7 +166,7 @@ class AgendaRepository:
         with self.runtime.transaction() as connection:
             if expected_revision == 0:
                 connection.execute("INSERT INTO agenda_reminders VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (
-                    reminder.reminder_id, reminder.target.key, encode(reminder.target), reminder.memo_id,
+                    reminder.reminder_id, self.storage_key(reminder.target), encode(reminder.target), reminder.memo_id,
                     reminder.revision, reminder.state, encode(reminder), stamp(now), stamp(now),
                 ))
             else:
