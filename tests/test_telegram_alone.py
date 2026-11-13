@@ -619,6 +619,47 @@ class OneContactLedgerTests(ContactLedgerFixture, unittest.IsolatedAsyncioTestCa
         self.assertEqual((self.telegram_texts(), self.sent_to_qq()), ([(OWNER, "thinking of you")], []))
 
 
+class ScheduleCarrierTests(ContactLedgerFixture, unittest.IsolatedAsyncioTestCase):
+    """One proactive schedule per conversation, carried by a member that can carry it now."""
+
+    superseded = ProactiveAfterRetirementTests.superseded
+
+    def evaluated(self, *prepared):
+        """One pass of the host's schedule; what it decided about each window."""
+        schedule = self.app.contact_schedule
+        schedule.advance()
+        return [schedule.diagnostic_for(item["context"])["evaluation"]["reason_code"] for item in prepared]
+
+    async def test_telegram_carries_the_schedule_while_the_qq_that_spoke_last_is_disconnected(self):
+        from tests.native_adapter_support import completion
+
+        async def compose(payload, tools):
+            return completion(json.dumps({"decision": "send", "text": "thinking of you"}))
+        self.native.provider.client.state.behavior = compose
+        qq, telegram = await self.both_have_spoken(last=0)
+        self.qq_disconnect()
+        self.contact_settings(telegram["context"], automatic_enabled=True, idle_seconds=1, interval_seconds=600)
+        self.clock.advance(timedelta(seconds=30))
+        # QQ's window has the latest turn and cannot carry anything; Telegram's does, with its own consent.
+        self.assertEqual(self.evaluated(telegram), ["candidate_queued"])
+        async with asyncio.timeout(30):
+            while not self.telegram_texts():
+                self.app.notify()
+                self.assertEqual(self.app.state, "running", self.app.failure_code)
+                await asyncio.sleep(0.05)
+        await self.idle()
+        self.assertEqual(self.evaluated(qq, telegram), [self.superseded, "recent_attempt_cooldown"])
+        self.assertEqual((self.telegram_texts(), self.sent_to_qq()), ([(OWNER, "thinking of you")], []))
+        self.assertEqual((self.link_record()["preferred_target_id"], (await self.link_view())["background_destination"]),
+                         ("second", "selected"))
+        # QQ returns. Its window carries the one schedule again and counts what was sent meanwhile.
+        self.qq_connect()
+        self.clock.advance(timedelta(seconds=30))
+        self.assertEqual(self.evaluated(qq, telegram), ["recent_attempt_cooldown", self.superseded])
+        await self.idle()
+        self.assertEqual((self.telegram_texts(), self.sent_to_qq()), ([(OWNER, "thinking of you")], []))
+
+
 class UnlinkAndRelinkQQTests(TelegramAloneFixture, unittest.IsolatedAsyncioTestCase):
     def access(self, context, action):
         result = self.app.tasks.check_context_access(context, action=action, observed_at=self.clock.now())
