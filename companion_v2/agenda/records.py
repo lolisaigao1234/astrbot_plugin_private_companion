@@ -4,10 +4,11 @@ from datetime import datetime
 import json
 
 from companion_v2.execution.models import TaskError, digest
+from companion_v2.conversation.linked_ownership import owner_scope, shared_scopes, link_for_scope
 from companion_v2.foundation.refs import RoleOwnerRef
 from companion_v2.identity_policy.personas import PersonaDirectory
 from companion_v2.storage.codec import scope_from_row
-from companion_v2.storage.versioned_records import VersionedRecords, owner_key as conversation_owner_key
+from companion_v2.storage.versioned_records import VersionedRecords
 
 
 def calendar_role_owner(context):
@@ -25,7 +26,11 @@ class CalendarRecords(VersionedRecords):
         return digest(["calendar-role.v1", calendar_role_owner(context)])
 
     def conversation_key(self, context):
-        return conversation_owner_key(context)
+        return digest([owner_scope(self.runtime, context.scope), context.role_binding.role, context.actor.subject])
+
+    def conversation_keys(self, context):
+        return tuple(digest([scope, context.role_binding.role, context.actor.subject])
+                     for scope in shared_scopes(self.runtime, context.scope))
 
     def _legacy_role_plans(self, context):
         role_key = self.role_key(context)
@@ -100,7 +105,13 @@ class CalendarRecords(VersionedRecords):
             return shared
         legacy = next((item["record"] for item in self._legacy_role_plans(context)
                        if item["record"]["id"] == identifier), None)
-        return legacy or super().get(context, identifier, storage_key=self.conversation_key(context))
+        if legacy:
+            return legacy
+        for key in self.conversation_keys(context):
+            record = super().get(context, identifier, storage_key=key)
+            if record is not None:
+                return record
+        return None
 
     def list(self, context, *, after_id="", limit=100, kinds=None):
         if type(limit) is not int or not 1 <= limit <= 100 or type(after_id) is not str:
@@ -109,9 +120,11 @@ class CalendarRecords(VersionedRecords):
             kinds = tuple(kinds)
             if not kinds or any(type(kind) is not str or not kind for kind in kinds):
                 raise TaskError("record_page_invalid", "invalid record kind filter")
-        role_key, local_key = self.role_key(context), self.conversation_key(context)
+        role_key = self.role_key(context)
         shared = super().list(context, after_id=after_id, limit=limit, storage_key=role_key, kinds=kinds)
-        local = super().list(context, after_id=after_id, limit=limit, storage_key=local_key, kinds=kinds)
+        local = []
+        for key in self.conversation_keys(context):
+            local.extend(super().list(context, after_id=after_id, limit=limit, storage_key=key, kinds=kinds))
         kind_set = set(kinds) if kinds is not None else None
         records = {item["id"]: item for item in shared}
         for item in self._legacy_role_plans(context):
@@ -142,7 +155,7 @@ class CalendarRecords(VersionedRecords):
             return super().version(context, identifier, revision, storage_key=self.role_key(context))
         legacy = next((item["owner_key"] for item in self._legacy_role_plans(context)
                        if item["record"]["id"] == identifier), None)
-        for key in (self.role_key(context), legacy, self.conversation_key(context)):
+        for key in (self.role_key(context), legacy, *self.conversation_keys(context)):
             if key is None:
                 continue
             try:
@@ -156,7 +169,7 @@ class CalendarRecords(VersionedRecords):
         if storage_key is not None:
             return super().receipt(context, operation_id, storage_key=storage_key)
         keys = (self.role_key(context), *(item["owner_key"] for item in self._legacy_role_plans(context)),
-                self.conversation_key(context))
+                *self.conversation_keys(context))
         for key in dict.fromkeys(keys):
             try:
                 return super().receipt(context, operation_id, storage_key=key)
@@ -168,6 +181,10 @@ class CalendarRecords(VersionedRecords):
     def storage_key_for_change(self, context, identifier, kind):
         self.adopt_legacy_role_plans(context)
         if kind != "role_plan":
+            if link_for_scope(self.runtime, context.scope) is not None:
+                for key in self.conversation_keys(context):
+                    if super().get(context, identifier, storage_key=key) is not None:
+                        return key
             return self.conversation_key(context)
         role_key, local_key = self.role_key(context), self.conversation_key(context)
         current = super().get(context, identifier, storage_key=role_key)
@@ -183,4 +200,8 @@ class CalendarRecords(VersionedRecords):
     def storage_key_for(self, context, identifier):
         if super().get(context, identifier, storage_key=self.role_key(context)) is not None:
             return self.role_key(context)
+        if link_for_scope(self.runtime, context.scope) is not None:
+            for key in self.conversation_keys(context):
+                if super().get(context, identifier, storage_key=key) is not None:
+                    return key
         return self.conversation_key(context)
