@@ -443,8 +443,10 @@ class MultiAuthority:
         Whatever this endpoint had been refused in its own conversation is
         recorded as refused on its linked scope before any default is issued.
         """
+        if actor.principal.host_id != PRIVATE_HOST_ID:
+            return
         previous = self.read("host.multi.active:" + target.target_id)
-        if actor.principal.host_id != PRIVATE_HOST_ID or not previous or previous == scope.document():
+        if not previous or previous == scope.document():
             return
         previous = ScopeRef.restore(previous)
         own = self.identities.resolve_authenticated(
