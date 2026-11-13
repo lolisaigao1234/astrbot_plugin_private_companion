@@ -2,7 +2,6 @@
 
 The module deliberately speaks only the plain JSON provider contract.  V2
 resolves the actor, role and audience; this provider derives the current user
-from companion_v2.conversation.linked_ownership import PRIVATE_HOST_ID
 from that context and never accepts a target identity from model arguments.
 """
 from __future__ import annotations
@@ -266,10 +265,6 @@ def _actor_subject(context: Any) -> dict[str, Any] | None:
     """The exact human subject this turn belongs to, forwarded for authority checks."""
     actor = context.get("actor") if isinstance(context, dict) else None
     subject = actor.get("subject") if isinstance(actor, dict) else None
-    principal = actor.get("principal") if isinstance(actor, dict) else None
-    if isinstance(principal, dict) and principal.get("host_id") == PRIVATE_HOST_ID:
-        # A linked endpoint shares this subject, never the authority checked from it.
-        return None
     return subject if isinstance(subject, dict) else None
 
 

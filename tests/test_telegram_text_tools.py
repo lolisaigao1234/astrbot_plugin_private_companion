@@ -55,6 +55,57 @@ class TelegramTextToolTests(LinkedTelegramFixture, unittest.IsolatedAsyncioTestC
         self.assertIn("角色日程总开关已关闭", receipt["text"])
         self.assertEqual(self.telegram.client.onebot_accesses, [])
 
+    async def calendar_command_with_the_planning_model_paused(self, index, *, link_changes):
+        """The real command path on a linked endpoint; returns the plans written and the receipts sent."""
+        from datetime import timedelta
+        from astrbot_host.linked_conversations import KEY
+        from tests.native_adapter_support import completion
+        self.assertEqual((await self.link())["status"], "ok")
+        planning, release = asyncio.Event(), asyncio.Event()
+
+        async def paused_planning(payload, tools):
+            planning.set()
+            await release.wait()
+            return completion(json.dumps({"items": [{"title": "read the next chapter", "minutes": 30,
+                "start": (self.clock.now() + timedelta(hours=1)).isoformat()}]}))
+        self.native.provider.client.state.behavior = paused_planning
+        task = await self.dispatch(self.event_for(index, "生成日程"))
+        try:
+            await asyncio.wait_for(planning.wait(), 15)
+            if link_changes == "new conversation":
+                # AstrBot's own /new on the other endpoint, registered as its loader registers it.
+                from astrbot.builtin_stars.builtin_commands.commands.conversation import ConversationCommands
+                self.builtin("new", ConversationCommands(self.core_context).new_conv)
+                await asyncio.wait_for(await self.dispatch(self.event_for(0, "/new", 2)), 20)
+                await self.controller.session.linked_conversations.gate.drain()
+                self.assertEqual(self.controller.session.linked_conversations.get("owner-dialogue")["revision"], 2)
+            elif link_changes:
+                records = self.controller.session.linked_conversations.records()
+                records["owner-dialogue"]["revision"] += 1
+                self.controller.authority.write(KEY, records)
+        finally:
+            release.set()
+        await asyncio.wait_for(task, 30)
+        context = self.controller.authority.context("first", "role-a")
+        return self.app.calendar.inventory(context)["items"], [
+            receipt["text"] for platform, receipt in self.sent if platform == "tg-main"]
+
+    async def test_calendar_command_on_a_linked_endpoint_writes_its_plan_and_returns_the_receipt(self):
+        plans, receipts = await self.calendar_command_with_the_planning_model_paused(1, link_changes=False)
+        self.assertEqual([plan["title"] for plan in plans], ["read the next chapter"])
+        self.assertEqual(len(receipts), 1)
+        self.assertIn("共写入 1 项", receipts[0])
+
+    async def test_link_revision_changed_while_a_calendar_command_plans_prevents_entry_and_receipt(self):
+        plans, receipts = await self.calendar_command_with_the_planning_model_paused(1, link_changes=True)
+        self.assertEqual((plans, receipts), ([], []))
+
+    async def test_a_new_conversation_started_while_a_calendar_command_plans_prevents_entry_and_receipt(self):
+        # /new gives the link a new revision: a command still planning under the old one is refused.
+        plans, receipts = await self.calendar_command_with_the_planning_model_paused(
+            1, link_changes="new conversation")
+        self.assertEqual((plans, receipts), ([], []))
+
     async def test_command_receipt_refuses_a_client_replaced_since_route_authentication(self):
         from astrbot_host.recalls import authenticate_notice_route
         from astrbot_host.private_notice import send_private_notice
@@ -252,10 +303,16 @@ class TelegramTextToolTests(LinkedTelegramFixture, unittest.IsolatedAsyncioTestC
         self.assertEqual(len(notes.unwrap()), 0)
 
     async def test_link_revision_changed_while_tool_awaits_real_source_prevents_any_effect(self):
+        await self.revision_changes_while_a_tool_awaits_its_source(1)
+
+    async def test_link_revision_changed_while_a_linked_qq_tool_awaits_real_source_prevents_any_effect(self):
+        await self.revision_changes_while_a_tool_awaits_its_source(0)
+
+    async def revision_changes_while_a_tool_awaits_its_source(self, index):
         from astrbot.core.star.star_handler import EventType
         from astrbot_host.linked_conversations import KEY
         self.assertEqual((await self.link())["status"], "ok")
-        self.steer(1)
+        self.steer(index)
         self.pause_model = True
         source_ready, release_source = asyncio.Event(), asyncio.Event()
         original_source = []
@@ -273,7 +330,7 @@ class TelegramTextToolTests(LinkedTelegramFixture, unittest.IsolatedAsyncioTestC
             prepared["native_source_future"] = asyncio.create_task(paused_return())
 
         self.register(EventType.OnLLMRequestEvent, hold_source_return, priority=-3000000)
-        event = self.event_for(1, "let us practise watercolor")
+        event = self.event_for(index, "let us practise watercolor")
         task = await self.dispatch(event)
         try:
             await asyncio.wait_for(source_ready.wait(), 15)
@@ -470,9 +527,16 @@ class TelegramTextToolTests(LinkedTelegramFixture, unittest.IsolatedAsyncioTestC
         await prepared["native_source_future"]
         context = prepared["context"]
         row = input_row(self.app.messages, context, prepared["turn_id"])
+        read, owners = self.app.messages._read_source, []
+
+        def counted(source, *args):
+            owners.append(source.owner)
+            return read(source, *args)
+        self.app.messages._read_source = counted
         history = body(self.app.messages, reference(row), context, self.clock.now())
         self.assertEqual(history["text"], "about that quote")
         self.assertEqual(history["quotes"][0]["text"], "hello 😀 quoted words")
+        self.assertEqual(owners.count("conversation.native_quote"), 1)
 
     async def test_remote_or_unattributed_reply_components_cannot_offer_another_source(self):
         from telegram import Update

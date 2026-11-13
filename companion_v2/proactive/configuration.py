@@ -8,8 +8,9 @@ from types import MappingProxyType
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from companion_v2.configuration.models import ApplyMode, ConfigLayer, ConfigTarget, ConfigurationError, EffectiveValue
-from companion_v2.configuration.owners import SparseConfigurationOwner
+from companion_v2.configuration.owners import SparseConfigurationOwner, storage_target
 from companion_v2.configuration.registry import FieldDefinition, FieldRegistry, ValueKind
+from companion_v2.conversation.linked_ownership import shared_scopes
 from companion_v2.foundation.refs import ScopeKind, normalize_utc
 
 from .news_sources import NewsSource, SOURCE_KINDS, news_uid, news_url
@@ -422,9 +423,11 @@ class ContactConfigurationOwner(SparseConfigurationOwner):
         pause_fields = tuple(field for field in fields if field.field_id.endswith(".pause_until"))
         layers = target.chain()
         placeholders = ",".join("?" for _ in pause_fields)
+        # Rows are kept at the storage address; each layer keeps the name the caller gave it.
         stored = {layer.key: {row["field_id"]: row for row in self.store.read_all(
             f"SELECT field_id, value_json, revision FROM configuration_values WHERE target_key = ? AND field_id IN ({placeholders})",
-            (layer.key, *(field.field_id for field in pause_fields)))} for layer in layers}
+            (address.key, *(field.field_id for field in pause_fields)))}
+            for layer, address in zip(layers, storage_target(self.runtime, target).chain())}
         for field in pause_fields:
             effective = result[field.field_id]
             until = pause_time(effective.value)
@@ -460,12 +463,15 @@ class ContactConfigurationOwner(SparseConfigurationOwner):
             stable = super().read(stable_target, fields)
             stable = personal_contact_snapshot(self.runtime, stable_target, fields, stable)
             if target.layer is ConfigLayer.WINDOW:
+                stored = storage_target(self.runtime, target)
                 rows = self.store.read_all("""SELECT operation_id,
                         json_extract(CASE WHEN json_valid(result_json) THEN result_json ELSE '{}' END,
                                      '$.revision') AS revision
                     FROM configuration_changes WHERE target_key = ? AND group_id = ? AND changed = 1""",
-                    (target.key, GROUP))
-                personal_operations = private_contact_operations(self.runtime, {target.key})
+                    (stored.key, GROUP))
+                # A linked conversation keeps one row set; each save keeps its endpoint's operation id.
+                personal_operations = private_contact_operations(self.runtime, {stored.key}, tuple(
+                    replace(target, scope=scope).key for scope in shared_scopes(self.runtime, target.scope)))
                 public_revisions = {row["revision"] for row in rows
                     if row["operation_id"].startswith("proactive.contact-config:")
                     and row["operation_id"] not in personal_operations}

@@ -543,6 +543,12 @@ class MiHomeWebAPI:
         """True only when this exact actor subject holds the core tier."""
         if not isinstance(actor, dict):
             return False
+        from companion_v2.conversation.linked_ownership import joined_principal
+        from ..request_context import NATIVE_ACTOR
+        invoking = NATIVE_ACTOR.get()
+        if invoking is not None and joined_principal(invoking.principal):
+            # A linked endpoint shares this subject, never the authority checked from it.
+            return False
         subject = actor.get("subject") if isinstance(actor.get("subject"), dict) else actor
         subject_id = str(subject.get("subject_id") or "").strip()
         subject_kind = str(subject.get("kind") or "").strip()

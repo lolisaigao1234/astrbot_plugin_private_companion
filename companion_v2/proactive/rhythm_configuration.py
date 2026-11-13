@@ -34,8 +34,12 @@ LEGACY_CONTACT_OPERATION_PREFIX = "proactive.contact-config:"
 WINDOW_CONTACT_OPERATION_PREFIX = "proactive.contact-window-config:"
 
 
-def _private_contact_operations(runtime, target_keys, prefixes):
-    """Identify member saves by their exact parent/child operation hash."""
+def _private_contact_operations(runtime, target_keys, prefixes, written_as=()):
+    """Identify member saves by their exact parent/child operation hash.
+
+    ``written_as`` names the physical window keys whose saves are stored under
+    the one requested key: an operation keeps the address of the endpoint that made it.
+    """
     store = runtime.configuration_store
     if not target_keys:
         return set()
@@ -57,17 +61,17 @@ def _private_contact_operations(runtime, target_keys, prefixes):
     operators = tuple(SubjectRef(runtime.installation_id, SubjectKind.HUMAN, row["subject_id"])
         for row in runtime.read_all("SELECT subject_id FROM subject_access_tiers WHERE subject_kind = 'human'", ()))
     return {row["child_id"] for row in routes if any(row["child_id"] == prefix +
-        digest([operator, row["target_key"], row["parent_id"] + ":contact"])
-        for operator in operators for prefix in prefixes)}
+        digest([operator, key, row["parent_id"] + ":contact"])
+        for operator in operators for prefix in prefixes for key in written_as or (row["target_key"],))}
 
 
 def legacy_personal_operations(runtime, target_keys):
     return _private_contact_operations(runtime, target_keys, (LEGACY_CONTACT_OPERATION_PREFIX,))
 
 
-def private_contact_operations(runtime, target_keys):
+def private_contact_operations(runtime, target_keys, written_as=()):
     return _private_contact_operations(runtime, target_keys,
-        (LEGACY_CONTACT_OPERATION_PREFIX, WINDOW_CONTACT_OPERATION_PREFIX))
+        (LEGACY_CONTACT_OPERATION_PREFIX, WINDOW_CONTACT_OPERATION_PREFIX), written_as)
 
 
 def personal_contact_snapshot(runtime, target, fields, current):

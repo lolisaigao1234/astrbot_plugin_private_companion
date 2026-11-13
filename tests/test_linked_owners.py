@@ -2,6 +2,7 @@
 from tests import astrbot_data_root  # noqa: F401
 
 import asyncio
+import json
 import unittest
 
 from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA
@@ -111,6 +112,54 @@ class LinkedOwnerTests(LinkedReplyFixture, unittest.IsolatedAsyncioTestCase):
         session = self.controller.session
         self.assertEqual((session._actor_is_core(first), session._actor_is_core(second)), (True, False))
 
+    async def test_a_joined_endpoint_gains_no_device_authority_from_the_shared_subject(self):
+        from datetime import timedelta
+        from types import SimpleNamespace
+        from companion_v2.identity_policy.models import AuthorizationTier
+        from companion_v2.identity_policy.object_access import ObjectAccessPolicy
+        from companion_v2.product import PRODUCT_VERSION
+        from companion_v2.reality import provider as reality
+        from tests.native_internal_support import internal_registry
+        from tests.test_mihome_control_profiles import AC_DID, api_for
+        policy = ObjectAccessPolicy(self.app.runtime)
+        first = (await self.turn(0, "Hello", "device-before"))["context"]
+        policy.set_tier(first.actor.subject, AuthorizationTier.CORE,
+                        expected_revision=policy.revision, observed_at=self.clock.now())
+        self.assertEqual((await self.link())["status"], "ok")
+        first = (await self.turn(0, "Hello", "device-owner"))["context"]
+        second = (await self.turn(1, "Hello again", "device-joined"))["context"]
+        self.assertEqual(second.actor.subject, first.actor.subject)
+        api = api_for(admin_only=True)
+        api.plugin.controller = SimpleNamespace(runtime=self.app.runtime)
+        api.plugin.mihome_web_api = api
+        powered = []
+
+        async def control_power(did, is_on, alias):
+            powered.append(did)
+            return True
+        api.plugin.client.control_power = control_power
+        registry = internal_registry(reality.NativeRealityProvider(
+            api.plugin, self.root / "reality", version=PRODUCT_VERSION), now=self.clock.now)
+        self.addAsyncCleanup(registry.aclose)
+        declaration = next(item for item in registry.declarations()
+                           if item.descriptor.tool.action == "reality.device.control")
+
+        async def power(context, identifier):
+            from companion_v2.execution.models import digest
+            arguments = {"alias": "客厅空调", "is_on": True}
+            return await registry.invoke(declaration.host_tool_id, SimpleNamespace(
+                invocation_id=identifier, parent_task_id="task-" + identifier, tool_call_id="call-" + identifier,
+                context=context, descriptor=declaration.descriptor, arguments_json=json.dumps(arguments),
+                arguments_hash=digest(arguments), deadline_at=self.clock.now() + timedelta(minutes=1),
+                before_dispatch=lambda: None, task_run=None))
+
+        refused = await power(second, "joined-power")
+        self.assertEqual((refused.state, refused.effect), ("failed", "not_committed"))
+        self.assertEqual(powered, [])
+        allowed = await power(first, "owner-power")
+        self.assertEqual((allowed.state, allowed.effect), ("succeeded", "committed"))
+        self.assertEqual(powered, [AC_DID])
+
     async def test_a_joined_endpoint_is_fenced_to_the_scopes_of_its_link(self):
         from companion_v2.conversation.reply_settings import GROUP
         from companion_v2.identity_policy.object_access import ObjectAccessPolicy
@@ -153,6 +202,153 @@ class LinkedOwnerTests(LinkedReplyFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.link())["status"], "ok")
         self.assertFalse(await self.attempt(1, "Refused after linking", "refusal-linked"))
         self.assertTrue(await self.attempt(0, "The other endpoint is unaffected", "refusal-other"))
+
+    def allowed(self, context, capability):
+        directory = self.controller.authority.identities
+        actor = require(directory.resolve_authenticated(context.actor.principal, observed_at=self.clock.now()))
+        return directory.authorize(actor, scope=context.scope, capability=capability,
+                                   observed_at=self.clock.now()).is_success
+
+    def decisions(self, context):
+        """Every capability this endpoint has a grant row for, with today's answer."""
+        directory = self.controller.authority.identities
+        return {grant.capability: self.allowed(context, grant.capability)
+                for grant in directory.grants_for_subject(context.actor.subject) if grant.scope == context.scope}
+
+    def save(self, owner, fields, context, **changes):
+        target = self.window(context)
+        owner.write(target, fields, changes=changes, reset=(),
+            expected_revision=owner.read(target, fields).revision, observed_at=self.clock.now())
+
+    def growth(self, context, **values):
+        from companion_v2.role_work.growth.configuration import GrowthConfigurationOwner, configuration_fields
+        self.save(GrowthConfigurationOwner(self.app.runtime), configuration_fields(), context,
+                  **{"role.growth." + name: value for name, value in values.items()})
+
+    GROWTH = ("role.growth.read", "role.growth.propose")
+
+    async def test_linking_to_an_oppositely_configured_anchor_flips_no_growth_permission(self):
+        first = (await self.turn(0, "The anchor reads growth", "growth-flip-a"))["context"]
+        second = (await self.turn(1, "The other endpoint proposes", "growth-flip-b"))["context"]
+        self.growth(first, read_enabled=True, proposals_enabled=False)
+        self.growth(second, read_enabled=False, proposals_enabled=True)
+        before = [{action: self.allowed(context, action) for action in self.GROWTH} for context in (first, second)]
+        self.assertEqual(before, [dict(zip(self.GROWTH, (True, False))), dict(zip(self.GROWTH, (False, True)))])
+        self.assertEqual((await self.link())["status"], "ok")
+        for attempt in range(2):  # the answer holds on the joining turn and on every later one
+            first = (await self.turn(0, "After linking", "growth-flip-a-linked-%d" % attempt))["context"]
+            second = (await self.turn(1, "After linking", "growth-flip-b-linked-%d" % attempt))["context"]
+            self.assertEqual([{action: self.allowed(context, action) for action in self.GROWTH}
+                              for context in (first, second)], before)
+
+    async def test_a_revoked_state_permission_stays_revoked_under_an_anchor_that_enables_state(self):
+        from companion_v2.role_work.state.configuration import StateConfigurationOwner, configuration_fields
+        first = (await self.turn(0, "The anchor keeps state", "state-revoked-a"))["context"]
+        second = (await self.turn(1, "The other endpoint too", "state-revoked-b"))["context"]
+        owner, fields = StateConfigurationOwner(self.app.runtime), configuration_fields()
+        for index, context in enumerate((first, second)):
+            role = owner.role_target(self.window(context))
+            owner.write(role, fields, changes={"role.state.enabled": True}, reset=(),
+                expected_revision=owner.read(role, fields).revision, observed_at=self.clock.now())
+            await self.turn(index, "State is kept now", "state-enabled-%d" % index)
+        self.assertTrue(self.allowed(second, "role.state.read"))
+        self.revoke(second, "role.state.read")
+        self.assertEqual((await self.link())["status"], "ok")
+        for attempt in range(2):
+            second = (await self.turn(1, "After linking", "state-revoked-b-linked-%d" % attempt))["context"]
+            self.assertFalse(self.allowed(second, "role.state.read"))
+            self.assertTrue(self.allowed(second, "role.state.maintain"))
+        self.assertTrue(self.allowed((await self.turn(0, "The anchor", "state-revoked-a-linked"))["context"],
+                                     "role.state.read"))
+
+    async def test_every_decision_of_an_endpoint_survives_linking_including_an_explicit_grant(self):
+        from companion_v2.identity_policy.models import AuthorizationTier
+        first = (await self.turn(0, "The anchor", "decisions-a"))["context"]
+        second = (await self.turn(1, "An independent endpoint", "decisions-b"))["context"]
+        directory = self.controller.authority.identities
+        directory.issue_grant(grant_id="operator-grant-rest-wake", subject=second.actor.subject, scope=second.scope,
+            capability="role.rest.wake", tier=AuthorizationTier.STANDARD, valid_from=self.clock.now(),
+            expected_revision=directory.revision)
+        self.revoke(second, "proactive.contact")
+        owners, before = self.decisions(first), self.decisions(second)
+        self.assertTrue(before["role.rest.wake"])
+        self.assertEqual((await self.link())["status"], "ok")
+        first = (await self.turn(0, "After linking", "decisions-a-linked"))["context"]
+        second = (await self.turn(1, "After linking", "decisions-b-linked"))["context"]
+        self.assertEqual(self.decisions(first), owners)
+        self.assertEqual(self.decisions(second), {**self.decisions(second), **before})
+        self.assertEqual({capability for capability, allowed in self.decisions(second).items() if allowed},
+                         {capability for capability, allowed in before.items() if allowed})
+        self.assertFalse(self.allowed(first, "role.rest.wake"))
+
+    async def test_a_withdrawn_image_consent_is_not_issued_again_by_linking(self):
+        from astrbot_host.image_access import IMAGE_EXTENSION
+        from companion_v2.capabilities.models import CapabilityAuthorizationState
+        from companion_v2.capabilities.repositories import CapabilityRepository
+        repository = CapabilityRepository(self.app.runtime)
+
+        def consent(context):
+            return repository.authorize(extension_id=IMAGE_EXTENSION, capability_id="image.generate",
+                                        subject=context.actor.subject, scope=context.scope).is_success
+        second = (await self.turn(1, "An independent endpoint", "image-before"))["context"]
+        self.assertTrue(consent(second))
+        current = require(repository.consent(extension_id=IMAGE_EXTENSION, capability_id="image.generate",
+                                             subject=second.actor.subject, scope=second.scope))
+        require(repository.set_authorization(extension_id=IMAGE_EXTENSION, capability_id="image.generate",
+            subject=second.actor.subject, scope=second.scope, state=CapabilityAuthorizationState.REVOKED,
+            expected_revision=current.revision, observed_at=self.clock.now()))
+        self.assertEqual((await self.link())["status"], "ok")
+        first = (await self.turn(0, "The anchor", "image-anchor"))["context"]
+        second = (await self.turn(1, "After linking", "image-after"))["context"]
+        self.assertEqual((consent(first), consent(second)), (True, False))
+
+    async def test_a_removed_endpoint_has_no_authority_and_a_rejoin_brings_back_nothing_it_lacks_on_its_own(self):
+        read, directory = "role.growth.read", self.controller.authority.identities
+        self.assertEqual((await self.link())["status"], "ok")
+        first = (await self.turn(0, "The anchor", "rejoin-a"))["context"]
+        linked = (await self.turn(1, "A member", "rejoin-b"))["context"]
+        self.growth(linked, read_enabled=True)
+        self.assertTrue(self.allowed(linked, read))
+        # Removed: its grant rows remain, and decide nothing.
+        self.assertEqual((await self.link(revision=1, members=["first"]))["status"], "ok")
+        self.assertTrue(any(grant.scope == linked.scope and grant.capability == read
+                            for grant in directory.grants_for_subject(linked.actor.subject)))
+        refused = directory.authorize(linked.actor, scope=linked.scope, capability=read, observed_at=self.clock.now())
+        self.assertEqual(refused.failure and refused.failure.code, "scope_not_granted")
+        # Admitted on its own: a conversation of its own, decided by its own settings and grants.
+        self.assertEqual((await self.link(revision=2, members=["first"],
+                                          independent_target_ids=["second"]))["status"], "ok")
+        own = (await self.turn(1, "On my own", "rejoin-own"))["context"]
+        self.assertNotEqual(own.scope, linked.scope)
+        self.assertNotEqual(own.actor.principal.host_id, linked.actor.principal.host_id)
+        self.assertFalse(self.allowed(own, read))
+        self.assertTrue(self.allowed(own, "memory.read"))
+        # Linked again: what it had under the earlier membership and lacks on its own stays refused.
+        self.assertEqual((await self.link(revision=3))["status"], "ok")
+        again = (await self.turn(1, "A member again", "rejoin-again"))["context"]
+        self.assertEqual(again.scope, linked.scope)
+        self.assertEqual((self.allowed(again, read), self.allowed(again, "memory.read")), (False, True))
+        self.assertTrue(self.allowed((await self.turn(0, "The anchor", "rejoin-a-again"))["context"], "memory.read"))
+
+    async def test_a_later_shared_setting_change_moves_only_the_grants_of_the_endpoint_that_made_it(self):
+        self.assertEqual((await self.link())["status"], "ok")
+        first = (await self.turn(0, "Growth preferences", "later-setting-a"))["context"]
+        second = (await self.turn(1, "Growth preferences again", "later-setting-b"))["context"]
+        read = "role.growth.read"
+        self.assertEqual((self.allowed(first, read), self.allowed(second, read)), (False, False))
+        for value, expected in ((True, (False, True)), (False, (False, False))):
+            self.growth(second, read_enabled=value)
+            for attempt in range(2):  # at once, and after each endpoint has been activated again
+                self.assertEqual((self.allowed(first, read), self.allowed(second, read)), expected)
+                first = (await self.turn(0, "Later", "later-setting-a-%s-%d" % (value, attempt)))["context"]
+                second = (await self.turn(1, "Later", "later-setting-b-%s-%d" % (value, attempt)))["context"]
+        self.growth(first, read_enabled=True)
+        self.growth(second, read_enabled=True)
+        self.growth(first, read_enabled=False)
+        for attempt in range(2):
+            self.assertEqual((self.allowed(first, read), self.allowed(second, read)), (False, True))
+            first = (await self.turn(0, "Later still", "later-setting-a-off-%d" % attempt))["context"]
+            second = (await self.turn(1, "Later still", "later-setting-b-off-%d" % attempt))["context"]
 
     async def test_a_joined_endpoint_keeps_owner_features_on_its_own_window_only(self):
         from companion_v2.identity_policy.object_access import ObjectAccessPolicy
@@ -375,6 +571,54 @@ class LinkedOwnerTests(LinkedReplyFixture, unittest.IsolatedAsyncioTestCase):
         self.assertFalse(owner.read(self.window(first), fields).fields[field].value)
         self.assertEqual((allowed(first), allowed(second)), (True, False))
 
+    async def contact_editor(self, identifier):
+        """Both linked endpoints, an operator, and the contact section as the settings editor shows it."""
+        from astrbot_host.management_identity import dashboard_operator
+        from companion_v2.configuration.management import ProactiveContactManagement
+        from companion_v2.relationships.private_management import PrivateMemberSettings
+        self.assertEqual((await self.link())["status"], "ok")
+        first = (await self.turn(0, "Contact preferences", identifier + "-a"))["context"]
+        second = (await self.turn(1, "Contact preferences again", identifier + "-b"))["context"]
+        operator = dashboard_operator(self.app.runtime, "synthetic-admin", at=self.clock.now())
+        shared = ProactiveContactManagement(self.app, first)
+        require(shared.configure(operator, {"operation_key": "global-contact-defaults",
+            "edit_token": require(shared.status(operator))["edit_token"],
+            "changes": {"enabled": True, "interval_seconds": 600}}))
+
+        def contact(context):
+            status = require(PrivateMemberSettings(self.app, context).status(operator))
+            self.assertEqual(status["section_errors"], {})
+            return status["sections"]["contact"]
+
+        def save(writer, values, command=None):
+            """Save through the editor; the same command again is a repeat of that save."""
+            command = command or {"operation_key": "contact-override-%d" % values["interval_seconds"], "sections": {
+                "contact": {"edit_token": contact(writer)["edit_token"], "changes": values}}}
+            return command, require(PrivateMemberSettings(self.app, writer).configure(operator, command))
+        return first, second, contact, save
+
+    async def test_a_contact_override_saved_in_the_settings_editor_reads_the_same_on_both_endpoints(self):
+        from datetime import timedelta
+        first, second, contact, save = await self.contact_editor("contact-override")
+        pause = (self.clock.now() + timedelta(hours=1)).isoformat()
+        for writer, values in ((second, {"enabled": False, "interval_seconds": 1200, "pause_until": pause}),
+                               (first, {"enabled": False, "interval_seconds": 1800, "pause_until": ""})):
+            _, saved = save(writer, values)
+            for context in (first, second):
+                settings = contact(context)["settings"]
+                self.assertEqual({name: settings[name] for name in values}, values)
+            operation = require(self.app.configuration.operations.get(saved["results"]["contact"]["operation_id"]))
+            self.assertEqual(operation.operation.scope, writer.scope)
+
+    async def test_a_repeated_settings_save_from_a_joined_endpoint_finds_its_receipt(self):
+        first, second, _, save = await self.contact_editor("contact-replay")
+        for writer, values in ((second, {"interval_seconds": 1200}), (first, {"interval_seconds": 1800})):
+            command, saved = save(writer, values)
+            _, repeated = save(writer, values, command)
+            self.assertTrue(repeated["results"]["contact"]["replayed"])
+            self.assertEqual(repeated["results"]["contact"]["operation_id"],
+                             saved["results"]["contact"]["operation_id"])
+
     async def test_model_window_settings_are_shared_in_dashboard_and_runtime_reads(self):
         from astrbot_host.management_identity import dashboard_operator
         from astrbot_host.model_route_material import route_snapshot
@@ -562,6 +806,67 @@ class LinkedOwnerTests(LinkedReplyFixture, unittest.IsolatedAsyncioTestCase):
         routines = self.life_routines(*contexts)
         self.assertEqual(len(routines), 1)
         self.assertIsNotNone(next(iter(routines.values())).instruction)
+
+    async def own_life_routines(self, identifier):
+        """Each endpoint enables its routines itself, before any link exists."""
+        from companion_v2.role_work.life.configuration import LifeConfigurationOwner, configuration_fields
+        for index, name in enumerate(("first", "second")):
+            context = (await self.turn(index, "Before linking", "%s-own-%d" % (identifier, index)))["context"]
+            self.save(LifeConfigurationOwner(self.app.runtime), configuration_fields(), context,
+                      **{"role.life.enabled": True})
+            # The window's next activation issues the grants; no host tick runs in between.
+            self.controller.authority.select(self.controller.settings.target(name), context.scope,
+                                             context.role_binding.role)
+
+    async def test_the_life_routine_runs_through_the_healthy_peer_when_its_first_binder_disconnects(self):
+        await self.own_life_routines("life-failover")
+        self.assertEqual((await self.link())["status"], "ok")
+        first = (await self.turn(0, "Good morning", "life-failover-a"))["context"]
+        second = (await self.turn(1, "Good morning again", "life-failover-b"))["context"]
+        self.assertEqual((self.allowed(first, "role.life.run"), self.allowed(second, "role.life.run")), (True, True))
+        await asyncio.gather(*tuple(self.controller.session.core_reply_maintenance._pending))
+        life, bridge = self.app.life_runtime, self.controller.session.bridge
+        routine, = self.life_routines(first, second).values()
+        routine.refresh()
+        await routine.preflight()
+        self.assertEqual(routine.context.scope, first.scope)
+        self.native.platforms["qq-main"].client._wsr_api_clients.clear()
+        with self.assertRaises(Exception) as unavailable:
+            await bridge.verify_role(first.scope, first.role_binding, routine.instruction)
+        self.assertEqual(unavailable.exception.code, "host_account_changed")
+        life.bind(second, routine.instruction, guard=bridge.verify_role)
+        ran = require(await routine.diary(local_date=self.clock.now().date().isoformat()))
+        # The member that ran it is the one the work is attributed to.
+        self.assertEqual(routine.context.scope, second.scope)
+        task = self.app.runtime.read_one("SELECT origin_key FROM execution_tasks WHERE task_id = ?",
+                                         (ran.writing_task_id,))
+        self.assertEqual(task["origin_key"], second.key)
+        # Still one routine and one daily schedule for the conversation.
+        self.assertEqual(set(self.life_routines(first, second)), {id(routine)})
+        self.assertEqual([key for key in self.app.journal_schedule._schedules if key.startswith("role.life.daily:")],
+                         ["role.life.daily:" + first.key])
+        # The first binder takes its routine back once its account returns.
+        self.native.platforms["qq-main"].client._wsr_api_clients["100"] = object()
+        await routine.preflight()
+        self.assertEqual(routine.context.scope, first.scope)
+
+    async def test_the_life_routine_leaves_a_removed_first_binder_for_the_remaining_member_without_a_restart(self):
+        await self.own_life_routines("life-removed")
+        self.assertEqual((await self.link())["status"], "ok")
+        first = (await self.turn(0, "Good morning", "life-removed-a"))["context"]
+        second = (await self.turn(1, "Good morning again", "life-removed-b"))["context"]
+        await asyncio.gather(*tuple(self.controller.session.core_reply_maintenance._pending))
+        routine, = self.life_routines(first, second).values()
+        routine.advance()
+        self.assertEqual(routine.context.scope, first.scope)
+        self.assertEqual((await self.link(revision=1, members=["second"]))["status"], "ok")
+        # The host loop's next pass, with no restart and no new bind.
+        routine.advance()
+        self.assertEqual(routine.context.scope, second.scope)
+        ran = require(await routine.diary(local_date=self.clock.now().date().isoformat()))
+        task = self.app.runtime.read_one("SELECT origin_key FROM execution_tasks WHERE task_id = ?",
+                                         (ran.writing_task_id,))
+        self.assertEqual(task["origin_key"], second.key)
 
     async def test_context_records_keep_their_stored_form(self):
         from dataclasses import asdict
