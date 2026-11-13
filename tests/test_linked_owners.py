@@ -203,6 +203,125 @@ class LinkedOwnerTests(LinkedReplyFixture, unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await self.attempt(1, "Refused after linking", "refusal-linked"))
         self.assertTrue(await self.attempt(0, "The other endpoint is unaffected", "refusal-other"))
 
+    def allowed(self, context, capability):
+        directory = self.controller.authority.identities
+        actor = require(directory.resolve_authenticated(context.actor.principal, observed_at=self.clock.now()))
+        return directory.authorize(actor, scope=context.scope, capability=capability,
+                                   observed_at=self.clock.now()).is_success
+
+    def decisions(self, context):
+        """Every capability this endpoint has a grant row for, with today's answer."""
+        directory = self.controller.authority.identities
+        return {grant.capability: self.allowed(context, grant.capability)
+                for grant in directory.grants_for_subject(context.actor.subject) if grant.scope == context.scope}
+
+    def save(self, owner, fields, context, **changes):
+        target = self.window(context)
+        owner.write(target, fields, changes=changes, reset=(),
+            expected_revision=owner.read(target, fields).revision, observed_at=self.clock.now())
+
+    def growth(self, context, **values):
+        from companion_v2.role_work.growth.configuration import GrowthConfigurationOwner, configuration_fields
+        self.save(GrowthConfigurationOwner(self.app.runtime), configuration_fields(), context,
+                  **{"role.growth." + name: value for name, value in values.items()})
+
+    GROWTH = ("role.growth.read", "role.growth.propose")
+
+    async def test_linking_to_an_oppositely_configured_anchor_flips_no_growth_permission(self):
+        first = (await self.turn(0, "The anchor reads growth", "growth-flip-a"))["context"]
+        second = (await self.turn(1, "The other endpoint proposes", "growth-flip-b"))["context"]
+        self.growth(first, read_enabled=True, proposals_enabled=False)
+        self.growth(second, read_enabled=False, proposals_enabled=True)
+        before = [{action: self.allowed(context, action) for action in self.GROWTH} for context in (first, second)]
+        self.assertEqual(before, [dict(zip(self.GROWTH, (True, False))), dict(zip(self.GROWTH, (False, True)))])
+        self.assertEqual((await self.link())["status"], "ok")
+        for attempt in range(2):  # the answer holds on the joining turn and on every later one
+            first = (await self.turn(0, "After linking", "growth-flip-a-linked-%d" % attempt))["context"]
+            second = (await self.turn(1, "After linking", "growth-flip-b-linked-%d" % attempt))["context"]
+            self.assertEqual([{action: self.allowed(context, action) for action in self.GROWTH}
+                              for context in (first, second)], before)
+
+    async def test_a_revoked_state_permission_stays_revoked_under_an_anchor_that_enables_state(self):
+        from companion_v2.role_work.state.configuration import StateConfigurationOwner, configuration_fields
+        first = (await self.turn(0, "The anchor keeps state", "state-revoked-a"))["context"]
+        second = (await self.turn(1, "The other endpoint too", "state-revoked-b"))["context"]
+        owner, fields = StateConfigurationOwner(self.app.runtime), configuration_fields()
+        for index, context in enumerate((first, second)):
+            role = owner.role_target(self.window(context))
+            owner.write(role, fields, changes={"role.state.enabled": True}, reset=(),
+                expected_revision=owner.read(role, fields).revision, observed_at=self.clock.now())
+            await self.turn(index, "State is kept now", "state-enabled-%d" % index)
+        self.assertTrue(self.allowed(second, "role.state.read"))
+        self.revoke(second, "role.state.read")
+        self.assertEqual((await self.link())["status"], "ok")
+        for attempt in range(2):
+            second = (await self.turn(1, "After linking", "state-revoked-b-linked-%d" % attempt))["context"]
+            self.assertFalse(self.allowed(second, "role.state.read"))
+            self.assertTrue(self.allowed(second, "role.state.maintain"))
+        self.assertTrue(self.allowed((await self.turn(0, "The anchor", "state-revoked-a-linked"))["context"],
+                                     "role.state.read"))
+
+    async def test_every_decision_of_an_endpoint_survives_linking_including_an_explicit_grant(self):
+        from companion_v2.identity_policy.models import AuthorizationTier
+        first = (await self.turn(0, "The anchor", "decisions-a"))["context"]
+        second = (await self.turn(1, "An independent endpoint", "decisions-b"))["context"]
+        directory = self.controller.authority.identities
+        directory.issue_grant(grant_id="operator-grant-rest-wake", subject=second.actor.subject, scope=second.scope,
+            capability="role.rest.wake", tier=AuthorizationTier.STANDARD, valid_from=self.clock.now(),
+            expected_revision=directory.revision)
+        self.revoke(second, "proactive.contact")
+        owners, before = self.decisions(first), self.decisions(second)
+        self.assertTrue(before["role.rest.wake"])
+        self.assertEqual((await self.link())["status"], "ok")
+        first = (await self.turn(0, "After linking", "decisions-a-linked"))["context"]
+        second = (await self.turn(1, "After linking", "decisions-b-linked"))["context"]
+        self.assertEqual(self.decisions(first), owners)
+        self.assertEqual(self.decisions(second), {**self.decisions(second), **before})
+        self.assertEqual({capability for capability, allowed in self.decisions(second).items() if allowed},
+                         {capability for capability, allowed in before.items() if allowed})
+        self.assertFalse(self.allowed(first, "role.rest.wake"))
+
+    async def test_a_withdrawn_image_consent_is_not_issued_again_by_linking(self):
+        from astrbot_host.image_access import IMAGE_EXTENSION
+        from companion_v2.capabilities.models import CapabilityAuthorizationState
+        from companion_v2.capabilities.repositories import CapabilityRepository
+        repository = CapabilityRepository(self.app.runtime)
+
+        def consent(context):
+            return repository.authorize(extension_id=IMAGE_EXTENSION, capability_id="image.generate",
+                                        subject=context.actor.subject, scope=context.scope).is_success
+        second = (await self.turn(1, "An independent endpoint", "image-before"))["context"]
+        self.assertTrue(consent(second))
+        current = require(repository.consent(extension_id=IMAGE_EXTENSION, capability_id="image.generate",
+                                             subject=second.actor.subject, scope=second.scope))
+        require(repository.set_authorization(extension_id=IMAGE_EXTENSION, capability_id="image.generate",
+            subject=second.actor.subject, scope=second.scope, state=CapabilityAuthorizationState.REVOKED,
+            expected_revision=current.revision, observed_at=self.clock.now()))
+        self.assertEqual((await self.link())["status"], "ok")
+        first = (await self.turn(0, "The anchor", "image-anchor"))["context"]
+        second = (await self.turn(1, "After linking", "image-after"))["context"]
+        self.assertEqual((consent(first), consent(second)), (True, False))
+
+    async def test_a_later_shared_setting_change_moves_only_the_grants_of_the_endpoint_that_made_it(self):
+        self.assertEqual((await self.link())["status"], "ok")
+        first = (await self.turn(0, "Growth preferences", "later-setting-a"))["context"]
+        second = (await self.turn(1, "Growth preferences again", "later-setting-b"))["context"]
+        read = "role.growth.read"
+        self.assertEqual((self.allowed(first, read), self.allowed(second, read)), (False, False))
+        for value, expected in ((True, (False, True)), (False, (False, False))):
+            self.growth(second, read_enabled=value)
+            for attempt in range(2):  # at once, and after each endpoint has been activated again
+                self.assertEqual((self.allowed(first, read), self.allowed(second, read)), expected)
+                first = (await self.turn(0, "Later", "later-setting-a-%s-%d" % (value, attempt)))["context"]
+                second = (await self.turn(1, "Later", "later-setting-b-%s-%d" % (value, attempt)))["context"]
+        self.growth(first, read_enabled=True)
+        self.growth(second, read_enabled=True)
+        self.growth(first, read_enabled=False)
+        for attempt in range(2):
+            self.assertEqual((self.allowed(first, read), self.allowed(second, read)), (False, True))
+            first = (await self.turn(0, "Later still", "later-setting-a-off-%d" % attempt))["context"]
+            second = (await self.turn(1, "Later still", "later-setting-b-off-%d" % attempt))["context"]
+
     async def test_a_joined_endpoint_keeps_owner_features_on_its_own_window_only(self):
         from companion_v2.identity_policy.object_access import ObjectAccessPolicy
         policy = ObjectAccessPolicy(self.app.runtime)
