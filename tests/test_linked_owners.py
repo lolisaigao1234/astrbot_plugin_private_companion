@@ -135,6 +135,16 @@ class LinkedOwnerTests(LinkedReplyFixture, unittest.IsolatedAsyncioTestCase):
         settings = self.app.configuration.read(second.actor, target=self.window(unrelated), group_id=GROUP,
                                                observed_at=at)
         self.assertEqual(settings.failure and settings.failure.code, "scope_not_granted")
+        # The grant check itself holds the same line, for readers that ask it directly.
+        directory = self.controller.authority.identities
+        direct = directory.authorize(second.actor, scope=unrelated.scope, capability="memory.read", observed_at=at)
+        self.assertEqual(direct.failure and direct.failure.code, "scope_not_granted")
+        self.revoke(second, "memory.read")
+        for scope in (first.scope, second.scope):
+            own = directory.authorize(second.actor, scope=scope, capability="memory.read", observed_at=at)
+            self.assertEqual(own.failure and own.failure.code, "authorization_revoked")
+        self.assertTrue(directory.authorize(first.actor, scope=second.scope, capability="memory.read",
+                                            observed_at=at).is_success)
 
     async def test_a_refusal_made_before_linking_still_binds_the_endpoint(self):
         second = (await self.turn(1, "An independent endpoint", "refusal-before"))["context"]
@@ -181,6 +191,16 @@ class LinkedOwnerTests(LinkedReplyFixture, unittest.IsolatedAsyncioTestCase):
         self.allow_model.set()
         await asyncio.wait_for(task, 20)
         await session.linked_conversations.gate.drain()
+
+    async def test_a_malformed_link_record_closes_its_member_and_leaves_an_unlinked_chat_working(self):
+        from astrbot_host.linked_conversations import KEY
+        self.assertEqual((await self.link(members=["first"]))["status"], "ok")
+        self.assertTrue(await self.attempt(0, "The linked member", "malformed-before-a"))
+        self.assertTrue(await self.attempt(1, "A chat in no link", "malformed-before-b"))
+        with self.app.runtime.transaction() as connection:
+            connection.execute("UPDATE runtime_metadata SET value = ? WHERE key = ?", ("{not json", KEY))
+        self.assertTrue(await self.attempt(1, "Still a chat in no link", "malformed-unlinked"))
+        self.assertFalse(await self.attempt(0, "The member stays closed", "malformed-member"))
 
     async def test_companion_body_and_maintenance_owner_already_agree(self):
         from astrbot_host.management_identity import dashboard_operator
