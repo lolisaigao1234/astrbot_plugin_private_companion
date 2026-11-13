@@ -11,6 +11,8 @@ from tests.linked_reply_support import LinkedReplyFixture
 
 
 class LinkedOwnerTests(LinkedReplyFixture, unittest.IsolatedAsyncioTestCase):
+    second_channel = "qq-second"  # the channel instance of the joining endpoint
+
     async def turn(self, index, text, identifier):
         event = self.event_for(index, text, identifier)
         await asyncio.wait_for(await self.dispatch(event), 20)
@@ -47,7 +49,7 @@ class LinkedOwnerTests(LinkedReplyFixture, unittest.IsolatedAsyncioTestCase):
         back = await self.turn(0, "What did I ask?", "back")
         other_source = second["native_source_future"].result()
         self.assertEqual(self.app.memory.writer.access.capture(back["context"], other_source).source.scope.platform,
-                         "qq-second")
+                         self.second_channel)
 
     async def test_link_does_not_inherit_core_tier_or_bypass_endpoint_action_revocation(self):
         from companion_v2.identity_policy.models import AuthorizationTier
@@ -96,7 +98,7 @@ class LinkedOwnerTests(LinkedReplyFixture, unittest.IsolatedAsyncioTestCase):
         updated = self.app.role_state.read(first["context"], operator=operator)
         self.assertEqual(updated["values"]["energy"], 61)
         self.assertEqual(require(operations.get(saved["operation_id"])).operation.scope.platform,
-                         "qq-second")
+                         self.second_channel)
 
     def grant(self, context, action):
         from companion_v2.identity_policy.models import AuthorizationTier
@@ -137,7 +139,7 @@ class LinkedOwnerTests(LinkedReplyFixture, unittest.IsolatedAsyncioTestCase):
         second_target = target_for(second["context"])
         field = "conversation.presentation.private_debounce_enabled"
         self.assertFalse(owner.read(second_target, fields).fields[field].value)
-        self.assertEqual(second_target.authorization_scope.platform, "qq-second")
+        self.assertEqual(second_target.authorization_scope.platform, self.second_channel)
         owner.write(second_target, fields, changes={field: True}, reset=(),
             expected_revision=owner.read(second_target, fields).revision, observed_at=self.clock.now())
         self.assertTrue(owner.read(first_target, fields).fields[field].value)
@@ -216,7 +218,7 @@ class LinkedOwnerTests(LinkedReplyFixture, unittest.IsolatedAsyncioTestCase):
         second_rows = observations_for_role(self.app.runtime, second["context"])
         self.assertEqual({r["turn_id"] for r in first_rows}, {first["turn_id"], second["turn_id"]})
         self.assertEqual(first_rows, second_rows)
-        self.assertEqual({r["source_channel"] for r in second_rows}, {"qq-main", "qq-second"})
+        self.assertEqual({r["source_channel"] for r in second_rows}, {"qq-main", self.second_channel})
         duplicate = self.event_for(1, "Count this new turn", "usage-after")
         await (await self.dispatch(duplicate))
         await self.controller.session.linked_conversations.gate.drain()
@@ -234,7 +236,7 @@ class LinkedOwnerTests(LinkedReplyFixture, unittest.IsolatedAsyncioTestCase):
         rows = [record.getMessage() for record in captured.records if "companion_native_input" in record.getMessage()]
         self.assertEqual(len(rows), 2)
         self.assertTrue(any("source_channel=qq-main" in row for row in rows))
-        self.assertTrue(any("source_channel=qq-second" in row for row in rows))
+        self.assertTrue(any("source_channel=" + self.second_channel in row for row in rows))
 
     async def test_owners_survive_restart_and_original_endpoint_detachment(self):
         from datetime import timedelta
@@ -270,7 +272,7 @@ class LinkedOwnerTests(LinkedReplyFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(archive.draft.body, "Persistent diary")
         self.assertEqual(archive.draft.context.scope.platform, "qq-main")
         self.assertEqual({row["source_channel"] for row in observations_for_role(self.app.runtime, detached["context"])},
-                         {"qq-main", "qq-second"})
+                         {"qq-main", self.second_channel})
 
     async def test_unlinked_context_encoding_is_unchanged_and_owner_scopes_cannot_be_forged(self):
         from dataclasses import replace
@@ -318,7 +320,7 @@ class LinkedOwnerTests(LinkedReplyFixture, unittest.IsolatedAsyncioTestCase):
         cards.record_platform_names(second, nickname="Second channel name")
         view = cards.recall(first)
         self.assertEqual(view["display_name"], "Second channel name")
-        self.assertEqual(view["recent_renames"][0]["source_channel"], "qq-second")
+        self.assertEqual(view["recent_renames"][0]["source_channel"], self.second_channel)
 
 
 class LinkedDistinctPrincipalTests(LinkedOwnerTests):
