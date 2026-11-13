@@ -60,6 +60,12 @@ class LinkedConversations:
     def get(self, link_id):
         return self.records().get(link_id)
 
+    def view(self):
+        """The stored links, each saying whether its reminders and proactive text have a destination now."""
+        return {link_id: {**link, "background_destination": "selected" if any(
+                    row["target_id"] == preferred_target_id(link) for row in link["members"]) else "missing"}
+                for link_id, link in self.records().items()}
+
     def for_origin(self, umo):
         if umo not in self.gate.linked_origins:
             return None

@@ -68,6 +68,45 @@ class PreferredChannelFixture(LinkedTelegramFixture):
                 self.assertEqual(self.app.state, "running", self.app.failure_code)
                 await asyncio.sleep(0.02)
 
+    async def restart(self):
+        await self.controller.terminate()
+        self.controller = self.make_controller()
+        self.plugin.staging = self.controller
+        result = await self.controller.start()
+        self.assertTrue(result.is_success, result.failure)
+        self.app = self.controller.session.application
+
+    async def idle(self):
+        """Give the host's background loop several passes over whatever is due."""
+        for _ in range(5):
+            self.app.notify()
+            await asyncio.sleep(0.05)
+        self.assertEqual(self.app.state, "running", self.app.failure_code)
+
+    def qq_texts(self):
+        """Private messages the QQ account was asked to send, with their recipient."""
+        return [(str(params["user_id"]), "".join(part["data"]["text"] for part in params["message"]
+                                                 if part["type"] == "text"))
+                for action, params in self.qq_calls() if action == "send_private_msg"]
+
+    def receipts(self, report):
+        """The sender's recorded outcomes for one delivery, from the shared delivery ledger."""
+        rows = self.app.runtime.read_all("SELECT receipt_json FROM background_delivery_receipts WHERE delivery_id = ?",
+                                         (report["delivery_id"],))
+        return [(receipt["status"], receipt["failure_code"]) for receipt in map(json.loads, (row[0] for row in rows))]
+
+    async def link_view(self):
+        """The conversation link as the signed-in Dashboard administrator reads it."""
+        from types import SimpleNamespace as NS
+        from unittest.mock import patch
+        from astrbot_host.account_session_api import AccountSessionWebAPI
+        administrator = NS(username="owner", query={})
+        with patch("astrbot_host.account_session_api.request", administrator), \
+                patch("astrbot_host.setup_api.request", administrator):
+            response = await AccountSessionWebAPI(self.controller).get()
+        self.assertEqual(response["status"], "ok", response)
+        return response["data"]["conversation_links"]["owner-dialogue"]
+
     def telegram_texts(self):
         return [(str(sent["chat_id"]), sent["text"]) for platform, sent in self.sent if platform == "tg-main"]
 
@@ -86,21 +125,6 @@ class PreferredReminderTests(PreferredChannelFixture, unittest.IsolatedAsyncioTe
         self.assertEqual(self.telegram_texts(), [(str(TELEGRAM_OWNER), "drink water")])
         self.assertEqual(self.qq_calls(), [])
 
-    async def restart(self):
-        await self.controller.terminate()
-        self.controller = self.make_controller()
-        self.plugin.staging = self.controller
-        result = await self.controller.start()
-        self.assertTrue(result.is_success, result.failure)
-        self.app = self.controller.session.application
-
-    async def idle(self):
-        """Give the host's background loop several passes over whatever is due."""
-        for _ in range(5):
-            self.app.notify()
-            await asyncio.sleep(0.05)
-        self.assertEqual(self.app.state, "running", self.app.failure_code)
-
     async def test_a_delivered_reminder_is_not_sent_again_after_a_restart_or_through_the_other_endpoint(self):
         self.assertEqual((await self.link())["status"], "ok")
         context, occurrence = await self.remind(0, "stretch", identifier="linked")
@@ -111,12 +135,6 @@ class PreferredReminderTests(PreferredChannelFixture, unittest.IsolatedAsyncioTe
         self.assertEqual(self.status(context, occurrence)["delivery"], "delivered")
         self.assertEqual(self.telegram_texts(), [(str(TELEGRAM_OWNER), "stretch")])
         self.assertEqual(self.qq_calls(), [])
-
-    def qq_texts(self):
-        """Private messages the QQ account was asked to send, with their recipient."""
-        return [(str(params["user_id"]), "".join(part["data"]["text"] for part in params["message"]
-                                                 if part["type"] == "text"))
-                for action, params in self.qq_calls() if action == "send_private_msg"]
 
     async def test_telegram_is_preferred_at_first_and_an_administrator_can_select_qq(self):
         created = await self.link()
@@ -130,3 +148,157 @@ class PreferredReminderTests(PreferredChannelFixture, unittest.IsolatedAsyncioTe
         self.assertEqual((await self.settled(context, occurrence))["delivery"], "delivered")
         self.assertEqual(self.qq_texts(), [("200", "call home")])
         self.assertEqual(self.telegram_texts(), [])
+
+    async def test_unlinking_the_preferred_endpoint_leaves_reminders_unsent_until_a_member_is_chosen(self):
+        self.assertEqual((await self.link())["status"], "ok")
+        context, occurrence = await self.remind(0, "water the plants", identifier="before-unlink")
+        refused = await self.link(revision=1, members=["first"], preferred_target_id="second")
+        self.assertEqual(refused["status"], "error")
+        left = await self.link(revision=1, members=["first"])
+        self.assertEqual((left["status"], left["data"]["preferred_target_id"]), ("ok", "second"))
+        self.assertEqual((await self.link_view())["background_destination"], "missing")
+        self.sent.clear()
+        self.qq_calls().clear()
+        report = await self.settled(context, occurrence)
+        self.assertEqual((report["delivery"], report["reason"]), ("cancelled", "delivery_destination_missing"))
+        await self.restart()
+        await self.idle()
+        report = self.status(context, occurrence)
+        self.assertEqual((report["delivery"], report["reason"]), ("cancelled", "delivery_destination_missing"))
+        self.assertEqual((await self.link_view())["background_destination"], "missing")
+        self.assertEqual((self.telegram_texts(), self.qq_texts()), ([], []))
+        # The reminder itself is still the conversation's, and a later one goes to the chosen member.
+        target = AgendaTarget(context.scope, context.role_binding.role, context.actor.subject)
+        kept = require(self.app.agenda.list_reminders(context.actor, target=target, observed_at=self.clock.now()))
+        self.assertEqual([reminder.message for reminder in kept], ["water the plants"])
+        self.assertEqual((await self.link(revision=2, members=["first"], preferred_target_id="first"))["status"], "ok")
+        self.assertEqual((await self.link_view())["background_destination"], "selected")
+        later, following = await self.remind(0, "feed the cat", identifier="after-choice")
+        self.assertEqual((await self.settled(later, following))["delivery"], "delivered")
+        self.assertEqual(self.qq_texts(), [("200", "feed the cat")])
+        self.assertEqual(self.telegram_texts(), [])
+
+
+class PreferredOutcomeTests(PreferredChannelFixture, unittest.IsolatedAsyncioTestCase):
+    """What became of a text is recorded as it happened; the other endpoint is never used instead."""
+
+    def revoke(self, context, capability):
+        directory = self.controller.authority.identities
+        for grant in directory.grants_for_subject(context.actor.subject):
+            if grant.scope == context.scope and grant.capability == capability:
+                directory.revoke_grant(grant.grant_id, revoked_at=self.clock.now(),
+                                       expected_revision=directory.revision)
+
+    async def linked_reminder(self, index, message):
+        """Both endpoints have spoken on the linked conversation; one of them asks for a reminder."""
+        self.assertEqual((await self.link())["status"], "ok")
+        contexts = [(await self.turn(member, "hello", f"hello-{member}"))["context"] for member in (0, 1)]
+        context, occurrence = await self.remind(index, message, identifier="asks")
+        self.sent.clear()
+        self.qq_calls().clear()
+        return contexts, context, occurrence
+
+    async def test_a_destination_without_the_permission_gets_nothing_and_qq_is_not_tried(self):
+        (_, telegram), context, occurrence = await self.linked_reminder(0, "take a break")
+        self.revoke(telegram, "reminder.deliver")
+        report = await self.settled(context, occurrence)
+        self.assertEqual((report["delivery"], report["reason"]), ("cancelled", "authorization_revoked"))
+        await self.idle()
+        self.assertEqual((self.telegram_texts(), self.qq_texts()), ([], []))
+
+    async def test_the_endpoint_a_reminder_was_recorded_on_still_needs_its_own_permission(self):
+        (qq, _), context, occurrence = await self.linked_reminder(0, "take a break")
+        self.revoke(qq, "reminder.deliver")
+        report = await self.settled(context, occurrence)
+        self.assertNotEqual(report["delivery"], "delivered")
+        await self.idle()
+        self.assertEqual((self.telegram_texts(), self.qq_texts()), ([], []))
+
+    async def test_an_unavailable_telegram_account_gets_nothing_and_qq_is_not_tried(self):
+        _, context, occurrence = await self.linked_reminder(0, "take a break")
+        self.telegram.application.running = False
+        report = await self.settled(context, occurrence)
+        self.assertEqual((report["delivery"], report["reason"]), ("cancelled", "host_account_changed"))
+        self.telegram.application.running = True
+        await self.idle()
+        self.assertEqual((self.telegram_texts(), self.qq_texts()), ([], []))
+
+    async def test_an_unavailable_qq_account_gets_nothing_and_telegram_is_not_tried(self):
+        _, context, occurrence = await self.linked_reminder(1, "take a break")
+        self.assertEqual((await self.link(revision=1, preferred_target_id="first"))["status"], "ok")
+        clients = self.native.platforms["qq-main"].client._wsr_api_clients
+        connected = dict(clients)
+        clients.clear()
+        report = await self.settled(context, occurrence)
+        self.assertEqual((report["delivery"], report["reason"]), ("cancelled", "host_account_changed"))
+        clients.update(connected)
+        await self.idle()
+        self.assertEqual((self.telegram_texts(), self.qq_texts()), ([], []))
+
+    async def test_a_telegram_send_that_raises_is_unknown_and_is_never_sent_again_on_either_endpoint(self):
+        from telegram.error import TimedOut
+        _, context, occurrence = await self.linked_reminder(0, "take a break")
+        attempts = []
+
+        async def send_message(**kwargs):
+            attempts.append(kwargs["text"])
+            raise TimedOut()
+        self.telegram.client.send_message = send_message
+        report = await self.settled(context, occurrence)
+        self.assertEqual(report["delivery"], "unknown")
+        await self.idle()
+        await self.restart()
+        await self.idle()
+        self.assertEqual(self.status(context, occurrence)["delivery"], "unknown")
+        self.assertEqual((attempts, self.qq_texts()), (["take a break"], []))
+
+
+class PreferredRouteFenceTests(PreferredChannelFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_a_send_in_flight_keeps_its_route_and_a_new_preference_takes_only_later_work(self):
+        self.assertEqual((await self.link())["status"], "ok")
+        context, first = await self.remind(0, "first reminder", identifier="first")
+        _, second = await self.remind(0, "second reminder", identifier="second", minutes=30)
+        self.sent.clear()
+        self.qq_calls().clear()
+        sending, release = asyncio.Event(), asyncio.Event()
+        record = self.telegram.client.send_message
+
+        async def held(**kwargs):
+            sending.set()
+            await release.wait()
+            return await record(**kwargs)
+        self.telegram.client.send_message = held
+        settling = asyncio.create_task(self.settled(context, first))
+        await asyncio.wait_for(sending.wait(), 30)
+        self.assertEqual((await self.link(revision=1, preferred_target_id="first"))["status"], "ok")
+        release.set()
+        report = await settling
+        self.assertEqual(report["delivery"], "delivered")
+        route = self.app.outbound.route(report["delivery_id"])
+        self.assertEqual((route["scope"]["platform"], route["link_id"], route["link_revision"]),
+                         ("tg-main", "owner-dialogue", 1))
+        self.assertEqual((await self.settled(context, second, minutes=20))["delivery"], "delivered")
+        await self.idle()
+        self.assertEqual(self.telegram_texts(), [(str(TELEGRAM_OWNER), "first reminder")])
+        self.assertEqual(self.qq_texts(), [("200", "second reminder")])
+
+    async def test_a_link_changed_after_the_route_was_resolved_stops_the_send_and_nothing_is_replayed(self):
+        self.assertEqual((await self.link())["status"], "ok")
+        context, occurrence = await self.remind(0, "fenced reminder", identifier="fenced")
+        self.sent.clear()
+        self.qq_calls().clear()
+        selected, changed = self.manager.get_curr_conversation_id, []
+
+        async def changing(umo):
+            # The sender's own pre-send role check reads the selection: the link is edited while it runs.
+            if not changed and self.status(context, occurrence)["delivery"] == "dispatched":
+                changed.append(True)
+                changed.append(await self.link(revision=1, preferred_target_id="first"))
+            return await selected(umo)
+        self.manager.get_curr_conversation_id = changing
+        report = await self.settled(context, occurrence)
+        self.assertEqual(changed[1]["status"], "ok", changed)
+        self.assertEqual(report["delivery"], "failed")
+        self.assertEqual(self.receipts(report), [("not_sent", "delivery_route_changed")])
+        await self.idle()
+        self.assertEqual((self.telegram_texts(), self.qq_texts()), ([], []))
