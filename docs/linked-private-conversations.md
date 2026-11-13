@@ -2,7 +2,7 @@
 
 Explicit links share native model history and the companion owners described below.
 AstrBot, its event origins, provider/tool runner, history format and transports are unchanged.
-Ticket #11 is partially implemented; scheduling and agenda boundaries remain below.
+Notes, reminders and the proactive schedule are not shared yet; see the boundaries below.
 
 ## Management
 
@@ -57,26 +57,57 @@ copies the joining endpoint's old records nor rewrites either endpoint's history
 
 - Long-term facts, relationship memory, the role body and its maintenance key use their
   existing bot/role/human owners. Person cards use the anchor's storage scope.
-- Window settings use the anchor for storage and the requesting endpoint for authorization
-  and operation receipts. Role and relationship settings retain their existing owners.
-- Timeline and journal readers include the linked physical scopes. Original activity,
-  evidence, journal and operation records keep their source scope.
-- The native per-role usage view includes the linked accounts without changing stored
-  usage keys. Each native turn appears once and includes `source_channel`. The AstrBot
-  plugin logger records one `companion_native_input` line per admitted input with its
-  turn ID and physical source channel.
+- Window settings are stored once, at the anchor. The address is resolved where configuration
+  rows are keyed (the sparse settings owner and the configuration service), not by each
+  feature: a target always carries the physical window, so authorization, the grants a
+  settings write issues or revokes, and operation receipts stay with the endpoint that acted.
+  Role and relationship settings retain their existing owners.
+- Timeline, journal and life-context readers include the linked physical scopes, also for an
+  entry that carries its original input. Original activity, evidence, journal and operation
+  records keep their source scope.
+- The reply background of every linked endpoint includes the adopted relationship records of
+  the conversation, whichever endpoint they were recorded on.
+- The life routines (daily diary, sleep) have one owner per linked conversation: the first
+  endpoint that binds, and after a restart the first one that is available. The routine runs
+  under that endpoint's own context, grant and provenance; the other endpoints adopt it.
+- The native per-role usage view covers the conversation's own linked scopes without changing
+  stored usage keys, so another participant of the same account is not counted. Each native
+  turn appears once and includes `source_channel`. The AstrBot plugin logger records one
+  `companion_native_input` line per admitted input with its turn ID and physical source channel.
 
-The task's authentication, audience, transport and source references remain physical.
-Additional endpoints use a separate private principal binding; the native binding used
-by unrelated conversations and groups is preserved. A linked principal cannot inherit
-subject-level core/maintenance access, and shared-source reads still require that
-endpoint's own action grant. Dashboard administration remains a separate authentication
-path. Without an explicit link, owner resolution leaves existing addresses unchanged.
+## Permissions of a linked endpoint
 
-This does **not** yet unify notes, reminders, non-role calendar records, proactive/life
-schedules or window budget accounts. Their owners are coupled to physical delivery or
-exact-scope accounting and need further work. Only role-state maintenance already has a
-shared schedule key. Exact-window diagnostic/legacy usage views also remain physical.
+Identity and stored owners are shared across a link. Authority is not.
+
+- The task's authentication, audience, transport and source references remain physical.
+  Additional endpoints use a separate private principal binding; the native binding used by
+  unrelated conversations and groups is preserved.
+- An endpoint that joined a conversation never has more than the standard tier, whatever tier
+  the shared human subject holds. Every tier check uses the one helper that knows this
+  (`access_tier`), including interventions, core-only tools and commands, relay, screen and
+  device control. Dashboard administration remains a separate authentication path.
+- Every permission decision uses the endpoint's own grants and revocations. When a shared
+  record names another member's scope, the reader is still judged on its own scope. A joined
+  endpoint reaches only the scopes of its current link; any other scope is refused before a
+  grant is looked at, including other conversations of the same human.
+- The features a private window's owner has without a grant (relationship and calendar
+  reading, notes, self-review, expression reading) apply on each endpoint's own window.
+- What an endpoint had been refused in its own conversation stays refused when it joins: the
+  refusals are recorded on its linked scope before any default grant is issued. Grants it held
+  are not copied; the linked scope starts from the same defaults as any new conversation.
+- The pre-send check re-reads the joined endpoint's own dialogue permission, so a revocation
+  made during a turn stops that turn's reply.
+
+The link record is decoded once per stored value. An endpoint in no link is never affected by
+an unreadable or malformed record; an endpoint known to be a member stays closed until the
+record can be read again. Without an explicit link, owner resolution leaves existing addresses
+and stored record forms unchanged.
+
+This does **not** yet unify notes, reminders, non-role calendar records, the proactive and
+reminder schedule, proactive contact preferences' legacy fallbacks, or window budget accounts.
+Their owners are coupled to physical delivery or exact-scope accounting and belong to #5 and
+#6. Exact-window diagnostic/legacy usage views also remain physical. A detached anchor
+endpoint keeps the owner it natively holds; revoking that belongs to #7.
 The plugin's existing Dashboard log-buffer behavior is unchanged; the tagged input log
 is available through AstrBot's plugin logging. Independent-channel startup permits the
 remaining endpoint to restart while the original platform is absent; the memory and
@@ -172,12 +203,10 @@ chats and chats that are not companion targets keep AstrBot's own replies.
   by physical origin and message ID, and survives plugin import reload. Durable redelivery
   across a process restart remains deferred per the owner's priorities.
 - Send exceptions retain existing unknown-outcome accounting. There is no automatic replay.
-- On a joining endpoint, QQ or Telegram, the reply background omits the relationship and
-  open-item sections: both still require the endpoint's own grant and records from that exact
-  private route. The stored relationship memory is shared; reading it into a joined endpoint's
-  reply is part of the remaining shared owners (#11).
-- Completing the remaining shared owners (#11), further Telegram text tools (#5), coherent controls
-  (#7), cross-endpoint stop, preferred background delivery (#6) and operational recovery remain work.
+- On a joining endpoint the open-item section is available but lists that endpoint's own
+  notes: notes and reminders are not shared yet (#5, #6).
+- Further Telegram text tools (#5), coherent controls (#7), cross-endpoint stop, preferred
+  background delivery (#6) and operational recovery remain work.
 
 ## Offline proof
 
