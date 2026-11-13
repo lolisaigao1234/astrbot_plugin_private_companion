@@ -114,7 +114,7 @@ class AccountSessionWebAPI:
         return {"mode": "multi", "enabled": enabled,
                 "accounts": list(accounts.values()), "personas": personas, "sessions": targets, "groups": groups,
                 "window_links": deepcopy(section.get("window_links", [])),
-                "conversation_links": (controller.session.linked_conversations.records()
+                "conversation_links": (controller.session.linked_conversations.view()
                                        if controller.session is not None else {}),
                 "model": self._model_view()}
 

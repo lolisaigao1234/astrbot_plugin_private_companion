@@ -41,9 +41,8 @@ class AgendaBackground:
         self.runtime, self.policy = agenda.runtime, policy
         self.calendar = calendar
 
-    @staticmethod
-    def _context(reminder):
-        target = reminder.target
+    def _context(self, reminder):
+        target = self.agenda.requester_target(reminder)
         if target.scope.kind is not ScopeKind.PRIVATE or not target.scope.is_resolved or reminder.requester.subject != target.owner:
             raise TaskError("reminder_private_route_required", "reminder needs its original recipient's complete private route")
         return TaskContext(reminder.requester, RoleBinding(target.scope, target.role, reminder.role_binding_revision),

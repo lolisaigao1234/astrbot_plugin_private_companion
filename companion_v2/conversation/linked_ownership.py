@@ -28,15 +28,34 @@ class _Link(dict):
         self.scopes = tuple(dict.fromkeys((self.anchor, *(self.scope_at(member["platform_id"],
             member["account_id"], member["participant_id"])
             for member in record["members"] + record.get("detached", [])))))
+        wanted = preferred_target_id(record)
+        self.preferred = next((endpoint for member, endpoint in zip(record["members"], self.endpoints)
+                               if wanted is not None and member.get("target_id") == wanted), None)
 
     def scope_at(self, platform, account, participant):
         return replace(self.anchor, platform=platform, account_id=account,
                        native_scope_id=participant, session_id=participant)
 
 
+def preferred_target_id(record):
+    """The member that receives the conversation's reminders and proactive text.
+
+    Chosen by the administrator. A link that has never named one starts with its
+    Telegram member, else the endpoint it was created on, else its first member.
+    A named target that left the link stays named: the conversation then has no
+    destination until a member is chosen.
+    """
+    if "preferred_target_id" in record:
+        return record["preferred_target_id"]
+    members = record["members"]
+    initial = ([row for row in members if row.get("platform_name") == "telegram"]
+               or [row for row in members if row.get("target_id") == record["anchor"].get("target_id")] or members)
+    return initial[0].get("target_id") if initial else None
+
+
 class _Index:
     def __init__(self):
-        self.raw, self.rejected, self.members, self.removed, self.current = None, None, {}, set(), False
+        self.raw, self.rejected, self.members, self.scopes, self.removed, self.current = None, None, {}, {}, set(), False
 
     def load(self, runtime):
         row = runtime.read_one("SELECT value FROM runtime_metadata WHERE key = ?", (LINKS_KEY,))
@@ -45,13 +64,14 @@ class _Index:
             if raw == self.rejected:
                 raise ValueError("the stored conversation links are malformed")
             self.rejected = raw
-            members, removed = {}, set()
+            members, scopes, removed = {}, {}, set()
             for record in (json.loads(raw) if raw else {}).values():
                 link = _Link(record)
                 members.update(dict.fromkeys(link.endpoints, link))
+                scopes.update(dict.fromkeys(link.scopes, link))
                 removed.update((row["platform_id"], row["account_id"], row["participant_id"])
                                for row in record.get("detached", []))
-            self.raw, self.members, self.removed = raw, members, removed - set(members)
+            self.raw, self.members, self.scopes, self.removed = raw, members, scopes, removed - set(members)
         self.current = True
 
 
@@ -73,13 +93,7 @@ def link_records_changed(runtime):
     _INDEXES.setdefault(_records_runtime(runtime), _Index()).current = False
 
 
-def link_for_endpoint(runtime, platform, account, participant):
-    """The link this physical endpoint is a member of.
-
-    The record is read after the host announced it or wrote it; in between a
-    lookup costs no query. An endpoint in no link never depends on the record
-    being readable; a known member stays closed while it is not.
-    """
+def _lookup(runtime, table, key):
     runtime = _records_runtime(runtime)
     index = _INDEXES.get(runtime)
     if index is None:
@@ -89,11 +103,30 @@ def link_for_endpoint(runtime, platform, account, participant):
             index.load(runtime)
         except Exception:  # noqa: BLE001 - any unreadable record keeps only its last known members closed
             pass
-    link = index.members.get((platform, account, participant))
+    link = getattr(index, table).get(key)
     if link is not None and not index.current:
         from companion_v2.execution.models import TaskError
         raise TaskError("conversation_link_unavailable", "the linked conversation's ownership cannot be established")
     return link
+
+
+def link_for_endpoint(runtime, platform, account, participant):
+    """The link this physical endpoint is a member of.
+
+    The record is read after the host announced it or wrote it; in between a
+    lookup costs no query. An endpoint in no link never depends on the record
+    being readable; a known member stays closed while it is not.
+    """
+    return _lookup(runtime, "members", (platform, account, participant))
+
+
+def conversation_link(runtime, scope):
+    """The link whose conversation this scope belongs to, also once its endpoint has left.
+
+    Work recorded on any scope of a linked conversation is the conversation's
+    work: where it is delivered is the link's decision, never the stored scope's.
+    """
+    return _lookup(runtime, "scopes", scope) if scope.kind is ScopeKind.PRIVATE else None
 
 
 def endpoint_removed(runtime, platform, account, participant):

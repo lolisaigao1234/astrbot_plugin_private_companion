@@ -11,7 +11,7 @@ from astrbot.core.utils.active_event_registry import active_event_registry
 from astrbot.core.utils.session_lock import session_lock_manager
 
 from companion_v2.adapters.astrbot.native import NativeServedConversation
-from companion_v2.conversation.linked_ownership import link_records_changed
+from companion_v2.conversation.linked_ownership import link_records_changed, preferred_target_id
 from companion_v2.execution.models import TaskError, digest
 from companion_v2.foundation.refs import ScopeKind, ScopeRef, SubjectRef, SubjectKind
 from .linked_turn_gate import LinkedTurnGate
@@ -63,6 +63,12 @@ class LinkedConversations:
     def get(self, link_id):
         return self.records().get(link_id)
 
+    def view(self):
+        """The stored links, each saying whether its reminders and proactive text have a destination now."""
+        return {link_id: {**link, "background_destination": "selected" if any(
+                    row["target_id"] == preferred_target_id(link) for row in link["members"]) else "missing"}
+                for link_id, link in self.records().items()}
+
     def for_origin(self, umo):
         if umo not in self.gate.linked_origins:
             return None
@@ -91,6 +97,28 @@ class LinkedConversations:
         return NativeServedConversation(anchor["target_id"], anchor["origin"],
             ScopeRef.restore(anchor["scope"]), SubjectRef(anchor["role"]["installation_id"], SubjectKind(anchor["role"]["kind"]),
                        anchor["role"]["subject_id"]))
+
+    def destination(self, link, endpoint):
+        """A member's own current context, for the conversation's reminders and proactive text.
+
+        The member is addressed as itself: its configured target, its registered
+        and connected account, its identity and its role binding on the linked
+        scope, which it gets here if it has not spoken since it joined.
+        """
+        session = self.session
+        target = session.settings.private_target(*endpoint)
+        if target is None:
+            raise TaskError("delivery_destination_missing", "the preferred endpoint is no longer configured")
+        scope = link.scope_at(*endpoint)
+        session.bridge.client(scope)
+        try:
+            context = session.authority.context(target.target_id, link.role_id)
+        except TaskError:
+            context = None
+        if context is None or context.scope != scope:
+            context = session.authority.select(target, scope,
+                SubjectRef(scope.installation_id, SubjectKind.BOT, link.role_id))
+        return context
 
     async def settings(self, umo, platform_name, cid):
         context = self.session.bridge.context
@@ -123,9 +151,11 @@ class LinkedConversations:
     async def manage(self, body):
         required = {"schema_version", "link_id", "expected_revision", "conversation_id",
                     "source_target_id", "member_target_ids"}
-        # Optional: removed endpoints the administrator admits to independent use.
+        # Optional: removed endpoints the administrator admits to independent use, and
+        # the member that receives the conversation's reminders and proactive text.
         admitted = body.get("independent_target_ids", [])
-        if (set(body) - {"independent_target_ids"} != required or type(admitted) is not list
+        preferred = body.get("preferred_target_id")
+        if (set(body) - {"independent_target_ids", "preferred_target_id"} != required or type(admitted) is not list
                 or any(type(value) is not str for value in admitted)
                 or type(body["schema_version"]) is not int or body["schema_version"] != 1
                 or type(body["expected_revision"]) is not int or body["expected_revision"] < 0
@@ -134,7 +164,8 @@ class LinkedConversations:
                 or type(body["member_target_ids"]) is not list or not body["member_target_ids"]
                 or len(body["member_target_ids"]) > 32
                 or any(type(value) is not str for value in body["member_target_ids"])
-                or len(set(body["member_target_ids"])) != len(body["member_target_ids"])):
+                or len(set(body["member_target_ids"])) != len(body["member_target_ids"])
+                or ("preferred_target_id" in body and preferred not in body["member_target_ids"])):
             raise TaskError("conversation_link_invalid", "supply a versioned conversation link and exact private members")
         if self.retiring:
             raise TaskError("linked_busy", "the companion is stopping")
@@ -223,6 +254,9 @@ class LinkedConversations:
                 record = {"schema_version": 1, "link_id": body["link_id"],
                     "revision": body["expected_revision"] + 1, "conversation_id": cid,
                     "anchor": anchor, "members": members, "detached": list(detached.values())}
+                # An unnamed preference stays what it was, also when that member has
+                # just left: the conversation then has no destination until one is chosen.
+                record["preferred_target_id"] = preferred or preferred_target_id(old or record)
                 # Persist before selection: an interrupted operation remains closed,
                 # rather than allowing an endpoint to continue in a silent fork.
                 with session.runtime.transaction():

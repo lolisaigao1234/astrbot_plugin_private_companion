@@ -334,8 +334,9 @@ class CompanionApplication:
         self.agenda = AgendaService(runtime)
         self.outbound = OutboundDelivery(runtime, sender, (
             DeliveryOwner(AGENDA_OWNER, "reminder.deliver", lambda request, at: self.agenda_background.delivery_text(request, at),
-                lambda request, at: self.agenda_background.history_text(request, at)),
-            DeliveryOwner(CONTACT_GROUP, CONTACT_GROUP, self.proactive.delivery_text, self.proactive.history_text),
+                lambda request, at: self.agenda_background.history_text(request, at), preferred_route=True),
+            DeliveryOwner(CONTACT_GROUP, CONTACT_GROUP, self.proactive.delivery_text, self.proactive.history_text,
+                          preferred_route=True),
             DeliveryOwner(FALLBACK_OWNER, "conversation.reply", lambda request, at: self.image_fallback.read(request, at)),
         ), concurrency=limits.background_slots)
         self.outbound.on_delivered = self._mark_contact_sent

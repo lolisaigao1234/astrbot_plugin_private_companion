@@ -643,6 +643,7 @@ class MultiHostSession:
             wake_port=self._wake_snapshot,
             presence_port=MultiPresence(self))
         self.application = self.host.application
+        self.application.outbound.destination = self.linked_conversations.destination
         if hasattr(self.application, "contact_schedule"):
             self.application.contact_schedule.bind_health_source(self.huawei_health)
         self.application.image_fallback.attach_port(ReviewFallbackRoutes(self))
@@ -1671,12 +1672,20 @@ class MultiHostSession:
             sender_type = OneBotGroupSender if group else OneBotPrivateSender
         else:
             sender_type = AstrBotPlatformSender
+        # A linked Telegram endpoint receives the text and nothing else: no QQ poke,
+        # no voice and no image accompany or follow it.
+        from companion_v2.conversation.linked_ownership import link_for_scope
+        text_only = platform_name == "telegram" and link_for_scope(self.runtime, envelope.context.scope) is not None
         sender = sender_type(self.bridge, binding=self.sender_binding, version=self.types.version,
             reverse_api_type=self.types.reverse_api,
             authorize=lambda: self.authorize_group(envelope) if group else self.authorize(envelope.context), now=self.now,
-            voice=self.voice, voice_delivery=self.voice_delivery,
+            voice=None if text_only else self.voice, voice_delivery=None if text_only else self.voice_delivery,
             reaction_image_format=lambda: self.application.semantics.store.settings()["reactions_image_format"]
                 if self.application.semantics is not None else "image")
+        if text_only:
+            if getattr(envelope, "images", ()):
+                return sender._receipt(envelope, "not_sent", failure_code="telegram_text_only")
+            envelope = replace(envelope, voice=None, poke=None)
         return await sender.send(envelope)
 
     async def close(self, *, grace_seconds=0.5):
