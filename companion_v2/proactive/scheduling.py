@@ -14,7 +14,7 @@ from companion_v2.agenda.models import AgendaError, AgendaTarget
 from companion_v2.agenda.service import AgendaService
 from companion_v2.conversation.busy_gate import (SettingsReader, busy_context, busy_exempt_source,
                                                 proactive_defer_until, readable_items)
-from companion_v2.conversation.linked_ownership import conversation_link
+from companion_v2.conversation.linked_ownership import conversation_link, window_filter
 from companion_v2.conversation.messages import event_from_document
 from companion_v2.execution.models import QUEUED, TaskContext, TaskError, digest, require, stamp
 from companion_v2.foundation.outcome import Outcome
@@ -1302,13 +1302,13 @@ class ContactSchedule:
         from an unsent draft as another unanswered contact.
         """
         if include_skips:
-            return self.runtime.read_one("""SELECT 1 FROM execution_tasks WHERE origin_key = ? AND kind = ?
-                AND created_at > ? LIMIT 1""", (context.key, CONTACT_KIND, stamp(at - cooldown))) is not None
-        return self.runtime.read_one("""SELECT 1 FROM execution_tasks t
+            return self.runtime.read_one(f"""SELECT 1 FROM execution_tasks WHERE {windows} AND kind = ?
+                AND created_at > ? LIMIT 1""", (window, CONTACT_KIND, stamp(at - cooldown))) is not None
+        return self.runtime.read_one(f"""SELECT 1 FROM execution_tasks t
             LEFT JOIN proactive_contacts c ON c.task_id = t.task_id
-            WHERE t.origin_key = ? AND t.kind = ? AND t.created_at > ?
+            WHERE t.{windows} AND t.kind = ? AND t.created_at > ?
               AND COALESCE(json_extract(c.record_json, '$.decision'), 'send') != 'skip'
-            LIMIT 1""", (context.key, CONTACT_KIND, stamp(at - cooldown))) is not None
+            LIMIT 1""", (window, CONTACT_KIND, stamp(at - cooldown))) is not None
 
     def _appointment_silence(self, context, preferences, at):
         """True while a voluntary contact is too close to an accepted appointment.
@@ -1331,6 +1331,8 @@ class ContactSchedule:
         that slot instead of arriving as a late backlog.
         """
         settings = SettingsReader(self.runtime).read(context)
+        # An attempt made from any window of a linked conversation reached the same human.
+        windows, window = window_filter(self.runtime, context)
         if not settings.busy_reply_gate_enabled or busy_exempt_source(origin):
             return None
         busy = busy_context(readable_items(self.runtime, context), now=at, settings=settings)

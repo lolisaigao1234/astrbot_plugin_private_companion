@@ -535,6 +535,90 @@ class ProactiveAfterRetirementTests(TelegramAloneFixture, unittest.IsolatedAsync
         self.assertEqual(self.telegram_texts(), [(OWNER, "thinking of you")])
 
 
+class ContactLedgerFixture(TelegramAloneFixture):
+    both_have_spoken = ProactiveAfterRetirementTests.both_have_spoken
+    schedule_decision = ProactiveAfterRetirementTests.schedule_decision
+    thought = ProactiveAfterRetirementTests.thought
+
+    def contact_settings(self, context, **changes):
+        from companion_v2.foundation.refs import OperationRef, VersionRef
+        from companion_v2.proactive.configuration import GROUP, target_for
+        target, now = target_for(context), self.clock.now()
+        snapshot = require(self.app.configuration.read(context.actor, target=target, group_id=GROUP, observed_at=now))
+        identifier = "contact-settings-" + snapshot.edit_token[:16]
+        require(self.app.configuration.patch(context.actor, target=target, group_id=GROUP,
+            expected_edit_token=snapshot.edit_token, changes={GROUP + "." + key: value for key, value in changes.items()},
+            reset_to_inherit=(), operation=OperationRef(identifier, GROUP, target.authorization_scope,
+                                                        VersionRef(identifier, 1), identifier), observed_at=now))
+
+    def deliveries_today(self, context):
+        preferences = require(self.app.proactive.preferences.read(context, observed_at=self.clock.now()))
+        usage = self.app.proactive.budget.usage_summary(context, preferences, self.clock.now())["deliveries"]["session"]
+        return usage["used"], usage["limit"]
+
+    async def composed(self, prepared, text, seed):
+        """One contact composed for this window with this text; what was decided about it."""
+        from tests.native_adapter_support import completion
+
+        async def compose(payload, tools):
+            return completion(json.dumps({"decision": "send", "text": text}))
+        self.native.provider.client.state.behavior = compose
+        context = prepared["context"]
+        opportunity, intents = self.thought(context)
+        opportunity = type(opportunity)("opportunity-" + seed, context.scope, opportunity.opened_at, opportunity.expires_at)
+        intents = tuple(type(intent)(intent.purpose, type(intent.thought)("thought-" + seed, opportunity,
+            intent.thought.kind, intent.thought.summary, intent.thought.evidence, intent.thought.weight))
+            for intent in intents)
+        task = require(await self.app.proactive.contact(context, opportunity, intents,
+            role_instruction=prepared["instruction"], selection_seed=seed)).task
+        async with asyncio.timeout(30):
+            while True:
+                self.app.notify()
+                row = self.app.runtime.read_one("SELECT record_json FROM proactive_contacts WHERE task_id = ?",
+                                                (task.task_id,))
+                delivery = self.app.proactive._delivery_row(task.task_id)
+                if row is not None and (json.loads(row[0])["decision"] == "skip" or (
+                        delivery is not None and delivery["state"] not in ("pending", "dispatched"))):
+                    return json.loads(row[0])
+                self.assertEqual(self.app.state, "running", self.app.failure_code)
+                await asyncio.sleep(0.05)
+
+
+class OneContactLedgerTests(ContactLedgerFixture, unittest.IsolatedAsyncioTestCase):
+    """How often the human is contacted is counted for the conversation, not per endpoint."""
+
+    async def test_a_contact_composed_for_one_endpoint_leaves_no_allowance_for_the_other(self):
+        qq, telegram = await self.both_have_spoken(last=1)
+        self.contact_settings(qq["context"], max_contacts_24h=1)
+        self.assertEqual([self.deliveries_today(prepared["context"]) for prepared in (qq, telegram)], [(0, 1), (0, 1)])
+        self.assertEqual(await self.proactive_text(qq, "thinking of you"), "delivered")
+        self.assertEqual([self.deliveries_today(prepared["context"]) for prepared in (qq, telegram)], [(1, 1), (1, 1)])
+        for prepared in (telegram, qq):
+            context = prepared["context"]
+            refused = await self.app.proactive.contact(context, *self.thought(context),
+                role_instruction=prepared["instruction"], selection_seed="no-allowance-left")
+            self.assertEqual(refused.failure and refused.failure.code, "contact_delivery_budget")
+        self.assertEqual((self.telegram_texts(), self.sent_to_qq()), ([(OWNER, "thinking of you")], []))
+
+    async def test_a_text_already_sent_for_one_endpoint_is_not_sent_again_for_the_other(self):
+        qq, telegram = await self.both_have_spoken(last=1)
+        first = await self.composed(qq, "thinking of you", "said-once")
+        self.assertEqual(first["decision"], "send")
+        self.clock.advance(timedelta(minutes=1))
+        repeated = await self.composed(telegram, "thinking of you", "said-again")
+        self.assertEqual((repeated["decision"], repeated["dedup_reason"]), ("skip", "exact_repeat"))
+        self.assertEqual((self.telegram_texts(), self.sent_to_qq()), ([(OWNER, "thinking of you")], []))
+
+    async def test_the_pause_after_an_attempt_holds_on_every_endpoint_of_the_conversation(self):
+        qq, telegram = await self.both_have_spoken(last=1)
+        self.assertEqual(await self.proactive_text(qq, "thinking of you"), "delivered")
+        # Telegram's window carries the schedule; the attempt was made from QQ's.
+        self.contact_settings(qq["context"], automatic_enabled=True, idle_seconds=1, interval_seconds=600)
+        self.clock.advance(timedelta(seconds=30))
+        self.assertEqual(self.schedule_decision(telegram), "recent_attempt_cooldown")
+        self.assertEqual((self.telegram_texts(), self.sent_to_qq()), ([(OWNER, "thinking of you")], []))
+
+
 class UnlinkAndRelinkQQTests(TelegramAloneFixture, unittest.IsolatedAsyncioTestCase):
     def access(self, context, action):
         result = self.app.tasks.check_context_access(context, action=action, observed_at=self.clock.now())
