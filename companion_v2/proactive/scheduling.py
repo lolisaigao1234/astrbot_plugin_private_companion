@@ -327,7 +327,7 @@ class ContactSchedule:
         try:
             return self.tasks.check_context_access(destination(link, endpoint), action=GROUP,
                                                    observed_at=self.tasks.now()).is_success
-        except TaskError:
+        except Exception:  # noqa: BLE001 - a member that cannot be resolved cannot carry the schedule
             return False
 
     def _last_activity(self, context, event, row):
