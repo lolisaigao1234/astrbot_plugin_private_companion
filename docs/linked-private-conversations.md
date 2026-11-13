@@ -94,7 +94,9 @@ quiescence as any link edit, so a turn in flight makes it busy; nothing is copie
   with `"independent_target_ids": ["that-target"]` beside the unchanged member list. It is
   then no longer closed, answers with its own native identity and continues in the new, empty
   conversation. The link lists it under `former`, only so that what it recorded as a member
-  stays the conversation's.
+  stays the conversation's. Nothing it says or is told from then on, on its own or as a
+  member of another link, is the conversation's: it is not counted, not shown, and a `/new`
+  or reset of the conversation it left does not reach its window.
 - The endpoint the conversation started on is not admitted independently
   (`linked_anchor_endpoint_closed`): its native identity is the conversation's stored owner, so
   beside the link it would read what the conversation learns later. It can be linked again.
@@ -111,7 +113,9 @@ quiescence as any link edit, so a turn in flight makes it busy; nothing is copie
   `conversation_link_last_endpoint` and changes nothing: the conversation is reached only
   through its endpoints, so link another private endpoint first. A save of the account
   mapping that would leave a link without any configured member is refused with the same
-  code, before the host is stopped or anything is saved. The endpoint the conversation
+  code, before the host is stopped or anything is saved. A stored mapping that did not
+  resolve configures no endpoint, so the corrected mapping that replaces it is saved and
+  started as without links. The endpoint the conversation
   started on has no special standing here; it can leave while another member remains (see
   "Retiring the endpoint the conversation started on").
 - A removed endpoint that is still configured is skipped by start-up, profile initialization
@@ -269,9 +273,11 @@ other.
   makes it that member's work, whichever endpoint's window the record was made on.
   An occurrence that was already blocked is not sent afterwards.
 - Proactive contact is planned for one window of the conversation. Among the members that
-  are available (configured, account connected) and hold the contact permission themselves,
-  it is the window with the most recent turn; when no member qualifies, the window with the
-  most recent turn keeps the schedule and reports its own reason. The other windows wait
+  are available (configured, account connected), hold the contact permission themselves and
+  whose most recent turn may still run, it is the window with the most recent turn; when no
+  member qualifies, the window with the most recent turn keeps the schedule and reports its
+  own reason. A turn captured before its member was removed never qualifies, also after the
+  member rejoins: the next member carries until that one speaks again. The other windows wait
   (`linked_conversation_continues_on_another_endpoint`), and a contact planned on one
   endpoint is withdrawn when the human speaks on another. Only current members count: when
   the window that carried the schedule is removed, a remaining member's window carries it
@@ -288,6 +294,10 @@ other.
   it as context) is the conversation's: a member reads what was sent for any window of the
   conversation, once, under its own permission, validated against the stored route and
   marked with the channel it was delivered on (`delivered_on`).
+- A window is the conversation's only when the scope recorded with it is one of the link's
+  in full, conversation included. What the same endpoint was told in another conversation
+  (its own before it joined or after it left, or another link's) is never counted for this
+  one, and a history item is shown only when its source is a scope of the reader's link.
 - A linked Telegram destination receives the text only. A QQ poke or a voice plan sealed
   with a contact is dropped, no voice is rendered, and a text that carries an image is not
   sent (`telegram_text_only`). With QQ as the destination the existing QQ voice, poke and
@@ -465,7 +475,8 @@ other members agree with the endpoint that ran the command, through AstrBot's pu
 | Other plugins' commands, AstrBot's remaining commands | Untouched. |
 
 `/new` and `/reset` leave long-term memory alone. They end the companion's temporary window
-context for every endpoint of the link, as they do for one window when unlinked.
+context for every endpoint of the link (its members, and removed endpoints while they stay
+closed), as they do for one window when unlinked.
 
 AstrBot has no persona or model chat command at this version. The conversation's persona is
 stored with the conversation and is therefore one value; a persona forced per session, a
@@ -512,7 +523,7 @@ chats and chats that are not companion targets keep AstrBot's own replies.
   window changes during a day, such an event can therefore be composed once more from the
   new window, within the conversation's daily allowance and never with the same text inside
   the repeat window; the slowdown after unanswered contacts starts again there.
-- The windows of a conversation are found through each scope's latest turn. A window an
+- The windows of a conversation are found through each scope's latest turn in it. A window an
   endpoint had before its role binding changed (it was removed and came back, its persona
   changed) is counted and shown no longer once that endpoint has a new turn, as for any
   single window.
@@ -585,8 +596,11 @@ earlier work, relinking QQ, the refusal to remove the last endpoint, and a start
 channel configured, including the daily routine running under Telegram. Further cases: work
 captured before a removal staying refused after either endpoint rejoins, the conversation-wide
 allowance, pause and repeat detection, Telegram carrying the proactive schedule while the QQ
-that spoke last is disconnected, a mapping save with a removed endpoint still configured, and
-the refusal of a save that removes the last configured member.
+that spoke last is disconnected or rejoined without speaking, a mapping save with a removed
+endpoint still configured, the refusal of a save that removes the last configured member, and
+a corrected mapping saved after a stored one that did not resolve. With one endpoint in two
+conversations (its own before joining or after leaving, or two links on one QQ bot) it checks
+that the text, allowance, schedule and reset of one never reach the other.
 
 Run these suites with an AstrBot SDK environment that uses a temporary data root, never an
 installed plugin or a live data directory:
