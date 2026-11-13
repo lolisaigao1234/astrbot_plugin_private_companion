@@ -198,3 +198,26 @@ def shared_scopes(runtime, scope):
 
 def same_conversation(runtime, reader_scope, source_scope):
     return source_scope in shared_scopes(runtime, reader_scope)
+
+
+def conversation_windows(runtime, context):
+    """The context keys under which a linked conversation's background work is recorded.
+
+    ``None`` outside a link: one window, read as it always was. A member reads,
+    in place, what was recorded for the other scopes of its link as well, each
+    under the window of that scope's latest turn; nothing is copied or rekeyed.
+    """
+    link = link_for_scope(runtime, context.scope)
+    if link is None:
+        return None
+    from companion_v2.conversation.native_turns import latest_scope
+    latest = (latest_scope(runtime, scope) for scope in link.scopes if scope != context.scope)
+    return tuple(dict.fromkeys((context.key, *(row["context_key"] for row in latest if row is not None))))
+
+
+def window_filter(runtime, context, column="origin_key"):
+    """One row predicate and its one value: this window, or its linked conversation's windows."""
+    keys = conversation_windows(runtime, context)
+    if keys is None:
+        return column + " = ?", context.key
+    return column + " IN (SELECT value FROM json_each(?))", json.dumps(keys)
