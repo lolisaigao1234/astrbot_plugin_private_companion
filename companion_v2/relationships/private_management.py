@@ -9,6 +9,7 @@ from companion_v2.configuration.management import (
 )
 from companion_v2.configuration.contract import contract_of, layers_of, provenance_of
 from companion_v2.configuration.models import ConfigLayer, ConfigurationError
+from companion_v2.configuration.owners import storage_target
 from companion_v2.conversation.reply_management import ReplyManagement
 from companion_v2.conversation.reply_settings import GROUP as REPLY_GROUP, OWNER as REPLY_OWNER
 from companion_v2.execution.models import TaskError, digest, require
@@ -200,9 +201,10 @@ class PrivateMemberSettings:
                 if prefix is None:
                     continue
                 operation_id = prefix + digest([operator.subject, target.key, section_key])
+                # The id keeps the endpoint that saved; the receipt is where the settings are stored.
                 if self.app.configuration.store.read_one("""SELECT operation_id FROM configuration_changes
                         WHERE operation_id = ? AND target_key = ? AND group_id = ?""",
-                        (operation_id, target.key, editor.group)) is not None:
+                        (operation_id, storage_target(self.app.runtime, target).key, editor.group)) is not None:
                     return operation_id
         raise TaskError("configuration_operation_incomplete", "original member section result is unavailable")
 

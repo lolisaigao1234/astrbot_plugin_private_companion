@@ -31,10 +31,15 @@ def publish(messages, context, parent, quote):
     link(messages.runtime, record.reference, (parent,), messages.tasks.now())
 
 
-def offered(messages, context, parent, at):
+def snapshot(messages, context, parent, at):
+    """This input's quote and its governed record, read once; None without one."""
     ref = reference(parent)
     if messages.runtime.read_one("SELECT 1 FROM sources WHERE source_id = ? AND owner = ?",
                                  (ref.source_id, ref.owner)) is None:
-        return {}
-    messages._read_source(ref, context, "text", at)
-    return {"native-quote:" + ref.source_id: (ref, "text", "quoted_message")}
+        return None
+    return ref, messages._read_source(ref, context, "text", at)
+
+
+def offered(messages, context, parent, at):
+    found = snapshot(messages, context, parent, at)
+    return {"native-quote:" + found[0].source_id: (found[0], "text", "quoted_message")} if found else {}

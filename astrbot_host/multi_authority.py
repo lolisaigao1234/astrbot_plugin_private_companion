@@ -18,7 +18,7 @@ from companion_v2.storage.codec import scope_values
 from companion_v2.adapters.astrbot.native import native_user_subject_id
 from .group_settings import GroupTarget
 from companion_v2.conversation.linked_ownership import (LINKS_KEY, PRIVATE_HOST_ID, link_records_changed,
-                                                         link_for_endpoint)
+                                                         link_for_endpoint, link_for_scope)
 
 
 logger = logging.getLogger(__name__)
@@ -28,6 +28,8 @@ MANIFEST = "astrbot.multi.manifest.v1"
 VERIFIED_RUNTIME = "astrbot.multi.verified_runtime.v1"
 HOST_ID = "astrbot-native"
 DELIVERY = "message.delivery"
+# Grant id families whose settings owners revoke by prefix.
+SETTINGS_GRANT_FAMILIES = ("growth-grant:", "state-grant:", "life-grant-")
 
 
 class MultiAuthority:
@@ -359,7 +361,7 @@ class MultiAuthority:
         actor = self.ensure_actor(target)
         at = datetime.fromisoformat(self.require_manifest()["valid_from"])
         with self.runtime.transaction():
-            self._keep_endpoint_refusals(target, scope, actor, at)
+            own = self._own_decisions(target, scope)
             exact = self.runtime.read_one(
                 """SELECT role_id, revision FROM role_bindings WHERE installation_id = ? AND platform = ?
                    AND scope_kind = ? AND native_scope_id = ? AND bot_id = ? AND account_id = ?
@@ -395,6 +397,7 @@ class MultiAuthority:
             # 默认关的能力**不签发**——没有授权就是没有权限，页面也会如实显示"未授权"；
             # 默认开的能力即使不在配置能力表里也签发（表管的是宿主能力，不是这两项按人权限）。
             context = TaskContext(actor, resolution.binding, AudienceRef(scope, (actor.subject,)))
+            self._carry_decisions(context, own, at)
             pending = self._defaults(context)
             decided = {grant.capability for grant in self.identities.grants_for_subject(actor.subject)
                        if grant.subject == actor.subject and grant.scope == scope
@@ -432,7 +435,8 @@ class MultiAuthority:
                             expected_revision=self.identities.revision)
             if core_admin:
                 self._grant_core_admin(context, scope)
-            self._provision_context_grants(context)
+            if own is None:
+                self._provision_context_grants(context)
             from companion_v2.identity_policy.legacy_import import apply_pending_private_authorization
             apply_pending_private_authorization(self.runtime, actor, scope, role.subject_id, self.now())
             self.write(self.context_key(target, role.subject_id), scope.document())
@@ -441,34 +445,94 @@ class MultiAuthority:
                 self.write(self.context_key(template, role.subject_id), scope.document())
             return context
 
-    def _keep_endpoint_refusals(self, target, scope, actor, at):
-        """Joining a conversation gives an endpoint a new scope, not a clean slate.
+    def _own_decisions(self, target, scope):
+        """Who decides the settings-derived grants of this scope.
 
-        Whatever this endpoint had been refused in its own conversation is
-        recorded as refused on its linked scope before any default is issued.
+        ``None``: the window's settings, as in every unlinked conversation. Inside
+        a link the settings are shared and authority is not, so provisioners issue
+        and revoke nothing there: a member's grants change only by its own settings
+        writes and by operator decisions. The result holds what an endpoint was
+        allowed in its own conversation (grants by capability, and the consents
+        of its capability packages), carried over once when it joins.
         """
-        if actor.principal.host_id != PRIVATE_HOST_ID:
-            return
+        if link_for_scope(self.runtime, scope) is None:
+            return None
         previous = self.read("host.multi.active:" + target.target_id)
-        if not previous or previous == scope.document():
-            return
+        if previous == scope.document():
+            return {}, ()
+        principal = self.principal(target)
+        if not previous or principal.host_id != PRIVATE_HOST_ID:
+            return None  # no conversation of its own yet: it starts from the defaults of a new one
         previous = ScopeRef.restore(previous)
         own = self.identities.resolve_authenticated(
-            replace(actor.principal, host_id=HOST_ID, bot_id=target.bot_id), observed_at=self.now())
+            replace(principal, host_id=HOST_ID, bot_id=target.bot_id), observed_at=self.now())
         if own.failure is not None:
+            return {}, ()
+        own, rows = own.unwrap(), {}
+        for grant in self.identities.grants_for_subject(own.subject):
+            if grant.scope == previous:
+                rows.setdefault(grant.capability, []).append(grant)
+        # A per-person default that was off left no row: that absence is a refusal too.
+        decisions = dict.fromkeys(DEFAULT_FOR_CAPABILITY, (None, ""))
+        for capability, grants in rows.items():
+            access = self.identities.authorize(own, scope=previous, capability=capability, observed_at=self.now())
+            decisions[capability] = (
+                next((grant for grant in grants if grant.grant_id == access.unwrap().grant_id), None)
+                if access.is_success else None,
+                next((family for family in SETTINGS_GRANT_FAMILIES
+                      if any(grant.grant_id.startswith(family) for grant in grants)), ""))
+        return decisions, self.runtime.read_all(
+            """SELECT extension_id, capability_id, state FROM capability_authorizations
+               WHERE subject_kind = ? AND subject_id = ? AND installation_id = ? AND platform = ?
+               AND scope_kind = ? AND native_scope_id = ? AND bot_id = ? AND account_id = ?
+               AND conversation_id = ? AND session_id = ?""",
+            (own.subject.kind.value, own.subject.subject_id, *scope_values(previous)))
+
+    def _carry_decisions(self, context, own, at):
+        """Joining a conversation gives an endpoint a new scope, not new permissions.
+
+        Before any default is issued, every capability gets the answer this
+        endpoint had in its own conversation: allowed stays allowed, with its
+        expiry, and refused stays refused. On a later rejoin its earlier grants on
+        the linked scope stand only where it is allowed on its own as well.
+        """
+        grants, consents = own or ({}, ())
+        if not grants and not consents:
             return
-        decided = {grant.capability for grant in self.identities.grants_for_subject(actor.subject)
-                   if grant.scope == scope}
-        for capability in sorted({grant.capability for grant in self.identities.grants_for_subject(own.unwrap().subject)
-                                  if grant.scope == previous} - decided):
-            if self.identities.authorize(own.unwrap(), scope=previous, capability=capability,
-                                         observed_at=self.now()).is_success:
+        scope, subject = context.scope, context.actor.subject
+        held = {}
+        for row in self.identities.grants_for_subject(subject):
+            if row.scope == scope:
+                held.setdefault(row.capability, []).append(row)
+        for capability in sorted({*grants, *held}):
+            grant, family = grants.get(capability, (None, ""))
+            if capability in held:
+                # It was a member before: nothing it lacks on its own comes back with the link.
+                for row in held[capability] if grant is None else ():
+                    if row.state is GrantState.ACTIVE:
+                        self.identities.revoke_grant(row.grant_id, revoked_at=self.now(),
+                                                     expected_revision=self.identities.revision)
                 continue
+            # A carried grant stays in the family its settings owner revokes.
             identifier = self.grant_id(scope, capability)
-            self.identities.issue_grant(grant_id=identifier, subject=actor.subject, scope=scope, capability=capability,
-                tier=AuthorizationTier.STANDARD, valid_from=at, expected_revision=self.identities.revision)
-            self.identities.revoke_grant(identifier, revoked_at=self.now(),
-                                         expected_revision=self.identities.revision)
+            if family == "life-grant-":
+                identifier = family + digest(context.key) + ":linked:" + digest(capability)
+            elif family:
+                from companion_v2.role_work.growth.configuration import target_for
+                identifier = family + digest([target_for(context).key, subject, capability]) + ":linked"
+            self.identities.issue_grant(grant_id=identifier, subject=subject, scope=scope, capability=capability,
+                tier=AuthorizationTier.STANDARD, valid_from=at, expires_at=grant.expires_at if grant else None,
+                expected_revision=self.identities.revision)
+            if grant is None:
+                self.identities.revoke_grant(identifier, revoked_at=self.now(),
+                                             expected_revision=self.identities.revision)
+        from companion_v2.capabilities.models import CapabilityAuthorizationState
+        from companion_v2.capabilities.repositories import CapabilityRepository
+        for row in consents:
+            # A consent already decided on the linked scope refuses this write and stands.
+            CapabilityRepository(self.runtime).set_authorization(
+                extension_id=row["extension_id"], capability_id=row["capability_id"], subject=subject, scope=scope,
+                state=CapabilityAuthorizationState(row["state"]), expected_revision=0, observed_at=self.now())
 
     def _grant_core_admin(self, context, scope):
         """Keep the Dashboard-confirmed administrator window actually administrative.
@@ -498,6 +562,7 @@ class MultiAuthority:
 
     def select(self, target, scope, role):
         with self.runtime.transaction():
+            settings_decide = self._own_decisions(target, scope) is None
             self.provision_scope(target, scope, role,
                 core_admin=target.target_id == self.core_target_id)
             key = "host.multi.active:" + target.target_id
@@ -516,11 +581,12 @@ class MultiAuthority:
             ensure_image_access(self.runtime, context, observed_at=self.now())
             from companion_v2.role_work.state.configuration import (
                 ensure_window_presentation_grants, ensure_role_state_grants)
-            ensure_window_presentation_grants(self.runtime, context, observed_at=self.now())
-            try:
-                ensure_role_state_grants(self.runtime, context, observed_at=self.now())
-            except Exception:
-                pass
+            if settings_decide:
+                ensure_window_presentation_grants(self.runtime, context, observed_at=self.now())
+                try:
+                    ensure_role_state_grants(self.runtime, context, observed_at=self.now())
+                except Exception:
+                    pass
             # Provisioning a missing tool grant advances the policy revision.
             # Life and proactive workers must bind the same fresh actor as intake.
             return replace(context, actor=self.actor(target))

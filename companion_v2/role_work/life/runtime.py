@@ -5,6 +5,7 @@ from dataclasses import replace
 from datetime import time, timedelta
 from zoneinfo import ZoneInfo
 
+from companion_v2.conversation.linked_ownership import shared_scopes
 from companion_v2.conversation.models import InboundConversationEvent
 from companion_v2.execution.models import TaskError, digest, require
 from companion_v2.foundation.outcome import Outcome
@@ -24,6 +25,9 @@ class RoleLifeRuntime:
     def __init__(self, app, *, context=None):
         self.app, self.runtime = app, app.runtime
         self.context, self.instruction, self.guard = context, None, None
+        # The bound endpoints that may run this routine: its own, and in a linked
+        # conversation the other members, in the order they were bound.
+        self._members = {} if context is None else {context.key: context}
         self.settings = None
         self._revision = None
         self._workers, self.results = {}, {}
@@ -53,6 +57,9 @@ class RoleLifeRuntime:
                 self.context = context
         else:
             self.context = context
+        if (not self._members or context.key in self._members or context.scope != self.context.scope
+                and context.scope in shared_scopes(self.runtime, self.context.scope)):
+            self._members[context.key] = context
         # The Dashboard target and native intake can name the same private route
         # with different conversation IDs.  Keep the first context (and the
         # activities/grants created under it) so a later native bind does not
@@ -62,7 +69,8 @@ class RoleLifeRuntime:
 
     @property
     def schedule_id(self):
-        return "role.life.daily:" + self.context.key
+        # One daily schedule per routine, whichever member runs it.
+        return "role.life.daily:" + next(iter(self._members), self.context.key)
 
     def retire(self):
         self._retired = True
@@ -77,21 +85,46 @@ class RoleLifeRuntime:
         c = self.context
         return RoleOwnerRef(c.scope.installation_id, c.scope.bot_id, c.role_binding.role.subject_id)
 
-    def authorize(self):
+    def authorize(self, context=None):
         self.app.require_running()
         if self.context is None or self.instruction is None:
             raise TaskError("life_not_bound", "the host must bind the original persona first")
         if self._retired:
             raise TaskError("life_binding_changed", "the host has selected another persona")
-        require(self.app.tasks.identity.authorize(self.context.actor, scope=self.context.scope,
+        context = context or self.context
+        require(self.app.tasks.identity.authorize(context.actor, scope=context.scope,
             capability="role.life.run", observed_at=self.app.now()))
-        require(self.app.tasks.authorize_context(self.context, action="role.life.run", observed_at=self.app.now()))
+        require(self.app.tasks.authorize_context(context, action="role.life.run", observed_at=self.app.now()))
 
     async def preflight(self):
-        self.authorize()
-        if self.guard:
-            await self.guard(self.context.scope, self.context.role_binding, self.instruction)
-        self.authorize()
+        """Run as the first bound member that is available and holds the permission itself.
+
+        A linked conversation has one routine and no endpoint it depends on: the
+        member that passes supplies the context, so the work is attributed to it.
+        """
+        failure = None
+        for context in tuple(self._members.values()) or (self.context,):
+            try:
+                self.authorize(context)
+                if self.guard:
+                    await self.guard(context.scope, context.role_binding, self.instruction)
+                self.authorize(context)
+            except TaskError as error:
+                failure = failure or error
+                continue
+            self.context = context
+            return
+        raise failure
+
+    def _leave_unauthorized_member(self):
+        """A member that lost the permission, or the link, hands the routine to one that holds it."""
+        for context in (self.context, *self._members.values()):
+            try:
+                self.authorize(context)
+            except TaskError:
+                continue
+            self.context = context
+            return
 
     def event(self, label, text, *, at=None):
         at = at or self.app.now()
@@ -316,6 +349,8 @@ class RoleLifeRuntime:
         if self.instruction is None or self._retired:
             return
         try:
+            if len(self._members) > 1:
+                self._leave_unauthorized_member()
             self.refresh()
             if not self.settings or not self.settings["enabled"]:
                 return

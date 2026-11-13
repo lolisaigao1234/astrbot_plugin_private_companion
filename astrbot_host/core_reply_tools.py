@@ -630,7 +630,8 @@ class CoreReplyToolSession:
                 call_id = native_call_id(wrapper, action, arguments)
                 if offered.owner in ("calendar", "growth", "relationships", "group"):
                     await self.wait_source()
-                if self.text_only:
+                from companion_v2.conversation.linked_ownership import link_for_scope
+                if self.text_only or link_for_scope(self.application.runtime, self.context.scope) is not None:
                     # Source observation may have awaited another task. Fence the
                     # physical endpoint and link again before the SQLite effect.
                     await self.authorize(wrapper)

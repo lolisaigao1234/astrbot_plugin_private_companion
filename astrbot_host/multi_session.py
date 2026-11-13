@@ -140,7 +140,12 @@ class MultiPrivateBridge(NativePrivateBridge):
         target = self.targets.get((scope.platform, scope.account_id, scope.native_scope_id))
         if target is None and scope.kind is ScopeKind.PRIVATE:
             target = self.settings.private_target(scope.platform, scope.account_id, scope.native_scope_id)
-        if scope.kind is not ScopeKind.PRIVATE or target is None or self.authority.bot_id(target) != scope.bot_id:
+        if scope.kind is not ScopeKind.PRIVATE or target is None:
+            raise TaskError("host_target_unavailable", "the native private target is not configured")
+        # A bridge without an authority (assembled before the host attaches one) has
+        # no linked conversations: the target's own bot is then the only owner.
+        authority = getattr(self, "authority", None)
+        if (authority.bot_id(target) if authority is not None else target.bot_id) != scope.bot_id:
             raise TaskError("host_target_unavailable", "the native private target is not configured")
         return target
 
@@ -360,6 +365,9 @@ class MultiPrivateBridge(NativePrivateBridge):
         current = require(self.authority.personas.resolve(scope, observed_at=self.now())).binding
         if current != binding:
             raise TaskError("role_binding_changed", "the native role context was replaced")
+        fence = getattr(self, "command_fences", {}).get(scope)
+        if fence is not None:
+            fence()  # a deterministic command in flight on this linked endpoint
         return result
 
     async def verified_persona(self, scope, binding):
@@ -550,6 +558,7 @@ class MultiHostSession:
         from .linked_conversations import LinkedConversations
         self.linked_conversations = LinkedConversations(self)
         self.bridge.linked_conversations = self.linked_conversations
+        self.bridge.command_fences = {}
         self.model = AstrBotTextProvider(native_context, bridge=self.bridge,
             binding=ProviderBinding("model.text", common.provider_id, native_types.version, provider_fingerprint),
             provider_id=common.provider_id, version=native_types.version, provider_type=native_types.provider_types,
@@ -1543,6 +1552,8 @@ class MultiHostSession:
 
         async with self._intake[target.target_id]:
             self.application.require_running()
+            if self.linked_conversations.removed(target):
+                raise TaskError("linked_endpoint_revoked", "this private endpoint no longer belongs to the conversation")
             # Text commands use the same authenticated physical route and served
             # conversation as an ordinary Telegram turn, without a reply batch.
             capture = (self.bridge.capture_core_reply if event.platform_meta.name == "telegram"
@@ -1559,8 +1570,44 @@ class MultiHostSession:
             binding = self.application.state_maintenance.bindings.get(context.key)
             if binding is None:
                 raise TaskError("planning_role_changed", "original role binding is unavailable")
-            return await self.application.calendar_planning.run(context, binding[1], mode=mode,
-                slot="manual:" + mode + ":" + captured.event_id, manual=True, refresh=refresh)
+            fence = self._command_fence(event, context, "calendar.write")
+            if fence is not None:
+                # The planner's guard is this endpoint's verify_role: it runs the fence
+                # with the endpoint checks immediately before the calendar effect.
+                self.bridge.command_fences[context.scope] = fence
+            try:
+                return await self.application.calendar_planning.run(context, binding[1], mode=mode,
+                    slot="manual:" + mode + ":" + captured.event_id, manual=True, refresh=refresh)
+            finally:
+                if fence is not None:
+                    try:
+                        # The same checks once more, before the caller sends the receipt.
+                        await self.bridge.verify_role(context.scope, context.role_binding, binding[1])
+                    finally:
+                        del self.bridge.command_fences[context.scope]
+
+    def _command_fence(self, event, context, action):
+        """The link a deterministic command was admitted under, for its later rechecks.
+
+        ``None`` on an endpoint in no link. The fence raises once the link's
+        revision or membership changed, or the endpoint lost the action.
+        """
+        links, umo = self.linked_conversations, event.unified_msg_origin
+        link = links.for_origin(umo)
+        if link is None:
+            return None
+        admitted = (link["link_id"], link["revision"], link["conversation_id"])
+
+        def fence():
+            current = links.for_origin(umo)
+            if current is None or (current["link_id"], current["revision"], current["conversation_id"]) != admitted:
+                raise TaskError("linked_revision_changed", "the conversation link changed during this command")
+            if (links.retiring or umo in links.gate.editing_origins
+                    or not any(row["origin"] == umo for row in current["members"])):
+                raise TaskError("linked_endpoint_revoked", "this private endpoint no longer belongs to the conversation")
+            self.application.calendar.access.check(context, action)
+        fence()
+        return fence
 
     def _record_platform_names(self, event, context):
         """Record platform display names from the already authenticated native

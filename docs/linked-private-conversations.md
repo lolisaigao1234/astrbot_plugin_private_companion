@@ -82,9 +82,11 @@ quiescence as any link edit, so a turn in flight makes it busy; nothing is copie
 - The endpoint the conversation started on is not admitted independently
   (`linked_anchor_endpoint_closed`): its native identity is the conversation's stored owner, so
   beside the link it would read what the conversation learns later. It can be linked again.
-- Routines a running host had bound to the removed endpoint (diary, sleep, state maintenance,
-  proactive source maintenance) are refused from then on; a remaining endpoint takes them over
-  at the next host start. Restart the companion host after removing the endpoint that was bound
+- Routines a running host had bound to the removed endpoint are refused from then on. The
+  life routine (diary, sleep) needs no restart: on the host's next pass it leaves the removed
+  endpoint for a remaining bound member that holds the permission itself. State maintenance
+  and proactive source maintenance are taken over by a remaining endpoint at the next host
+  start, so restart the companion host for those after removing the endpoint that was bound
   first. Reminders and proactive contact are not bound to an endpoint this way and need no
   restart (see "Reminders and proactive text").
 - A removed endpoint is not a member of the link record, is never the destination of
@@ -130,15 +132,18 @@ copies the joining endpoint's old records nor rewrites either endpoint's history
   rows are keyed (the sparse settings owner and the configuration service), not by each
   feature: a target always carries the physical window, so authorization, the grants a
   settings write issues or revokes, and operation receipts stay with the endpoint that acted.
+  The contact preferences owner's own change, receipt and pause lookups use the same address,
+  and a repeated save finds its receipt there; operation ids keep the physical window.
   Role and relationship settings retain their existing owners.
 - Timeline, journal and life-context readers include the linked physical scopes, also for an
   entry that carries its original input. Original activity, evidence, journal and operation
   records keep their source scope.
 - The reply background of every linked endpoint includes the adopted relationship records of
   the conversation, whichever endpoint they were recorded on.
-- The life routines (daily diary, sleep) have one owner per linked conversation: the first
-  endpoint that binds, and after a restart the first one that is available. The routine runs
-  under that endpoint's own context, grant and provenance; the other endpoints adopt it.
+- The life routines (daily diary, sleep) are one routine with one daily schedule per linked
+  conversation, and depend on no single endpoint. Before each piece of work the routine takes
+  the first bound member that is connected and holds `role.life.run` itself, and runs under
+  that member's own context, grant and provenance.
 - The native per-role usage view covers the conversation's own linked scopes without changing
   stored usage keys, so another participant of the same account is not counted. Each native
   turn appears once and includes `source_channel`. The AstrBot plugin logger records one
@@ -153,17 +158,32 @@ Identity and stored owners are shared across a link. Authority is not.
   unrelated conversations and groups is preserved.
 - An endpoint that joined a conversation never has more than the standard tier, whatever tier
   the shared human subject holds. Every tier check uses the one helper that knows this
-  (`access_tier`), including interventions, core-only tools and commands, relay, screen and
-  device control. Dashboard administration remains a separate authentication path.
+  (`access_tier`), including interventions, core-only tools and commands, relay and screen.
+  A native device provider forwards only the human subject, so the host keeps the
+  authenticated actor of the native call in flight and the Mi Home administrator check
+  refuses a joined endpoint from it. Dashboard administration remains a separate
+  authentication path.
 - Every permission decision uses the endpoint's own grants and revocations. When a shared
   record names another member's scope, the reader is still judged on its own scope. A joined
   endpoint reaches only the scopes of its current link; any other scope is refused before a
   grant is looked at, including other conversations of the same human.
 - The features a private window's owner has without a grant (relationship and calendar
   reading, notes, self-review, expression reading) apply on each endpoint's own window.
-- What an endpoint had been refused in its own conversation stays refused when it joins: the
-  refusals are recorded on its linked scope before any default grant is issued. Grants it held
-  are not copied; the linked scope starts from the same defaults as any new conversation.
+- Joining carries an endpoint's own permissions over, and nothing else. For every capability
+  it had a grant for in its own conversation, allowed stays allowed (with its expiry, and in
+  the grant family its settings owner revokes) and refused stays refused; a per-person default
+  that was off counts as refused, and its capability consents (image, Reality, screen and the
+  like) are copied with their state. This happens once, before any default is issued. An
+  endpoint that never had a conversation of its own starts from the defaults of a new one.
+  A removed endpoint has no authority at all while it is closed. Admitted on its own it is
+  judged by its own settings and grants again, and if it is linked once more its earlier
+  grants on the linked scope stand only where it is allowed on its own as well.
+- Inside a link the settings are shared and the grants are not. The provisioners that derive
+  grants from settings (life, growth, state, typing and presence) issue and revoke nothing for
+  a member. A later change of a shared setting issues or revokes the grant of the endpoint
+  that saved it, when turned on and when turned off, and leaves every other endpoint's grants
+  as they were, also after its next turn. An operator's decision on an endpoint applies to
+  that endpoint.
 - The pre-send check re-reads the joined endpoint's own dialogue permission, so a revocation
   made during a turn stops that turn's reply.
 
@@ -257,6 +277,15 @@ formats, splits and sends, and AstrBot's whitelist still decides which chats rea
   remains limited to the chat the message arrived on.
 - Deterministic calendar commands authenticate the Telegram message and send their text receipts
   through AstrBot's session transport. A replaced client invalidates a pending receipt.
+  On a linked endpoint, of either channel, the command keeps the link id, revision and
+  conversation it was admitted under. The endpoint checks, that link and the calendar
+  permission are checked again immediately before the planner writes and once more before the
+  receipt; after the link changed nothing is written and nothing more is sent on that command.
+  A `/new` on any member gives the link a new revision, so a command still planning under the
+  old one is refused in the same way; send it again. A removed endpoint's command is refused
+  before anything is read. AstrBot's session commands and the companion's full reset run
+  under the conversation permit, binding commands stay refused, and the other text commands
+  run inside a gated turn.
 - Receiver text replies become separate governed sources, available from `turn.evidence` and
   `source.read`, and remain separate from the human's current text in native history. Whole and
   partial quotes retain the physical account/chat/message/sender and original time. Bot attribution
@@ -354,7 +383,8 @@ ownership, revision, membership, anchor existence, selection and effective nativ
 Native tool/provider awaits can run in child tasks: tool/send authorization validates their
 event's **still-running pipeline owner's** permit, without admitting a child task. Revision,
 physical authentication and existing companion permissions are rechecked before external tools
-and sends. The gate registry survives import retirement in its own process module; unload waits
+and sends, and on every linked endpoint again after a tool waited for its source and before
+its local effect. The gate registry survives import retirement in its own process module; unload waits
 for admitted pipeline work, origin barriers and management operations before closing storage.
 
 Linked members must agree with each other, at creation and on every turn, on what AstrBot

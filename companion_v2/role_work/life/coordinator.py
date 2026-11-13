@@ -37,8 +37,8 @@ class RoleLifeCoordinator:
     def same_owner(self, other, context):
         """One routine per private route; the endpoints of a linked conversation are one route.
 
-        The routine keeps the context it was first bound with, so its work stays
-        authorized by, and attributed to, that one physical endpoint.
+        Each piece of work runs under one bound member's own context, so it is
+        authorized by, and attributed to, the physical endpoint that ran it.
         """
         return self.route(other) == self.route(context) or (
             other.scope != context.scope and other.role_binding.role == context.role_binding.role
