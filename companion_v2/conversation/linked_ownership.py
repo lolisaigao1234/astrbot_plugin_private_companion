@@ -36,7 +36,26 @@ class _Link(dict):
 
 class _Index:
     def __init__(self):
-        self.raw, self.rejected, self.members = None, None, {}
+        self.raw, self.rejected, self.members, self.current = None, None, {}, False
+
+    def load(self, runtime):
+        row = runtime.read_one("SELECT value FROM runtime_metadata WHERE key = ?", (LINKS_KEY,))
+        raw = row["value"] if row else None
+        if raw != self.raw:
+            if raw == self.rejected:
+                raise ValueError("the stored conversation links are malformed")
+            self.rejected = raw
+            members = {}
+            for record in (json.loads(raw) if raw else {}).values():
+                link = _Link(record)
+                members.update(dict.fromkeys(link.endpoints, link))
+            self.raw, self.members = raw, members
+        self.current = True
+
+
+def _records_runtime(runtime):
+    source = _RECORD_RUNTIMES.get(runtime)
+    return source() if source is not None else runtime
 
 
 def serve_link_records(store, runtime):
@@ -44,34 +63,32 @@ def serve_link_records(store, runtime):
     _RECORD_RUNTIMES[store] = ref(runtime)
 
 
+def link_records_changed(runtime):
+    """The host that manages links announces its store, and every write of the record.
+
+    A store no host has announced has no links and is never queried for them.
+    """
+    _INDEXES.setdefault(_records_runtime(runtime), _Index()).current = False
+
+
 def link_for_endpoint(runtime, platform, account, participant):
     """The link this physical endpoint is a member of.
 
-    The record is decoded once per stored value. An endpoint in no link never
-    depends on the record being readable; a known member stays closed while it is not.
+    The record is read after the host announced it or wrote it; in between a
+    lookup costs no query. An endpoint in no link never depends on the record
+    being readable; a known member stays closed while it is not.
     """
-    source = _RECORD_RUNTIMES.get(runtime)
-    runtime = source() if source is not None else runtime
+    runtime = _records_runtime(runtime)
     index = _INDEXES.get(runtime)
     if index is None:
-        index = _INDEXES[runtime] = _Index()
-    try:
-        row = runtime.read_one("SELECT value FROM runtime_metadata WHERE key = ?", (LINKS_KEY,))
-        raw = row["value"] if row else None
-        if raw != index.raw:
-            if raw == index.rejected:
-                raise ValueError("the stored conversation links are malformed")
-            index.rejected = raw
-            members = {}
-            for record in (json.loads(raw) if raw else {}).values():
-                link = _Link(record)
-                members.update(dict.fromkeys(link.endpoints, link))
-            index.raw, index.members = raw, members
-        readable = True
-    except Exception:  # noqa: BLE001 - any unreadable record keeps only its last known members closed
-        readable = False
+        return None
+    if not index.current:
+        try:
+            index.load(runtime)
+        except Exception:  # noqa: BLE001 - any unreadable record keeps only its last known members closed
+            pass
     link = index.members.get((platform, account, participant))
-    if link is not None and not readable:
+    if link is not None and not index.current:
         from companion_v2.execution.models import TaskError
         raise TaskError("conversation_link_unavailable", "the linked conversation's ownership cannot be established")
     return link

@@ -17,7 +17,8 @@ from companion_v2.relationships.private_access import (DEFAULT_FOR_CAPABILITY, R
 from companion_v2.storage.codec import scope_values
 from companion_v2.adapters.astrbot.native import native_user_subject_id
 from .group_settings import GroupTarget
-from companion_v2.conversation.linked_ownership import link_for_endpoint, PRIVATE_HOST_ID
+from companion_v2.conversation.linked_ownership import (LINKS_KEY, PRIVATE_HOST_ID, link_records_changed,
+                                                         link_for_endpoint)
 
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,7 @@ DELIVERY = "message.delivery"
 class MultiAuthority:
     def __init__(self, runtime, settings, *, now, platform_name=None):
         self.runtime, self.settings, self.now = runtime, settings, now
+        link_records_changed(runtime)  # this host manages links on this store
         self.platform_name = platform_name
         self.identities, self.personas = PersistentIdentityDirectory(runtime), PersonaDirectory(runtime)
         self.core_target_id = None
@@ -90,6 +92,8 @@ class MultiAuthority:
         with self.runtime.transaction() as connection:
             connection.execute("INSERT INTO runtime_metadata(key, value) VALUES (?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, encode(value)))
+        if key == LINKS_KEY:
+            link_records_changed(self.runtime)
 
     def require_manifest(self, current=None):
         manifest = self.read(MANIFEST)

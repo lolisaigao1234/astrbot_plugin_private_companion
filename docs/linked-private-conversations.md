@@ -98,10 +98,12 @@ Identity and stored owners are shared across a link. Authority is not.
 - The pre-send check re-reads the joined endpoint's own dialogue permission, so a revocation
   made during a turn stops that turn's reply.
 
-The link record is decoded once per stored value. An endpoint in no link is never affected by
-an unreadable or malformed record; an endpoint known to be a member stays closed until the
-record can be read again. Without an explicit link, owner resolution leaves existing addresses
-and stored record forms unchanged.
+Owner lookups use an in-memory index of the link record. It is read when the host that
+manages links opens the store and again whenever that host writes the record, so a lookup
+costs no query and a store without that host is never queried. An endpoint in no link is not
+affected by an unreadable or malformed record; an endpoint known to be a member stays closed
+until the record can be read again. Without an explicit link, owner resolution leaves
+existing addresses, stored record forms and query counts unchanged.
 
 This does **not** yet unify notes, reminders, non-role calendar records, the proactive and
 reminder schedule, proactive contact preferences' legacy fallbacks, or window budget accounts.

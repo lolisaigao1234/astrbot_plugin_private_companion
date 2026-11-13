@@ -11,6 +11,7 @@ from astrbot.core.utils.active_event_registry import active_event_registry
 from astrbot.core.utils.session_lock import session_lock_manager
 
 from companion_v2.adapters.astrbot.native import NativeServedConversation
+from companion_v2.conversation.linked_ownership import link_records_changed
 from companion_v2.execution.models import TaskError, digest
 from companion_v2.foundation.refs import ScopeKind, ScopeRef, SubjectRef, SubjectKind
 from .linked_turn_gate import LinkedTurnGate
@@ -225,6 +226,8 @@ class LinkedConversations:
                     await manager.switch_conversation(row["origin"], cid)
                 return record
         finally:
+            # The committed record, never a rolled-back attempt, is what owners resolve from.
+            link_records_changed(session.runtime)
             self.gate.editing_origins.difference_update(origins)
             self.gate.editing_cids.discard(cid)
             self.management_tasks.discard(management_task)
