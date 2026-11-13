@@ -579,6 +579,7 @@ class ContactLedgerFixture(TelegramAloneFixture):
                 delivery = self.app.proactive._delivery_row(task.task_id)
                 if row is not None and (json.loads(row[0])["decision"] == "skip" or (
                         delivery is not None and delivery["state"] not in ("pending", "dispatched"))):
+                    await self.idle()  # the work has released its background slot
                     return json.loads(row[0])
                 self.assertEqual(self.app.state, "running", self.app.failure_code)
                 await asyncio.sleep(0.05)
@@ -592,6 +593,7 @@ class OneContactLedgerTests(ContactLedgerFixture, unittest.IsolatedAsyncioTestCa
         self.contact_settings(qq["context"], max_contacts_24h=1)
         self.assertEqual([self.deliveries_today(prepared["context"]) for prepared in (qq, telegram)], [(0, 1), (0, 1)])
         self.assertEqual(await self.proactive_text(qq, "thinking of you"), "delivered")
+        await self.idle()
         self.assertEqual([self.deliveries_today(prepared["context"]) for prepared in (qq, telegram)], [(1, 1), (1, 1)])
         for prepared in (telegram, qq):
             context = prepared["context"]
