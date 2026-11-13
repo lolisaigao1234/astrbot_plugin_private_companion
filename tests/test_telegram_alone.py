@@ -317,6 +317,101 @@ class NoQQConfiguredTests(RetiredQQScenario, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.fact(prepared["context"], self.tea), "tea")
 
 
+class RemindersAfterRetirementTests(TelegramAloneFixture, unittest.IsolatedAsyncioTestCase):
+    """Reminders that were set on QQ, and reminders whose destination was QQ."""
+
+    async def test_a_reminder_set_on_qq_arrives_on_telegram_while_the_qq_client_is_disconnected(self):
+        self.assertEqual((await self.link())["status"], "ok")
+        context, occurrence = await self.remind(0, "water the plants", identifier="1")
+        self.qq_disconnect()
+        self.nothing_goes_to_qq_from_here()
+        report = await self.settled(context, occurrence)
+        self.assertEqual(report["delivery"], "delivered", report)
+        self.assertEqual((self.telegram_texts(), self.sent_to_qq()), ([(OWNER, "water the plants")], []))
+
+    async def test_a_reminder_set_on_qq_arrives_on_telegram_with_qq_removed_from_configuration(self):
+        self.assertEqual((await self.link())["status"], "ok")
+        context, occurrence = await self.remind(0, "water the plants", identifier="1")
+        await self.remove_qq_from_configuration()
+        self.sent.clear()
+        report = await self.settled(context, occurrence)
+        self.assertEqual(report["delivery"], "delivered", report)
+        self.assertEqual(self.telegram_texts(), [(OWNER, "water the plants")])
+
+    async def test_a_reminder_set_on_qq_is_revoked_with_it_until_it_is_set_again_from_telegram(self):
+        self.assertEqual((await self.link())["status"], "ok")
+        await self.remind(0, "water the plants", identifier="1")
+        kept = self.reminder_id
+        _, stale = await self.remind(0, "feed the cat", identifier="2")
+        left = self.reminder_id
+        self.assertEqual((await self.link(revision=1, members=["second"]))["status"], "ok")
+        self.nothing_goes_to_qq_from_here()
+        # The records stay the conversation's: Telegram lists both and sets one of them again.
+        _, listed = await self.use_tools(1, [("reminder.list", {})], 3)
+        self.assertEqual({item["reminder_id"] for item in listed[0]["payload"]}, {kept, left})
+        self.reminder_id = kept
+        context, occurrence = await self.reschedule(1, identifier=4, minutes=10)
+        self.sent.clear()
+        report = await self.settled(context, occurrence)
+        self.assertEqual(report["delivery"], "delivered", report)
+        await self.idle()
+        self.assertEqual((self.telegram_texts(), self.sent_to_qq()), ([(OWNER, "water the plants")], []))
+        dispatch = self.app.runtime.read_one("SELECT state, reason FROM agenda_dispatches WHERE occurrence_id = ?",
+                                             (stale,))
+        self.assertEqual((dispatch["state"], dispatch["reason"]), ("blocked", "scope_not_granted"))
+
+
+class PreferredQQUnavailableTests(TelegramAloneFixture, unittest.IsolatedAsyncioTestCase):
+    """The administrator had selected QQ for background text; QQ is then no longer there."""
+
+    async def two_reminders_for_qq(self):
+        self.assertEqual((await self.link(preferred_target_id="first"))["status"], "ok")
+        context, first = await self.remind(1, "first reminder", identifier=1)
+        _, later = await self.remind(1, "later reminder", identifier=2, minutes=30)
+        self.assertEqual((await self.link_view())["background_destination"], "selected")
+        return context, first, later
+
+    async def select_telegram_and_wait_for(self, context, later, **members):
+        chosen = await self.link(revision=1, preferred_target_id="second", **members)
+        self.assertEqual((chosen["status"], chosen["data"]["preferred_target_id"]), ("ok", "second"))
+        self.assertEqual((await self.link_view())["background_destination"], "selected")
+        self.sent.clear()
+        self.assertEqual((await self.settled(context, later, minutes=20))["delivery"], "delivered")
+        await self.idle()
+        # What was not yet dispatched follows the selection; what was already settled is not sent again.
+        self.assertEqual(self.telegram_texts(), [(OWNER, "later reminder")])
+
+    async def test_text_for_a_disconnected_qq_is_left_unsent_and_shown_until_telegram_is_selected(self):
+        context, first, later = await self.two_reminders_for_qq()
+        self.qq_disconnect()
+        self.nothing_goes_to_qq_from_here()
+        self.assertEqual((await self.link_view())["background_destination"], "unavailable")
+        report = await self.settled(context, first)
+        self.assertEqual((report["delivery"], report["reason"]), ("cancelled", "host_account_changed"))
+        self.assertEqual(self.telegram_texts(), [])
+        await self.select_telegram_and_wait_for(context, later)
+        self.qq_connect()
+        await self.idle()
+        self.assertEqual(self.status(context, first)["delivery"], "cancelled")
+        self.assertEqual(self.sent_to_qq(), [])
+
+    async def test_text_for_a_qq_removed_from_configuration_is_left_unsent_and_shown_until_telegram_is_selected(self):
+        context, first, later = await self.two_reminders_for_qq()
+        await self.remove_qq_from_configuration()
+        self.sent.clear()
+        self.assertEqual((await self.link_view())["background_destination"], "missing")
+        report = await self.settled(context, first)
+        self.assertEqual((report["delivery"], report["reason"]), ("cancelled", "delivery_destination_missing"))
+        self.assertEqual(self.telegram_texts(), [])
+        await self.new_process()
+        self.assertEqual((await self.link_view())["background_destination"], "missing")
+        # A member list can only name configured targets, so this edit also takes QQ out of the link.
+        refused = await self.link(revision=1, preferred_target_id="second")
+        self.assertEqual((refused["status"], refused["data"]["code"]), ("error", "host_target_unavailable"))
+        await self.select_telegram_and_wait_for(context, later, members=["second"])
+        self.assertEqual(self.status(context, first)["delivery"], "cancelled")
+
+
 class LinkedMappingSaveTests(TelegramAloneFixture, unittest.IsolatedAsyncioTestCase):
     async def test_saving_the_unchanged_account_mapping_of_a_linked_conversation_restarts_the_host(self):
         self.assertEqual((await self.link())["status"], "ok")

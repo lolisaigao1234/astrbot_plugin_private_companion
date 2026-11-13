@@ -65,9 +65,22 @@ class LinkedConversations:
 
     def view(self):
         """The stored links, each saying whether its reminders and proactive text have a destination now."""
-        return {link_id: {**link, "background_destination": "selected" if any(
-                    row["target_id"] == preferred_target_id(link) for row in link["members"]) else "missing"}
+        return {link_id: {**link, "background_destination": self.destination_state(link)}
                 for link_id, link in self.records().items()}
+
+    def destination_state(self, link):
+        """``selected``, or why text that comes due now would be left unsent.
+
+        ``missing``: the named target is no member, or is no longer configured.
+        ``unavailable``: it is both, and its account is not connected at the moment.
+        """
+        member = next((row for row in link["members"] if row["target_id"] == preferred_target_id(link)), None)
+        if member is None or self.session.settings.private_target(
+                member["platform_id"], member["account_id"], member["participant_id"]) is None:
+            return "missing"
+        bridge = self.session.bridge
+        account = bridge.accounts.get((member["platform_id"], member["account_id"]))
+        return "selected" if account is not None and bridge.account_connected(account) else "unavailable"
 
     def for_origin(self, umo):
         if umo not in self.gate.linked_origins:
