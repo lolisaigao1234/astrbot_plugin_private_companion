@@ -72,7 +72,7 @@ class LinkedConversations:
         """``selected``, or why text that comes due now would be left unsent.
 
         ``missing``: the named target is no member, or is no longer configured.
-        ``unavailable``: it is both, and its account is not connected at the moment.
+        ``unavailable``: a configured member whose account is not connected at the moment.
         """
         member = next((row for row in link["members"] if row["target_id"] == preferred_target_id(link)), None)
         if member is None or self.session.settings.private_target(
