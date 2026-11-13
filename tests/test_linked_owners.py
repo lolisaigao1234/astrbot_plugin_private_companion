@@ -330,6 +330,63 @@ class LinkedOwnerTests(LinkedReplyFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual((self.allowed(again, read), self.allowed(again, "memory.read")), (False, True))
         self.assertTrue(self.allowed((await self.turn(0, "The anchor", "rejoin-a-again"))["context"], "memory.read"))
 
+    async def rejoined_after_a_refusal_made_on_its_own(self, refuse, held=lambda context: None):
+        """Member, removed, admitted on its own, refuses something there, linked again."""
+        self.assertEqual((await self.link())["status"], "ok")
+        linked = (await self.turn(1, "A member", "refused-own-member"))["context"]
+        held(linked)
+        self.assertEqual((await self.link(revision=1, members=["first"]))["status"], "ok")
+        self.assertEqual((await self.link(revision=2, members=["first"],
+                                          independent_target_ids=["second"]))["status"], "ok")
+        own = (await self.turn(1, "On my own", "refused-own-independent"))["context"]
+        self.assertNotEqual(own.scope, linked.scope)
+        refuse(own)
+        self.assertEqual((await self.link(revision=3))["status"], "ok")
+        again = (await self.turn(1, "A member again", "refused-own-again"))["context"]
+        self.assertEqual(again.scope, linked.scope)
+        return again
+
+    async def test_a_consent_withdrawn_on_its_own_is_not_restored_by_rejoining(self):
+        from astrbot_host.image_access import IMAGE_EXTENSION
+        from companion_v2.capabilities.models import CapabilityAuthorizationState
+        from companion_v2.capabilities.repositories import CapabilityRepository
+        repository = CapabilityRepository(self.app.runtime)
+
+        def consent(context):
+            return repository.authorize(extension_id=IMAGE_EXTENSION, capability_id="image.generate",
+                                        subject=context.actor.subject, scope=context.scope).is_success
+
+        def withdraw(context):
+            self.assertTrue(consent(context))
+            current = require(repository.consent(extension_id=IMAGE_EXTENSION, capability_id="image.generate",
+                                                 subject=context.actor.subject, scope=context.scope))
+            require(repository.set_authorization(extension_id=IMAGE_EXTENSION, capability_id="image.generate",
+                subject=context.actor.subject, scope=context.scope, state=CapabilityAuthorizationState.REVOKED,
+                expected_revision=current.revision, observed_at=self.clock.now()))
+        again = await self.rejoined_after_a_refusal_made_on_its_own(withdraw)
+        self.assertFalse(consent(again))
+        self.assertFalse(consent((await self.turn(1, "And on the next turn", "refused-own-later"))["context"]))
+        self.assertTrue(consent((await self.turn(0, "The anchor", "refused-own-anchor"))["context"]))
+
+    async def test_a_grant_revoked_on_its_own_is_not_restored_by_rejoining(self):
+        from companion_v2.identity_policy.models import AuthorizationTier
+        directory = self.controller.authority.identities
+
+        def consent(context):
+            directory.issue_grant(grant_id="consent-" + context.key, subject=context.actor.subject,
+                scope=context.scope, capability="proactive.contact", tier=AuthorizationTier.STANDARD,
+                valid_from=self.clock.now(), expected_revision=directory.revision)
+            self.assertTrue(self.allowed(context, "proactive.contact"))
+
+        def refuse(context):
+            consent(context)
+            self.revoke(context, "proactive.contact")
+        again = await self.rejoined_after_a_refusal_made_on_its_own(refuse, held=consent)
+        self.assertEqual((self.allowed(again, "proactive.contact"), self.allowed(again, "conversation.reply")),
+                         (False, True))
+        later = (await self.turn(1, "And on the next turn", "refused-own-later"))["context"]
+        self.assertFalse(self.allowed(later, "proactive.contact"))
+
     async def test_a_later_shared_setting_change_moves_only_the_grants_of_the_endpoint_that_made_it(self):
         self.assertEqual((await self.link())["status"], "ok")
         first = (await self.turn(0, "Growth preferences", "later-setting-a"))["context"]

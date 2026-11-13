@@ -500,12 +500,15 @@ class MultiAuthority:
                 if access.is_success else None,
                 next((family for family in SETTINGS_GRANT_FAMILIES
                       if any(grant.grant_id.startswith(family) for grant in grants)), ""))
-        return decisions, self.runtime.read_all(
-            """SELECT extension_id, capability_id, state FROM capability_authorizations
+        return decisions, self._consents(own.subject, previous)
+
+    def _consents(self, subject, scope):
+        return self.runtime.read_all(
+            """SELECT extension_id, capability_id, state, revision FROM capability_authorizations
                WHERE subject_kind = ? AND subject_id = ? AND installation_id = ? AND platform = ?
                AND scope_kind = ? AND native_scope_id = ? AND bot_id = ? AND account_id = ?
                AND conversation_id = ? AND session_id = ?""",
-            (own.subject.kind.value, own.subject.subject_id, *scope_values(previous)))
+            (subject.kind.value, subject.subject_id, *scope_values(scope)))
 
     def _carry_decisions(self, context, own, at):
         """Joining a conversation gives an endpoint a new scope, not new permissions.
@@ -545,13 +548,20 @@ class MultiAuthority:
             if grant is None:
                 self.identities.revoke_grant(identifier, revoked_at=self.now(),
                                              expected_revision=self.identities.revision)
-        from companion_v2.capabilities.models import CapabilityAuthorizationState
+        from companion_v2.capabilities.models import CapabilityAuthorizationState as Consent
         from companion_v2.capabilities.repositories import CapabilityRepository
-        for row in consents:
-            # A consent already decided on the linked scope refuses this write and stands.
-            CapabilityRepository(self.runtime).set_authorization(
-                extension_id=row["extension_id"], capability_id=row["capability_id"], subject=subject, scope=scope,
-                state=CapabilityAuthorizationState(row["state"]), expected_revision=0, observed_at=self.now())
+        own = {(row["extension_id"], row["capability_id"]): Consent(row["state"]) for row in consents}
+        linked = {(row["extension_id"], row["capability_id"]): row for row in self._consents(subject, scope)}
+        for key in sorted({*own, *linked}):
+            state, earlier = own.get(key, Consent.REVOKED), linked.get(key)
+            if earlier is not None and (earlier["state"] != Consent.ACTIVE.value or state is Consent.ACTIVE):
+                continue  # a consent decided on the linked scope stands, unless it allows what its own does not
+            written = CapabilityRepository(self.runtime).set_authorization(
+                extension_id=key[0], capability_id=key[1], subject=subject, scope=scope, state=state,
+                expected_revision=earlier["revision"] if earlier is not None else 0, observed_at=self.now())
+            if earlier is not None:
+                # It was a member before: a consent it lacks on its own must not stay allowed.
+                require(written)
 
     def _grant_core_admin(self, context, scope):
         """Keep the Dashboard-confirmed administrator window actually administrative.
