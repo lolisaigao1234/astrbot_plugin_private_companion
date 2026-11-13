@@ -131,10 +131,21 @@ formats, splits and sends, and AstrBot's whitelist still decides which chats rea
   current running application and client) run together with the link's revision and membership:
   on arrival, before tools and before each send. A private topic in the linked chat shares the
   chat's origin and is refused, as is a message from a stopped or replaced application.
-- Linking does not widen the tools of the Telegram endpoint. The companion offers it only
-  `turn.evidence`, as on an unlinked Telegram endpoint; QQ-only actions are not offered. AstrBot's
-  own tools stay as AstrBot offers them for that chat, and its `send_message_to_user` remains
-  limited to the chat the message arrived on. Further text tools belong to #5.
+- Telegram uses the existing authorized text services: memory, notes/reminders, calendar,
+  growth/relationship proposals, timeline/source reads, configured weather/news and text diagnostics.
+  The same catalogue applies to independent Telegram chats, subject to each endpoint's grants
+  and service configuration. QQ poke, QZone, status, media and merged forwards are excluded.
+  AstrBot's own tools stay as AstrBot offers them for that chat, and its `send_message_to_user`
+  remains limited to the chat the message arrived on.
+- Deterministic calendar commands authenticate the Telegram message and send their text receipts
+  through AstrBot's session transport. A replaced client invalidates a pending receipt.
+- Receiver text replies become separate governed sources, available from `turn.evidence` and
+  `source.read`, and remain separate from the human's current text in native history. Whole and
+  partial quotes retain the physical account/chat/message/sender and original time. Bot attribution
+  uses the connected bot's numeric ID. The local snapshot budget is 8000 characters, with an
+  explicit truncation flag; it is not a Telegram transport limit. Nested, remote and inaccessible
+  messages supply no additional source or history access. Existing AstrBot quote understanding
+  and Telegram text splitting/formatting stay in AstrBot.
 - A Telegram send that raises is recorded as `unknown` and is not sent again on either channel.
   AstrBot has stored the reply in the shared history by then, as it does on QQ.
 - Either channel can be disconnected or removed. The other keeps the conversation, including
@@ -206,9 +217,9 @@ chats and chats that are not companion targets keep AstrBot's own replies.
   across a process restart remains deferred per the owner's priorities.
 - Send exceptions retain existing unknown-outcome accounting. There is no automatic replay.
 - On a joining endpoint the open-item section is available but lists that endpoint's own
-  notes: notes and reminders are not shared yet (#5, #6).
-- Further Telegram text tools (#5), coherent controls (#7), cross-endpoint stop, preferred
-  background delivery (#6) and operational recovery remain work.
+  notes: notes, reminders, non-role calendar records and the growth list are not shared yet (#5, #6).
+- Coherent controls (#7), cross-endpoint stop, preferred background delivery (#6) and
+  operational recovery remain work.
 
 ## Offline proof
 

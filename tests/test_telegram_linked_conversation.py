@@ -189,7 +189,10 @@ class TelegramLinkedConversationTests(LinkedTelegramFixture, unittest.IsolatedAs
         (_, unlinked, _), (origin, linked, prompt), (_, qq, _) = self.requests
         self.assertEqual(origin, TELEGRAM)
         self.assertEqual(linked, unlinked)
-        self.assertEqual([name for name in linked if name.startswith("companion_v2_")], ["companion_v2_turn_evidence"])
+        for action in ("turn_evidence", "source_read", "calendar_query", "conversation_news_lookup"):
+            self.assertIn("companion_v2_" + action, linked)
+        for unsupported in ("poke", "qzone", "image", "voice", "relay", "reaction", "camera"):
+            self.assertFalse(any(unsupported in name for name in linked), (unsupported, linked))
         self.assertIn("companion_v2_interaction_poke", qq)
         for unsupported in ("interaction.poke", "qzone", "relay"):
             self.assertNotIn(unsupported, prompt.lower())

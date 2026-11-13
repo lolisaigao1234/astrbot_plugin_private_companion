@@ -178,7 +178,11 @@ class TelegramPrivateReplyTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         agent = await run_pipeline(self, event, tool=True)
         self.assertEqual(len(agent.calls), 2)
         self.assertEqual(agent.tool_results[0]["state"], "succeeded")
-        self.assertEqual(agent.requests[0].func_tool.names(), ["companion_v2_turn_evidence"])
+        names = agent.requests[0].func_tool.names()
+        for action in ("turn_evidence", "source_read", "conversation_news_lookup"):
+            self.assertIn("companion_v2_" + action, names)
+        for unsupported in ("poke", "qzone", "image", "voice", "relay", "reaction", "camera"):
+            self.assertFalse(any(unsupported in name for name in names), (unsupported, names))
         self.assertNotIn("interaction.poke", agent.requests[0].system_prompt)
         self.assertNotIn("qzone", agent.requests[0].system_prompt.lower())
         sent = self.platform.client.send_message.await_args.kwargs

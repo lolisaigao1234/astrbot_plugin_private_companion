@@ -37,6 +37,17 @@ MEMORY_READ_ACTIONS = frozenset({
     "memory.query", "memory.legacy.query", "memory.sources", "memory.operation.get", "memory.query.status",
 })
 GROUP_READ_ACTIONS = frozenset({"group.memory.query", "group.memory.legacy.query", "group.memory.operation"})
+TELEGRAM_TEXT_ACTIONS = frozenset({
+    "turn.evidence", "source.read",
+    "memo.create", "memo.read", "memo.list", "memo.edit", "memo.complete", "memo.reopen", "memo.pin", "memo.unpin", "memo.delete",
+    "reminder.create", "reminder.read", "reminder.list", "reminder.cancel", "reminder.reschedule", "operation.lookup",
+    "memory.query", "memory.legacy.query", "memory.sources", "memory.proposal.submit", "memory.operation.get",
+    "memory.forget", "memory.query.status", "memory.experience.save",
+    "calendar.query", "calendar.command", "role.growth.list", "role.growth.propose", "role.growth.revise",
+    "relationship.memory.propose", "role.timeline.query", "weather.current", "conversation.news.lookup",
+    "diagnostics.explain", "diagnostics.inspect", "diagnostics.propose", "diagnostics.proposal.read",
+    "diagnostics.proposal.confirm", "diagnostics.proposal.cancel",
+})
 
 # Stable window-level manifests.  The order is part of the cached tool prefix:
 # append new actions at the end and bump TOOL_MANIFEST_VERSION when the schema
@@ -231,10 +242,6 @@ class CoreReplyToolSession:
         app, context = self.application, self.context
         app.require_running()
         tools = app.tools
-        if self.text_only:
-            # Other native capabilities need their own channel contract before
-            # they can be advertised on the private-text endpoint.
-            return (_OfferedTool(EVIDENCE_SPEC, "evidence"),)
         offered = []
         if context.scope.kind is ScopeKind.PRIVATE:
             for spec in tools.catalog:
@@ -286,25 +293,26 @@ class CoreReplyToolSession:
             if group is not None:
                 offered.extend(_OfferedTool(spec, "group") for spec in group.catalog_for(context))
         acquaintance = getattr(tools, "acquaintance", None)
-        if acquaintance is not None:
+        if acquaintance is not None and not self.text_only:
             offered.extend(_OfferedTool(spec, "acquaintance") for spec in acquaintance.catalog_for(context))
         weather = getattr(tools, "weather", None)
         if weather is not None:
             offered.extend(_OfferedTool(spec, "weather") for spec in weather.catalog_for(context))
         semantic = getattr(tools, "semantic", None)
         if semantic is not None:
-            try:
-                semantic_tools = tuple(semantic.catalog_for(context, self.turn_id, mount_stable=True))
-            except Exception as error:
-                logger.warning("[CompanionV2] 语义工具目录暂不可用，继续挂载其他能力 error_type=%s",
-                               type(error).__name__)
-            else:
-                offered.extend(_OfferedTool(spec, "semantic") for spec in semantic_tools)
+            if not self.text_only:
+                try:
+                    semantic_tools = tuple(semantic.catalog_for(context, self.turn_id, mount_stable=True))
+                except Exception as error:
+                    logger.warning("[CompanionV2] 语义工具目录暂不可用，继续挂载其他能力 error_type=%s",
+                                   type(error).__name__)
+                else:
+                    offered.extend(_OfferedTool(spec, "semantic") for spec in semantic_tools)
             news = getattr(semantic, "news_context", None)
             if news is not None:
                 offered.extend(_OfferedTool(spec, "news") for spec in news.catalog_for(context))
         external = getattr(tools, "external", None)
-        if external is not None:
+        if external is not None and not self.text_only:
             native_tools = tuple(spec for spec in external.catalog_for(context) if supports_native_external(spec.action))
             offered.extend(_OfferedTool(spec, "external") for spec in native_tools)
             authoring = getattr(tools, "authoring", None)
@@ -312,7 +320,9 @@ class CoreReplyToolSession:
                 offered.extend(_OfferedTool(spec, "authoring") for spec in authoring.catalog_for(
                     context, (spec.action for spec in native_tools)))
         offered.append(_OfferedTool(EVIDENCE_SPEC, "evidence"))
-        if context.scope.kind in (ScopeKind.GROUP, ScopeKind.PRIVATE):
+        if self.text_only:
+            return tuple(item for item in offered if item.spec.action in TELEGRAM_TEXT_ACTIONS)
+        if not self.text_only and context.scope.kind in (ScopeKind.GROUP, ScopeKind.PRIVATE):
             offered.append(_OfferedTool(POKE_SPEC, "interaction"))
         if self.context.scope.kind is ScopeKind.GROUP and self.group_tool_profile in ("lean", "standard"):
             allow_camera = is_core(self.application.runtime, self.context.actor)
@@ -620,6 +630,10 @@ class CoreReplyToolSession:
                 call_id = native_call_id(wrapper, action, arguments)
                 if offered.owner in ("calendar", "growth", "relationships", "group"):
                     await self.wait_source()
+                if self.text_only:
+                    # Source observation may have awaited another task. Fence the
+                    # physical endpoint and link again before the SQLite effect.
+                    await self.authorize(wrapper)
                 result = executor_for(self.application).local(self, call_id, action, arguments,
                     lambda identifier: self._command(offered.owner, action, arguments, call_id, identifier))
             else:
@@ -751,10 +765,27 @@ def inject_core_reply_tools(event, req, *, application):
         # same declaration order no matter how the host registered its tools.
         req.func_tool = ToolSet(tools=sorted([*existing, *appended], key=lambda tool: tool.name))
         current = getattr(req, "system_prompt", "") or ""
-        instruction = ("本轮只提供文字回复；turn.evidence 读取当前已认证发言的证据句柄。"
+        instruction = ("本轮只提供文字回复；按本轮目录使用已授权的文字工具。\n"
+                       + TOOL_INSTRUCTION.partition("\n对方接受")[0]
                        if session.text_only else TOOL_INSTRUCTION)
         if instruction not in current:
             req.system_prompt = (current.rstrip() + "\n\n" + instruction).lstrip()
+        if session.text_only:
+            from companion_v2.conversation.quotes.models import INSTRUCTION as QUOTE_INSTRUCTION
+            from companion_v2.conversation.agenda_tools import CONTINUATION_INSTRUCTION
+            from companion_v2.agenda.weather_tools import INSTRUCTION as WEATHER_INSTRUCTION
+            instructions = [QUOTE_INSTRUCTION]
+            owners = {item.owner for item in offered}
+            if "agenda" in owners:
+                instructions.append(CONTINUATION_INSTRUCTION)
+            if "weather" in owners:
+                instructions.append(WEATHER_INSTRUCTION)
+            for owner in ("memory", "calendar", "growth", "relationships", "timeline"):
+                if owner in owners:
+                    instructions.append(getattr(getattr(application.tools, owner, None), "instruction", ""))
+            for text in instructions:
+                if text and text not in req.system_prompt:
+                    req.system_prompt += "\n\n" + text
         if (session.group_tool_profile == "lean" and session.context.scope.kind is ScopeKind.GROUP
                 and LEAN_GROUP_INSTRUCTION not in req.system_prompt):
             req.system_prompt = (req.system_prompt.rstrip() + "\n\n" + LEAN_GROUP_INSTRUCTION).lstrip()

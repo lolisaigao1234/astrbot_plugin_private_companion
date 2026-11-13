@@ -243,9 +243,13 @@ class MultiPrivateBridge(NativePrivateBridge):
                     if _is_sticker_segment(segment):
                         pieces.append("[表情包]")
             text = "".join(pieces)
+            quotes = ()
+            if meta.name == "telegram":
+                from companion_v2.adapters.astrbot.telegram import text_quote
+                quotes = text_quote(event)
             return Outcome.success(NativeConversationInput(
                 event_id, principal, ConversationRoute(scope, user=actor.subject), recipients,
-                text, at, role, instruction,
+                text, at, role, instruction, quotes=quotes,
                 source_endpoint=source_endpoint, conversation=conversation,
             ))
         except TaskError as error:
@@ -1535,13 +1539,19 @@ class MultiHostSession:
 
         async with self._intake[target.target_id]:
             self.application.require_running()
-            captured = require(await self.bridge.capture(event))
+            # Text commands use the same authenticated physical route and served
+            # conversation as an ordinary Telegram turn, without a reply batch.
+            capture = (self.bridge.capture_core_reply if event.platform_meta.name == "telegram"
+                       else self.bridge.capture)
+            captured = require(await capture(event))
             if (captured.route.scope.kind is not ScopeKind.PRIVATE
                     or self.bridge.target_for_scope(captured.route.scope) != target):
                 raise TaskError("host_target_mismatch", "calendar generation requires its configured private target")
             context = self.authority.select(target, captured.route.scope, captured.role)
             if self.application.private_access_gate.denied(context, at=self.now()):
                 raise TaskError("private_access_dialogue_denied", "this private user has no dialogue permission")
+            if event.platform_meta.name == "telegram":
+                self.application.state_maintenance.bind(context, captured.instruction, guard=self.bridge.verify_role)
             binding = self.application.state_maintenance.bindings.get(context.key)
             if binding is None:
                 raise TaskError("planning_role_changed", "original role binding is unavailable")

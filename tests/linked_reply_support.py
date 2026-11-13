@@ -167,6 +167,8 @@ class LinkedReplyFixture(MultiFixture):
         # first endpoint and "reply-B" for the second unless a test supplies its own.
         self.steered, self.replies = self.origins[0], {}
         self.tool_call = None  # (name, arguments) for the "tool" mode; default reads the turn's evidence
+        self.tool_script = []  # synthetic provider's successive tool responses, optionally using prior results
+        self.tool_call_ids = {}
 
         async def text_chat(**args):
             self.calls.append({key: deepcopy(args.get(key)) for key in
@@ -176,6 +178,12 @@ class LinkedReplyFixture(MultiFixture):
                 self.model_done.set()
                 await self.allow_model.wait()
             self.model_rounds[origin] = self.model_rounds.get(origin, 0) + 1
+            step = self.model_rounds[origin] - 1
+            if origin == self.steered and step < len(self.tool_script):
+                response = self.tool_script[step]
+                name, arguments = response(args) if callable(response) else response
+                return LLMResponse(role="assistant", completion_text="", tools_call_ids=[self.tool_call_ids.get(step, f"script-call-{step}")],
+                    tools_call_name=[name], tools_call_args=[deepcopy(arguments)])
             if origin == self.steered and self.model_rounds[origin] == 1:
                 if self.provider_mode == "provider_error":
                     return LLMResponse(role="err", completion_text="synthetic provider error")
@@ -201,7 +209,7 @@ class LinkedReplyFixture(MultiFixture):
                 yield LLMResponse(role="assistant", completion_text="A" if args["session_id"] == self.origins[0] else "B", is_chunk=True)
             yield response
 
-        self.provider = NS(provider_config={"id": "native-model", "modalities": ["text"]},
+        self.provider = NS(provider_config={"id": "native-model", "modalities": ["text", "tool_use"]},
             get_model=lambda: "fixture", text_chat=text_chat, text_chat_stream=text_chat_stream, meta=lambda: NS(type="fixture"))
         async def provider(*_, **__):
             return self.provider
