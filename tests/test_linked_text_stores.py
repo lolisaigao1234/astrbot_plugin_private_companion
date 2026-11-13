@@ -377,9 +377,20 @@ class RemovedMemberRecordTests(LinkedTextStoreFixture, unittest.IsolatedAsyncioT
         with self.assertRaises(TaskError):
             self.app.tools.calendar.calendar.read(removed, "kept-plan")
         self.assertEqual(self.app.tools.growth.catalog_for(removed), ())
+        return memo_id, growth_id
 
     async def test_records_made_by_the_joined_endpoint_stay_usable_after_it_is_removed(self):
-        await self.records_of_a_member_removed_afterwards(made_on=1)
+        memo_id, growth_id = await self.records_of_a_member_removed_afterwards(made_on=1)
+        # Also once the endpoint that made them has been admitted to a conversation of its own.
+        self.assertEqual((await self.link(revision=2, members=["first"],
+                                          independent_target_ids=["second"]))["status"], "ok")
+        event, results = await self.run_tools(0, [("memo.read", {"memo_id": memo_id}),
+            ("memo.edit", {"memo_id": memo_id, "expected_revision": 2, "changes": {"body": "edited once more"}}),
+            ("reminder.list", {}), ("calendar.query", {}), ("role.growth.list", {})], identifier=4)
+        self.assertEqual(results[1]["payload"]["revision"], 3)
+        self.assertEqual(len(results[2]["payload"]), 2)
+        self.assertEqual([item["id"] for item in results[3]["payload"]["items"]], ["kept-plan"])
+        self.assertEqual([item["growth_id"] for item in results[4]["payload"]["items"]], [growth_id])
 
     async def test_records_made_by_the_endpoint_the_conversation_started_on_stay_usable_after_it_is_removed(self):
         await self.records_of_a_member_removed_afterwards(made_on=0)

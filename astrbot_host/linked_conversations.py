@@ -287,6 +287,10 @@ class LinkedConversations:
                 # An unnamed preference stays what it was, also when that member has
                 # just left: the conversation then has no destination until one is chosen.
                 record["preferred_target_id"] = preferred or preferred_target_id(old or record)
+                # What an admitted endpoint recorded as a member stays the conversation's.
+                former = {row["origin"]: row for row in (old or {}).get("former", []) + released}
+                if former:
+                    record["former"] = list(former.values())
                 # Persist before selection: an interrupted operation remains closed,
                 # rather than allowing an endpoint to continue in a silent fork.
                 with session.runtime.transaction():
