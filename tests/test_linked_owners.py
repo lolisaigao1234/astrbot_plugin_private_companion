@@ -350,6 +350,34 @@ class LinkedOwnerTests(LinkedReplyFixture, unittest.IsolatedAsyncioTestCase):
             first = (await self.turn(0, "Later still", "later-setting-a-off-%d" % attempt))["context"]
             second = (await self.turn(1, "Later still", "later-setting-b-off-%d" % attempt))["context"]
 
+    async def test_reading_the_state_page_of_a_peer_changes_no_grant_after_a_shared_setting_was_saved(self):
+        from astrbot_host.management_identity import dashboard_operator
+        from companion_v2.role_work.state.management import StateManagement
+        self.assertEqual((await self.link())["status"], "ok")
+        first = (await self.turn(0, "State preferences", "state-read-a"))["context"]
+        second = (await self.turn(1, "State preferences again", "state-read-b"))["context"]
+        operator = dashboard_operator(self.app.runtime, "synthetic-admin", at=self.clock.now())
+        watched = ("role.state.read", "role.state.maintain", "platform.typing")
+
+        def held():
+            return [{action: self.allowed(context, action) for action in watched} for context in (first, second)]
+        nothing = dict.fromkeys(watched, False)
+        self.assertEqual(held(), [nothing, nothing])
+        page = StateManagement(self.app, first)
+        before = require(page.status(operator))
+        require(page.command(operator, dict(action="configure", operation_key="shared-state-on",
+            edit_token=before["edit_token"], role_edit_token=before["role_edit_token"],
+            changes={"enabled": True, "typing_enabled": True})))
+        saved = [dict.fromkeys(watched, True), nothing]
+        self.assertEqual(held(), saved)
+        # The peer's page shows the shared setting and is only a read.
+        shown = require(StateManagement(self.app, second).status(operator))
+        self.assertEqual((shown["settings"]["enabled"], shown["settings"]["typing_enabled"]), (True, True))
+        self.assertEqual(held(), saved)
+        for index in (0, 1):
+            await self.turn(index, "Later", "state-read-later-%d" % index)
+        self.assertEqual(held(), saved)
+
     async def test_a_joined_endpoint_keeps_owner_features_on_its_own_window_only(self):
         from companion_v2.identity_policy.object_access import ObjectAccessPolicy
         policy = ObjectAccessPolicy(self.app.runtime)

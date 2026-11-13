@@ -2,6 +2,7 @@
 
 from companion_v2.configuration.models import ApplyMode, ConfigLayer, ConfigTarget, ConfigurationError
 from companion_v2.configuration.registry import FieldDefinition, ValueKind
+from companion_v2.conversation.linked_ownership import link_for_scope
 from companion_v2.execution.models import digest
 from companion_v2.foundation.refs import ScopeKind
 from companion_v2.identity_policy.models import AuthorizationTier, GrantState
@@ -111,9 +112,18 @@ def migrate_presence_to_role(runtime):
     return promote_values_to_role(runtime, fields)
 
 
+def settings_decide_grants(runtime, scope):
+    """Whether a window's settings may issue or revoke its grants without a save.
+
+    Inside a linked conversation the settings are shared and authority is not: a
+    member's grants change only when that member saves a setting itself.
+    """
+    return scope.kind is ScopeKind.PRIVATE and link_for_scope(runtime, scope) is None
+
+
 def ensure_window_presentation_grants(runtime, context, observed_at):
     """Issue missing grants for a private window after role-level presence changes."""
-    if context.scope.kind is not ScopeKind.PRIVATE:
+    if not settings_decide_grants(runtime, context.scope):
         return
     target = target_for(context)
     fields = configuration_fields()
@@ -154,7 +164,7 @@ def ensure_role_state_grants(runtime, context, observed_at):
     private window.  Existing grants and explicit revocations are left
     untouched in either mode.
     """
-    if context.scope.kind is not ScopeKind.PRIVATE:
+    if not settings_decide_grants(runtime, context.scope):
         return
     target = target_for(context)
     fields = configuration_fields()

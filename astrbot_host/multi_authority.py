@@ -59,6 +59,9 @@ class MultiAuthority:
             return None
 
     def _provision_context_grants(self, context):
+        if link_for_scope(self.runtime, context.scope) is not None:
+            # Shared settings issue nothing for a member: its grants are its own saves.
+            return
         from companion_v2.role_work.growth.configuration import (
             GrowthConfigurationOwner, configuration_fields as growth_fields, target_for as growth_target,
         )
@@ -435,8 +438,7 @@ class MultiAuthority:
                             expected_revision=self.identities.revision)
             if core_admin:
                 self._grant_core_admin(context, scope)
-            if own is None:
-                self._provision_context_grants(context)
+            self._provision_context_grants(context)
             from companion_v2.identity_policy.legacy_import import apply_pending_private_authorization
             apply_pending_private_authorization(self.runtime, actor, scope, role.subject_id, self.now())
             self.write(self.context_key(target, role.subject_id), scope.document())
@@ -562,7 +564,6 @@ class MultiAuthority:
 
     def select(self, target, scope, role):
         with self.runtime.transaction():
-            settings_decide = self._own_decisions(target, scope) is None
             self.provision_scope(target, scope, role,
                 core_admin=target.target_id == self.core_target_id)
             key = "host.multi.active:" + target.target_id
@@ -581,12 +582,11 @@ class MultiAuthority:
             ensure_image_access(self.runtime, context, observed_at=self.now())
             from companion_v2.role_work.state.configuration import (
                 ensure_window_presentation_grants, ensure_role_state_grants)
-            if settings_decide:
-                ensure_window_presentation_grants(self.runtime, context, observed_at=self.now())
-                try:
-                    ensure_role_state_grants(self.runtime, context, observed_at=self.now())
-                except Exception:
-                    pass
+            ensure_window_presentation_grants(self.runtime, context, observed_at=self.now())
+            try:
+                ensure_role_state_grants(self.runtime, context, observed_at=self.now())
+            except Exception:
+                pass
             # Provisioning a missing tool grant advances the policy revision.
             # Life and proactive workers must bind the same fresh actor as intake.
             return replace(context, actor=self.actor(target))
