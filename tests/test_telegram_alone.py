@@ -612,6 +612,7 @@ class OneContactLedgerTests(ContactLedgerFixture, unittest.IsolatedAsyncioTestCa
     async def test_the_pause_after_an_attempt_holds_on_every_endpoint_of_the_conversation(self):
         qq, telegram = await self.both_have_spoken(last=1)
         self.assertEqual(await self.proactive_text(qq, "thinking of you"), "delivered")
+        await self.idle()  # the send has released its background slot
         # Telegram's window carries the schedule; the attempt was made from QQ's.
         self.contact_settings(qq["context"], automatic_enabled=True, idle_seconds=1, interval_seconds=600)
         self.clock.advance(timedelta(seconds=30))
@@ -787,7 +788,6 @@ class RejoinFenceTests(TelegramAloneFixture, unittest.IsolatedAsyncioTestCase):
         delivered = self.telegram_texts() if staying == 1 else self.qq_texts()
         self.assertEqual([text for _, text in delivered][-1], "set before leaving")
 
-    async def test_work_of_the_endpoint_the_conversation_started_on_stays_refused_after_it_rejoins(self):
     async def test_work_of_an_endpoint_left_out_when_its_conversation_was_linked_stays_refused_after_it_joins(self):
         _, stale = await self.attempt(0, "before the link", "1")
         captured = stale["context"]
@@ -802,6 +802,7 @@ class RejoinFenceTests(TelegramAloneFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.access(fresh["context"], "memory.read"), "allowed")
         await self.turn(1, "and the other member", 3)
 
+    async def test_work_of_the_endpoint_the_conversation_started_on_stays_refused_after_it_rejoins(self):
         await self.work_captured_before_a_removal_stays_refused_after_rejoining(leaving=0)
 
     async def test_work_of_the_joined_endpoint_stays_refused_after_it_rejoins(self):
