@@ -1560,19 +1560,20 @@ class MultiHostSession:
             if binding is None:
                 raise TaskError("planning_role_changed", "original role binding is unavailable")
             fence = self._command_fence(event, context, "calendar.write")
-            if fence is None:
-                return await self.application.calendar_planning.run(context, binding[1], mode=mode,
-                    slot="manual:" + mode + ":" + captured.event_id, manual=True, refresh=refresh)
-            # The planner's guard is this endpoint's verify_role: it runs the fence
-            # with the endpoint checks immediately before the calendar effect.
-            self.bridge.command_fences[context.scope] = fence
+            if fence is not None:
+                # The planner's guard is this endpoint's verify_role: it runs the fence
+                # with the endpoint checks immediately before the calendar effect.
+                self.bridge.command_fences[context.scope] = fence
             try:
                 return await self.application.calendar_planning.run(context, binding[1], mode=mode,
                     slot="manual:" + mode + ":" + captured.event_id, manual=True, refresh=refresh)
             finally:
-                del self.bridge.command_fences[context.scope]
-                await self.bridge.verify_role(context.scope, context.role_binding, binding[1])
-                fence()  # and once more before the caller sends the receipt
+                if fence is not None:
+                    try:
+                        # The same checks once more, before the caller sends the receipt.
+                        await self.bridge.verify_role(context.scope, context.role_binding, binding[1])
+                    finally:
+                        del self.bridge.command_fences[context.scope]
 
     def _command_fence(self, event, context, action):
         """The link a deterministic command was admitted under, for its later rechecks.

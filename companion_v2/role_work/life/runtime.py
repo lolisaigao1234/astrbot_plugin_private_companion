@@ -57,8 +57,8 @@ class RoleLifeRuntime:
                 self.context = context
         else:
             self.context = context
-        if (not self._members or context.key in self._members
-                or context.scope in shared_scopes(self.runtime, self.context.scope)):
+        if (not self._members or context.key in self._members or context.scope != self.context.scope
+                and context.scope in shared_scopes(self.runtime, self.context.scope)):
             self._members[context.key] = context
         # The Dashboard target and native intake can name the same private route
         # with different conversation IDs.  Keep the first context (and the

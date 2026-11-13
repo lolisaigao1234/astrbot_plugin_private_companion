@@ -495,8 +495,10 @@ class MultiAuthority:
         endpoint had in its own conversation: allowed stays allowed, with its
         expiry, and refused stays refused.
         """
-        scope, subject = context.scope, context.actor.subject
         grants, consents = own or ({}, ())
+        if not grants and not consents:
+            return
+        scope, subject = context.scope, context.actor.subject
         decided = {grant.capability for grant in self.identities.grants_for_subject(subject) if grant.scope == scope}
         for capability, (grant, family) in sorted(grants.items()):
             if capability in decided:
