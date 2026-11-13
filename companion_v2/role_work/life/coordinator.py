@@ -4,6 +4,7 @@ import asyncio
 from datetime import time, timedelta
 from zoneinfo import ZoneInfo
 
+from companion_v2.conversation.linked_ownership import shared_scopes
 from companion_v2.execution.models import TaskError
 from companion_v2.foundation.refs import ScopeKind
 from .configuration import GROUP
@@ -33,6 +34,16 @@ class RoleLifeCoordinator:
         return (s.installation_id, s.platform, s.bot_id, s.account_id, s.native_scope_id,
                 context.role_binding.role.subject_id)
 
+    def same_owner(self, other, context):
+        """One routine per private route; the endpoints of a linked conversation are one route.
+
+        Each piece of work runs under one bound member's own context, so it is
+        authorized by, and attributed to, the physical endpoint that ran it.
+        """
+        return self.route(other) == self.route(context) or (
+            other.scope != context.scope and other.role_binding.role == context.role_binding.role
+            and other.scope in shared_scopes(self.app.runtime, context.scope))
+
     def bind(self, context, role_instruction, *, guard=None):
         if self._closed:
             raise TaskError("life_closed", "routine coordinator is closed")
@@ -45,7 +56,7 @@ class RoleLifeCoordinator:
             for candidate in self.routines.values():
                 if (not getattr(candidate, "_retired", False)
                         and candidate.instruction in (None, role_instruction)
-                        and self.route(candidate.context) == self.route(context)):
+                        and self.same_owner(candidate.context, context)):
                     routine = candidate
                     self.routines[context.key] = candidate
                     break
@@ -53,7 +64,7 @@ class RoleLifeCoordinator:
             routine = self.for_context(context)
         routine.bind(context, role_instruction, guard=guard)
         for other in tuple(self.routines.values()):
-            if other is not routine and other.instruction is not None and self.route(other.context) == self.route(context):
+            if other is not routine and other.instruction is not None and self.same_owner(other.context, context):
                 other.retire()
         return routine
 

@@ -38,7 +38,7 @@ class RealityCameraGuard:
         # is identity-bound and still requires the latest message to name the
         # camera, so a stale or third-party group turn cannot open it.
         if context.scope.kind is not ScopeKind.PRIVATE and not is_core(
-                self.application.runtime, context.actor.subject):
+                self.application.runtime, context.actor):
             raise TaskError("reality_camera_private_required", "camera observations require a private conversation")
         messages = self.application.messages
         from companion_v2.conversation.native_tool_sources import input_row, native_invocation, native_turn

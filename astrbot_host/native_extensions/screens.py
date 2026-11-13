@@ -43,7 +43,7 @@ class ScreenAdopter:
         context = invocation.context
         if context.scope.kind is not ScopeKind.PRIVATE:
             if (context.scope.kind is not ScopeKind.GROUP
-                    or not is_core(self.application.runtime, context.actor.subject)):
+                    or not is_core(self.application.runtime, context.actor)):
                 raise TaskError("screen_scope_denied", "screen capture requires the original private conversation")
             # Core administrators already bypass per-window screen consent in
             # the privacy policy; keep the capture observation-only and audited.

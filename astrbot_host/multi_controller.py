@@ -11,13 +11,14 @@ import traceback
 from uuid import uuid4
 
 from companion_v2.adapters.astrbot.native import (
-    HostPersona, NativePrivateBridge, bounded_native_lookup, event_account_id, event_peer_id,
-    native_client_connected, persona_instruction, platform_client_matches, supported_platform_name,
+    HostPersona, NativePrivateBridge, bounded_native_lookup, event_account_id, event_native_client, event_peer_id,
+    native_client_connected, persona_instruction, platform_client_matches, private_event_supported, supported_platform_name,
 )
 from companion_v2.adapters.astrbot.group import group_event_route
 from companion_v2.adapters.astrbot.provider import provider_fingerprint
 from companion_v2.adapters.astrbot.provider_catalog import TextProviderSettings, assemble_providers
 from companion_v2.execution.models import TaskContext, TaskError, digest, require
+from companion_v2.conversation.linked_ownership import LINKS_KEY, endpoint_removed
 from companion_v2.conversation.pokes import PokePolicy
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.foundation.refs import ScopeKind, SubjectKind, SubjectRef
@@ -80,6 +81,10 @@ class AstrBotMultiController:
         self._storage_profile_root = None
         self._adopting_legacy_profile = False
         self.last_failure = None
+        self._waiting_accounts = {}
+        # Late pick-up belongs to the session this controller started; a Stop ends it.
+        self._late_accounts_task = None
+        self._stops = 0
         self._termination_task = None
         self.poke_policy = PokePolicy()
         try:
@@ -190,18 +195,76 @@ class AstrBotMultiController:
         self.settings.require_ready()
         return self.settings
 
-    def startup_readiness(self):
-        """Return a retryable readiness code until every configured Bot is online."""
-        for account in self._settings().accounts:
+    def _account_states(self, settings=None):
+        """Each configured account's own readiness code; ``None`` means it can be served."""
+        states = {}
+        for account in (settings or self._settings()).accounts:
             platform = self.context.get_platform_inst(account.platform_id)
             if platform is None:
-                return "host_platform_unavailable"
-            meta = platform.meta()
-            if not supported_platform_name(meta.name) or meta.id != account.platform_id:
-                return "host_platform_changed"
-            if not native_client_connected(platform, account.self_id):
-                return "host_account_unavailable"
-        return None
+                code = "host_platform_unavailable"
+            else:
+                meta = platform.meta()
+                code = ("host_platform_changed"
+                        if not supported_platform_name(meta.name) or meta.id != account.platform_id else
+                        None if native_client_connected(platform, account.self_id) else
+                        "host_account_unavailable")
+            states[account] = code
+        return states
+
+    def startup_readiness(self):
+        """Return a retryable readiness code until one configured Bot is online.
+
+        Accounts are independent: the host starts with the ones that are
+        available and picks the others up later. A channel of the wrong kind is
+        a configuration error and refuses the start whatever else is online.
+        """
+        codes = tuple(self._account_states().values())
+        if "host_platform_changed" in codes:
+            return "host_platform_changed"
+        return codes[0] if codes and all(codes) else None
+
+    def _report_waiting_accounts(self):
+        """Log each account once when it becomes unavailable and once when it is back."""
+        waiting = {(account.platform_id, account.self_id): code
+                   for account, code in self._account_states().items() if code}
+        for key in sorted(waiting.keys() - self._waiting_accounts.keys()):
+            logger.warning("[CompanionV2] 账号暂不可用，其余账号照常运行，恢复后自动接入 platform=%s account=%s code=%s",
+                           *key, waiting[key])
+        for key in sorted(self._waiting_accounts.keys() - waiting.keys()):
+            logger.info("[CompanionV2] 账号已恢复并接入 platform=%s account=%s", *key)
+        self._waiting_accounts = waiting
+        return waiting
+
+    async def serve_available_accounts(self):
+        """Run the start-up work of accounts that became available while the host runs.
+
+        Returns whether nothing is left to pick up: every configured account is
+        served and no window's start-up work is left to try again.
+        """
+        async with self._lifecycle_lock:
+            session = self.session
+            if self._terminated or session is None or session.application.state != "running":
+                return True
+            failed = await session.bind_available_targets(late=True)
+            return not self._report_waiting_accounts() and not failed
+
+    async def _serve_late_accounts(self):
+        delay = 0.5
+        while True:
+            try:
+                if await self.serve_available_accounts():
+                    return
+            except Exception as error:
+                logger.warning("[CompanionV2] 账号接入检查失败，稍后重试 code=%s error_type=%s",
+                               getattr(error, "code", "unknown"), type(error).__name__)
+            await asyncio.sleep(delay)
+            delay = min(delay * 1.8, 30.0)
+
+    def _pick_up_late_accounts(self, wanted):
+        if self._late_accounts_task is not None:
+            self._late_accounts_task.cancel()
+        self._late_accounts_task = asyncio.create_task(
+            self._serve_late_accounts(), name="companion:late-accounts") if wanted else None
 
     @property
     def profile_root(self):
@@ -447,10 +510,13 @@ class AstrBotMultiController:
 
     def handles_binding(self, event):
         from .recalls import is_notice_event
-        return (not is_notice_event(event) and is_private_message(event)
+        return (getattr(getattr(event, "platform_meta", None), "name", None) != "telegram"
+                and not is_notice_event(event) and is_private_message(event)
                 and parse_bind_command(message_text(event)).kind != "ignore")
 
     async def receive_binding(self, event):
+        if getattr(getattr(event, "platform_meta", None), "name", None) == "telegram":
+            return {"handled": False}
         request = parse_bind_command(message_text(event))
         if request.kind == "ignore":
             return {"handled": False}
@@ -617,16 +683,16 @@ class AstrBotMultiController:
             persona_snapshot_lookup=self.native_types.persona_snapshot_lookup,
             persona_selection_lookup=self.native_types.persona_selection_lookup)
         conversations = {}
-        for account in settings.accounts:
-            platform = self.context.get_platform_inst(account.platform_id)
-            if platform is None:
-                raise TaskError("host_platform_unavailable",
-                    f"配置的平台实例 {account.platform_id} 不在当前 AstrBot 中；请先在宿主平台设置里恢复它。")
-            client = bridge.platforms.get(account.platform_id, (None, None))[1]
-            if platform.get_client() is not client or not bridge.account_connected(account, client):
-                raise TaskError("host_account_unavailable",
-                    f"配置的 Bot 账号 {account.platform_id}:{account.self_id} 当前未连接 AstrBot；"
-                    "请确认这个账号已登录，再重试初始化。")
+        states = self._account_states(settings)
+        if states and all(states.values()):
+            # Nothing can be served yet. One available account is enough to go on;
+            # the others are skipped here and picked up when they appear.
+            account, code = next(iter(states.items()))
+            raise TaskError(code,
+                f"配置的平台实例 {account.platform_id} 不在当前 AstrBot 中；请先在宿主平台设置里恢复它。"
+                if code == "host_platform_unavailable" else
+                f"配置的 Bot 账号 {account.platform_id}:{account.self_id} 当前未连接 AstrBot；"
+                "请确认这个账号已登录，再重试初始化。")
         for target in (settings.all_targets if include_conversations else ()):
             account = bridge.accounts[(target.platform_id, target.account_id)]
             peer = target.participant_id if hasattr(target, "participant_id") else target.group_id
@@ -930,6 +996,14 @@ class AstrBotMultiController:
             core_target_id = core_target.target_id if core_target is not None else None
             for conversation in conversations.values():
                 target = conversation["target"]
+                if not self.authority.platform_known(target):
+                    continue
+                if (self.authority.conversation_link(target) is not None or endpoint_removed(
+                        self.runtime, target.platform_id, target.account_id, target.participant_id)):
+                    # A link member answers on the conversation's stored scope, which
+                    # start-up selects; its own native scope is not provisioned again.
+                    # An endpoint removed from a link is closed until it is admitted.
+                    continue
                 for role_id in conversation["role_ids"]:
                     role = SubjectRef(self.settings.installation_id, SubjectKind.BOT, role_id)
                     from companion_v2.foundation.refs import ScopeKind, ScopeRef
@@ -957,6 +1031,22 @@ class AstrBotMultiController:
                     logger.warning("[CompanionV2] 映射保存冲突后恢复运行失败 code=%s", recovered.failure.code)
             raise
 
+    def _keep_links_reachable(self, authority, settings):
+        """A mapping save never takes the last configured endpoint away from a linked conversation.
+
+        The conversation is reached only through its endpoints; the link operation
+        refuses to remove the last one for the same reason, with the same code.
+        A stored mapping that did not resolve configures no endpoint, so the
+        corrected one that replaces it takes nothing away.
+        """
+        def configured(mapping, link):
+            return mapping is not None and any(mapping.private_target(
+                row["platform_id"], row["account_id"], row["participant_id"]) is not None for row in link["members"])
+        for link in (authority.read(LINKS_KEY) or {}).values():
+            if configured(self.settings, link) and not configured(settings, link):
+                raise TaskError("conversation_link_last_endpoint", "a linked conversation keeps at least one "
+                    "configured endpoint: link another private endpoint before removing this target")
+
     async def _apply_reviewed_bindings(self, candidate, *, expected_config=None):
         result = None
         settings = None
@@ -974,6 +1064,8 @@ class AstrBotMultiController:
                 save = getattr(self, "save_plugin_config", None)
                 if not callable(save):
                     raise TaskError("account_config_persistence_unavailable", "the host has no plugin configuration writer")
+                if self.authority is not None:
+                    self._keep_links_reachable(self.authority, settings)
             manifest, _ = await self._probe(settings, include_conversations=False,
                                             allow_unavailable_model=True)
             model_issue = manifest.pop("_model_issue", None)
@@ -1035,6 +1127,8 @@ class AstrBotMultiController:
                     if self.runtime is not None:
                         authority = MultiAuthority(self.runtime, settings, now=self.now,
                             platform_name=self._configured_platform_name)
+                        if opened_here:
+                            self._keep_links_reachable(authority, settings)
                         with self.runtime.transaction():
                             authority.initialize(manifest, reviewed=True,
                                                  allow_legacy_staging=adopting_legacy_profile)
@@ -1217,6 +1311,8 @@ class AstrBotMultiController:
                 raise TaskError("host_session_changed", "the initialized host changed before it could resume")
             self._accepting, self.last_failure = True, None
             targets = len(self.settings.all_targets)
+            self._report_waiting_accounts()
+            self._pick_up_late_accounts(True)
         return Outcome.success({"state": "running", "targets": targets, "startup": result.unwrap()})
 
     def _startup_generations(self):
@@ -1239,6 +1335,8 @@ class AstrBotMultiController:
         if not isinstance(event, self.native_types.event) or self.settings is None:
             return None
         try:
+            if not private_event_supported(event):
+                return None
             message, session, meta = event.message_obj, event.session, event.platform_meta
             if getattr(message.type, "value", None) == "GroupMessage":
                 route = group_event_route(event)
@@ -1257,10 +1355,17 @@ class AstrBotMultiController:
                     or event.unified_msg_origin != f"{meta.id}:FriendMessage:{sender}"):
                 return None
             target = self.settings.private_target(meta.id, login, sender)
+            if meta.name == "telegram":
+                from companion_v2.adapters.astrbot.telegram import explicit_target
+                if not explicit_target(self.settings, target):
+                    return None
             platform = self.context.get_platform_inst(meta.id)
             if target is None or platform is None:
                 return None
-            if not platform_client_matches(platform, event.bot):
+            if (meta.name == "telegram" and (platform.meta().name != "telegram"
+                    or platform.meta().id != meta.id or not native_client_connected(platform, login))):
+                return None
+            if not platform_client_matches(platform, event_native_client(event)):
                 return None
             return self.settings.effective_private_target(target)
         except (ValueError, AttributeError, TypeError):
@@ -1621,8 +1726,11 @@ class AstrBotMultiController:
 
     async def stop(self, *, grace_seconds=0.5):
         self._accepting = False
+        # A start-up retry that was scheduled before this Stop must not undo it.
+        self._stops += 1
         async with self._lifecycle_lock:
             self._accepting = False
+            self._pick_up_late_accounts(False)
             try:
                 async with self._control_lock:
                     session = self.session
@@ -1650,6 +1758,11 @@ class AstrBotMultiController:
                 "failure_code": session.application.failure_code if session else None,
                 "failure_detail": session.application.failure_detail if session else None,
                 "targets": self.web_api.target_inventory(), "last_failure": self.last_failure,
+                # Each account's own state; one unavailable account is not the host being down.
+                "accounts": [{"platform_id": account.platform_id, "account_id": account.self_id,
+                              "available": code is None, "code": code}
+                             for account, code in (self._account_states(self.settings).items()
+                                                   if self.settings else ())],
                 # Why the store was or was not opened. ``restore_state.blocking`` is
                 # the startup gate; the detail names the journal and never contains
                 # credentials or snapshot bytes.

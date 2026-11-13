@@ -64,7 +64,7 @@ def group_event_route(event):
     if (getattr(message.type, "value", None) != "GroupMessage"
             or getattr(session.message_type, "value", None) != "GroupMessage"):
         raise TaskError("host_scene_unsupported", "group capture requires a native group event")
-    if not supported_platform_name(meta.name):
+    if meta.name == "telegram" or not supported_platform_name(meta.name):
         raise TaskError("host_route_mismatch", "the native group platform is unsupported")
     sender, login, group = event_peer_id(event), event_account_id(event), event_group_id(event)
     event_id = native_id(message.message_id)
@@ -110,7 +110,7 @@ class NativeGroupBridge(NativePrivateBridge):
         return client
 
     def _connection_current(self, account, client, connection):
-        return (client is self.platforms[account.platform_id][1]
+        return (client is self._pinned(account.platform_id)[1]
                 and self.account_connected(account, client)
                 and self._connection(client, account.self_id) is connection)
 

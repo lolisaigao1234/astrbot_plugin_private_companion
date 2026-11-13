@@ -2,7 +2,7 @@
 
 
 def observe_native_reply_presence(application, prepared, stage):
-    if not isinstance(prepared, dict):
+    if not isinstance(prepared, dict) or prepared.get("platform_name") == "telegram":
         return
     attention = getattr(application, "role_attention", None)
     lease = prepared.get("role_attention")

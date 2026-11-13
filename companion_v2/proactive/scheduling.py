@@ -14,6 +14,7 @@ from companion_v2.agenda.models import AgendaError, AgendaTarget
 from companion_v2.agenda.service import AgendaService
 from companion_v2.conversation.busy_gate import (SettingsReader, busy_context, busy_exempt_source,
                                                 proactive_defer_until, readable_items)
+from companion_v2.conversation.linked_ownership import conversation_link, window_filter
 from companion_v2.conversation.messages import event_from_document
 from companion_v2.execution.models import QUEUED, TaskContext, TaskError, digest, require, stamp
 from companion_v2.foundation.outcome import Outcome
@@ -291,6 +292,63 @@ class ContactSchedule:
                 found.append(datetime.fromisoformat(row["observed_at"]))
         return max(found) if found else None
 
+    def _continues_elsewhere(self, context, latest):
+        """Whether another endpoint of this linked conversation carries its proactive schedule.
+
+        The endpoints of a linked conversation are one proactive schedule. The
+        window the human last used carries it, with that window's own permission
+        and evidence, provided its endpoint can: among the members that are
+        available, hold the permission themselves and whose last turn may still
+        run, the one with the most recent turn. Every other window of the
+        conversation waits.
+        """
+        from companion_v2.conversation.native_turns import latest_scope
+
+        link = conversation_link(self.runtime, context.scope)
+        if link is None or latest is None:
+            return False
+        # Only current members carry the schedule: an endpoint that left the link
+        # never holds it back, whatever it last said.
+        turns = []
+        for endpoint in link.endpoints:
+            scope = link.scope_at(*endpoint)
+            turn = latest if scope == context.scope else latest_scope(self.runtime, scope, conversation=True)
+            if turn is not None:
+                turns.append(((turn["created_at"], turn["batch_id"]), scope, endpoint, turn))
+        turns.sort(key=lambda item: item[0], reverse=True)
+        carrier = next((scope for _, scope, endpoint, turn in turns if self._can_carry(link, endpoint, turn)),
+                       turns[0][1] if turns else context.scope)
+        return carrier != context.scope
+
+    def _can_carry(self, link, endpoint, turn):
+        """The member's own context exists on a connected account and holds the contact permission.
+
+        So does the context its turn was captured with, which is the one the
+        schedule would run from: a turn from before the member was removed stays
+        refused after it rejoins, and the next member carries.
+        """
+        destination = self.contacts.delivery.destination
+        if destination is None:
+            return True
+        try:
+            captured = TaskContext.restore(json.loads(turn["context_json"]))
+            return all(self.tasks.check_context_access(context, action=GROUP, observed_at=self.tasks.now()).is_success
+                       for context in (destination(link, endpoint), captured))
+        except Exception:  # noqa: BLE001 - a member that cannot be resolved cannot carry the schedule
+            return False
+
+    def _last_activity(self, context, event, row):
+        """The idle period starts at the human's last message, on whichever member of a linked conversation."""
+        from companion_v2.conversation.native_turns import latest_scope
+
+        latest = max(event.received_at, datetime.fromisoformat(row["created_at"]))
+        link = conversation_link(self.runtime, context.scope)
+        for endpoint in link.endpoints if link is not None else ():
+            turn = latest_scope(self.runtime, link.scope_at(*endpoint), conversation=True)
+            if turn is not None:
+                latest = max(latest, datetime.fromisoformat(turn["created_at"]))
+        return latest
+
     def _origin(self, context, batch_id, at):
         """Select the origin conversation, moving forward when it was superseded.
 
@@ -306,6 +364,9 @@ class ContactSchedule:
             JOIN conversation_batches b ON b.batch_id = f.batch_id WHERE f.route_key = ?
             ORDER BY f.sequence DESC LIMIT 1""", (context.scope.key,))
         native = latest_scope(self.runtime, context.scope)
+        if self._continues_elsewhere(context, native if native is not None and (
+                row is None or native["observed_at"] >= row["created_at"]) else row):
+            raise TaskError("contact_conversation_changed", "the linked conversation continued on another endpoint")
         fallback_input = False
         if native is not None and (row is None or native["observed_at"] >= row["created_at"]):
             if (native["context_key"] != context.key or native["generation_state"] != "completed"
@@ -394,7 +455,7 @@ class ContactSchedule:
         if not preferences.values["automatic_enabled"]:
             raise TaskError("contact_automatic_disabled", "automatic opportunities are disabled")
         idle = self.rhythm.idle_seconds(preferences)
-        if at < max(event.received_at, datetime.fromisoformat(row["created_at"])) + timedelta(seconds=idle):
+        if at < self._last_activity(context, event, row) + timedelta(seconds=idle):
             raise TaskError("contact_conversation_active", "original conversation has not reached its configured idle time")
         interaction = None
         if ("greeting_event" in origin or "burst_event" in origin or "followup_event" in origin
@@ -486,7 +547,7 @@ class ContactSchedule:
                               next_at=sleep.morning_opened_at)
             return None
         origin, batch, event = self._origin(context, row["batch_id"], at)
-        first = max(event.received_at, datetime.fromisoformat(batch["created_at"])) + timedelta(
+        first = self._last_activity(context, event, batch) + timedelta(
             seconds=self.rhythm.idle_seconds(preferences))
         if at < first:
             self._note_window(context, row, at, "rhythm", "skipped", "idle_period_not_elapsed", next_at=first)
@@ -1277,14 +1338,16 @@ class ContactSchedule:
         This avoids both immediate fallback after a skip and treating silence
         from an unsent draft as another unanswered contact.
         """
+        # An attempt made from any window of a linked conversation reached the same human.
+        windows, window = window_filter(self.runtime, context)
         if include_skips:
-            return self.runtime.read_one("""SELECT 1 FROM execution_tasks WHERE origin_key = ? AND kind = ?
-                AND created_at > ? LIMIT 1""", (context.key, CONTACT_KIND, stamp(at - cooldown))) is not None
-        return self.runtime.read_one("""SELECT 1 FROM execution_tasks t
+            return self.runtime.read_one(f"""SELECT 1 FROM execution_tasks WHERE {windows} AND kind = ?
+                AND created_at > ? LIMIT 1""", (window, CONTACT_KIND, stamp(at - cooldown))) is not None
+        return self.runtime.read_one(f"""SELECT 1 FROM execution_tasks t
             LEFT JOIN proactive_contacts c ON c.task_id = t.task_id
-            WHERE t.origin_key = ? AND t.kind = ? AND t.created_at > ?
+            WHERE t.{windows} AND t.kind = ? AND t.created_at > ?
               AND COALESCE(json_extract(c.record_json, '$.decision'), 'send') != 'skip'
-            LIMIT 1""", (context.key, CONTACT_KIND, stamp(at - cooldown))) is not None
+            LIMIT 1""", (window, CONTACT_KIND, stamp(at - cooldown))) is not None
 
     def _appointment_silence(self, context, preferences, at):
         """True while a voluntary contact is too close to an accepted appointment.
@@ -1572,6 +1635,11 @@ class ContactSchedule:
     def _plan_one(self, row, now):
         """Evaluate one candidate off the write transaction."""
         if self._closed or row["origin_key"] in self._workers:
+            return None
+        context = TaskContext.restore(json.loads(row["context_json"]))
+        if self._continues_elsewhere(context, row):
+            self._note_window(context, row, now, "conversation", "skipped",
+                              "linked_conversation_continues_on_another_endpoint")
             return None
         if self._peek(row, now):
             context = TaskContext.restore(json.loads(row["context_json"]))

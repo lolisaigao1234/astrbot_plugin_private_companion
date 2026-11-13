@@ -32,6 +32,7 @@ from .image_settings import read_image_settings
 from .content import ACTIONS as CONTENT_ACTIONS, ContentConsumer
 from .screens import ACTION as SCREEN_ACTION, ScreenAdopter
 from .reality_camera import ACTION as REALITY_CAMERA_ACTION, RealityCameraConsumer, RealityCameraGuard
+from .request_context import NATIVE_ACTOR
 
 
 TOGETHER_CREATE_ACTION = "together.room.create"
@@ -521,9 +522,11 @@ class NativeExtensionRegistry(AstrBotToolPort):
                             kwargs.update(host_references=image_references.offers, fetch_reference=fetch_reference)
                         elif invocation.descriptor.tool.action == "image.mask_edit":
                             raise TaskError("native_reference_reader_unavailable", "the image provider does not accept host image references")
+                    actor = NATIVE_ACTOR.set(getattr(invocation.context, "actor", None))
                     try:
                         result = await method(json_document(document), **kwargs)
                     finally:
+                        NATIVE_ACTOR.reset(actor)
                         if image_session is not None:
                             image_session.close()
                 return result, guarded

@@ -238,6 +238,7 @@ class StartupRetryTests(unittest.IsolatedAsyncioTestCase):
         plugin = ENTRY.PrivateCompanionV2StagingPlugin.__new__(ENTRY.PrivateCompanionV2StagingPlugin)
         plugin._host_start_task = None
         plugin._session_settings_warm_task = None
+        plugin._qzone_life_publisher = object()
         plugin.staging = NS(
             settings=NS(enabled=True),
             _terminated=False,
@@ -263,6 +264,7 @@ class StartupRetryTests(unittest.IsolatedAsyncioTestCase):
         plugin = ENTRY.PrivateCompanionV2StagingPlugin.__new__(ENTRY.PrivateCompanionV2StagingPlugin)
         plugin._host_start_task = None
         plugin._session_settings_warm_task = None
+        plugin._qzone_life_publisher = object()
         plugin._startup_failure_key = None
         plugin._startup_failure_at = 0.0
         staging = NS(
@@ -285,6 +287,36 @@ class StartupRetryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(staging.start.await_count, 2)
         self.assertIsNone(plugin._startup_failure_key)
+
+    async def test_plugin_leaves_a_waiting_account_to_the_host_once_it_has_started(self):
+        plugin = ENTRY.PrivateCompanionV2StagingPlugin.__new__(ENTRY.PrivateCompanionV2StagingPlugin)
+        plugin._host_start_task = None
+        plugin._session_settings_warm_task = None
+        plugin._qzone_life_publisher = object()
+        plugin._startup_failure_key = None
+        plugin._startup_failure_at = 0.0
+        # No pick-up port at all: the start-up loop only starts the host.
+        staging = NS(
+            settings=NS(enabled=True),
+            _terminated=False,
+            _accepting=False,
+            session=None,
+            startup_readiness=Mock(return_value=None),
+            load_existing=AsyncMock(return_value=Outcome.success({"loaded": True})),
+        )
+
+        async def start():
+            staging._accepting, staging.session = True, NS(application=NS(state="running"))
+            return Outcome.success({"state": "running"})
+        staging.start = AsyncMock(side_effect=start)
+        plugin.staging = staging
+
+        with patch.object(ENTRY, "warm_session_settings", new=AsyncMock()):
+            await plugin.initialize()
+            await plugin.on_companion_platform_loaded()
+
+        self.assertIsNone(plugin._host_start_task)
+        staging.start.assert_awaited_once()
 
 
 if __name__ == "__main__":

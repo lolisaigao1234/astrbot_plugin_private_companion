@@ -9,6 +9,8 @@ from companion_v2.role_work.journal import codec as journal_codec
 from companion_v2.role_work.growth.models import GrowthState
 from companion_v2.storage.models import OperationState
 
+from companion_v2.conversation.linked_ownership import same_conversation
+
 from .pagination import KINDS, TimelineCursors, terms
 from .query import SCAN_LIMIT, candidates, ceilings, position
 
@@ -122,10 +124,10 @@ class RoleTimeline:
 
     def _growth(self, ref, context, at):
         record = self.growth.ledger.revision(ref["identifier"], ref["revision"], owner=self.growth.owner(context))
-        if record.scope != context.scope or record.updated_at > at or stamp(record.updated_at) != ref["occurred_at"]:
+        if not same_conversation(self.runtime, context.scope, record.scope) or record.updated_at > at or stamp(record.updated_at) != ref["occurred_at"]:
             raise TaskError("timeline_record_invalid", "growth record differs from its original scope or time")
         for source in record.sources:
-            if source.scope != context.scope:
+            if not same_conversation(self.runtime, context.scope, source.scope):
                 raise TaskError("timeline_source_scope", "growth source belongs to another private scope")
             require(self.growth.sources.validate_reference_for_audience(source, recipient=context.actor.subject, observed_at=at))
         return {"basis": "subjective_role_growth", "content_form": "historical_version", "kind": record.kind.value,
@@ -145,7 +147,8 @@ class RoleTimeline:
         original = journal_codec.context(json.loads(stored["context_json"]))
         if (receipt.operation_id != ref["identifier"] or receipt.action not in ("save", "delete", "restore")
                 or operation.state is not OperationState.COMPLETED or operation.operation.owner != "role.journal"
-                or operation.operation.scope != context.scope or original.scope != context.scope
+                or not same_conversation(self.runtime, context.scope, operation.operation.scope)
+                or not same_conversation(self.runtime, context.scope, original.scope)
                 or original.key != head.key or head.key.owner != self.life.owner(context)
                 or head.key.kind.value != ref["kind"] or head.revision != ref["revision"]
                 or stamp(head.updated_at) != ref["occurred_at"] or head.updated_at > at

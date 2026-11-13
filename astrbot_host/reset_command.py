@@ -11,6 +11,7 @@ V1 的「全部重置 / 重置插件」在 V2 没有聚合服务。这里把它�
 
 from __future__ import annotations
 
+from companion_v2.conversation.linked_ownership import link_for_scope
 from companion_v2.conversation.reset import ConversationWindow
 from companion_v2.execution.models import TaskError, digest
 from companion_v2.foundation.outcome import Outcome
@@ -64,7 +65,7 @@ async def receive_reset_command(controller, event, *, target=None):
         session = controller.session
         if context.scope.kind is not ScopeKind.PRIVATE:
             return None
-        if not is_core_subject(session.runtime, context.actor.subject):
+        if not is_core_subject(session.runtime, context.actor):
             text = "未执行：全部重置只允许安装核心管理员执行。"
         else:
             text = _decide(command, context, session)
@@ -100,6 +101,15 @@ def _decide(command, context, session):
     if reset.failure is not None:
         return f"未执行：会话窗口重置失败（{_failure_reason(reset.failure)}），记忆没有清理。"
     batches = len(reset.unwrap().get("batches") or ())
+    # One linked conversation: the other endpoints' temporary context ends with it.
+    link = link_for_scope(session.runtime, context.scope) if session.runtime is not None else None
+    for scope in link.windows if link is not None else ():
+        other = ConversationWindow.from_scope(scope)
+        if other != window:
+            linked = application.reset_conversation_window(other, reset_id="chat-reset-" + digest([other.key, token]))
+            if linked.failure is not None:
+                return (f"部分完成：本窗口已重置（取消 {batches} 个批次），但共享对话的另一个窗口没有重置"
+                        f"（{_failure_reason(linked.failure)}），记忆没有清理。")
     cleared = management.clear(context, expected_revision_token=token,
                                operation_key="chat-reset-" + digest([window.key, token]))
     if cleared.failure is not None:

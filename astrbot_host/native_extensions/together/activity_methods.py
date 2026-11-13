@@ -3,6 +3,7 @@ from __future__ import annotations
 from .common import *
 from .native_context import existing_host_conversation
 from .native_transcripts import delivered_output
+from ...linked_turn_gate import linked_history_writer
 
 class TogetherActivityMethods:
 
@@ -362,28 +363,31 @@ class TogetherActivityMethods:
         async with room.conversation_lock:
             try:
                 manager, unified_origin, conversation_id = await self._resolve_astrbot_conversation(room)
-                add_pair = getattr(manager, 'add_message_pair', None) if manager is not None else None
-                if not unified_origin or not conversation_id or (not callable(add_pair)):
-                    logger.debug('[TogetherCompanion] 当前 AstrBot 版本不支持房间对话记录同步')
-                    return False
-                recorded_user_text = str(user_text or '').strip()
-                if visual_context_used:
-                    recorded_user_text = f'【视频通话视觉上下文】本轮回答结合了用户主动开启的实时镜头画面；只同步文字语义，不保存画面。\n用户：{recorded_user_text}'
-                if room.native_v2 is not None:
-                    label = f'【一起房间 · {self._room_activity_label(room)}】\n'
-                    recorded_user_text = label + recorded_user_text if recorded_user_text else ''
-                    bot_text = label + str(bot_text or '').strip()
-                if room.native_v2 is not None and not recorded_user_text:
-                    conversation = await manager.get_conversation(unified_origin, conversation_id, create_if_not_exists=False)
-                    if conversation is None:
+                async with linked_history_writer(conversation_id) as allowed:
+                    if not allowed:
                         return False
-                    history = self._conversation_history_items(conversation)
-                    await manager.update_conversation(unified_origin, conversation_id,
-                        history=[*history, {'role': 'assistant', 'content': str(bot_text or '').strip()}])
-                else:
-                    await add_pair(conversation_id, {'role': 'user', 'content': recorded_user_text}, {'role': 'assistant', 'content': str(bot_text or '').strip()})
-                logger.info('[TogetherCompanion] 已同步 AstrBot 对话记录: room=%s conversation=%s user=%s', room.room_id[:10], conversation_id[:10], room.user_id)
-                return True
+                    add_pair = getattr(manager, 'add_message_pair', None) if manager is not None else None
+                    if not unified_origin or not conversation_id or (not callable(add_pair)):
+                        logger.debug('[TogetherCompanion] 当前 AstrBot 版本不支持房间对话记录同步')
+                        return False
+                    recorded_user_text = str(user_text or '').strip()
+                    if visual_context_used:
+                        recorded_user_text = f'【视频通话视觉上下文】本轮回答结合了用户主动开启的实时镜头画面；只同步文字语义，不保存画面。\n用户：{recorded_user_text}'
+                    if room.native_v2 is not None:
+                        label = f'【一起房间 · {self._room_activity_label(room)}】\n'
+                        recorded_user_text = label + recorded_user_text if recorded_user_text else ''
+                        bot_text = label + str(bot_text or '').strip()
+                    if room.native_v2 is not None and not recorded_user_text:
+                        conversation = await manager.get_conversation(unified_origin, conversation_id, create_if_not_exists=False)
+                        if conversation is None:
+                            return False
+                        history = self._conversation_history_items(conversation)
+                        await manager.update_conversation(unified_origin, conversation_id,
+                            history=[*history, {'role': 'assistant', 'content': str(bot_text or '').strip()}])
+                    else:
+                        await add_pair(conversation_id, {'role': 'user', 'content': recorded_user_text}, {'role': 'assistant', 'content': str(bot_text or '').strip()})
+                    logger.info('[TogetherCompanion] 已同步 AstrBot 对话记录: room=%s conversation=%s user=%s', room.room_id[:10], conversation_id[:10], room.user_id)
+                    return True
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -401,20 +405,23 @@ class TogetherActivityMethods:
         async with room.conversation_lock:
             try:
                 manager, unified_origin, conversation_id = await self._resolve_astrbot_conversation(room)
-                get_conversation = getattr(manager, 'get_conversation', None) if manager is not None else None
-                update_conversation = getattr(manager, 'update_conversation', None) if manager is not None else None
-                if (not unified_origin or not conversation_id
-                        or not callable(get_conversation) or not callable(update_conversation)):
-                    return False
-                conversation = await get_conversation(unified_origin, conversation_id, create_if_not_exists=False)
-                if conversation is None:
-                    return False
-                history = self._conversation_history_items(conversation)
-                await update_conversation(unified_origin, conversation_id,
-                    history=[*history, {'role': 'assistant', 'content': str(bot_text or '').strip()}])
-                logger.info('[TogetherCompanion] 已同步观影评论到 AstrBot 对话记录: room=%s conversation=%s',
-                            room.room_id[:10], conversation_id[:10])
-                return True
+                async with linked_history_writer(conversation_id) as allowed:
+                    if not allowed:
+                        return False
+                    get_conversation = getattr(manager, 'get_conversation', None) if manager is not None else None
+                    update_conversation = getattr(manager, 'update_conversation', None) if manager is not None else None
+                    if (not unified_origin or not conversation_id
+                            or not callable(get_conversation) or not callable(update_conversation)):
+                        return False
+                    conversation = await get_conversation(unified_origin, conversation_id, create_if_not_exists=False)
+                    if conversation is None:
+                        return False
+                    history = self._conversation_history_items(conversation)
+                    await update_conversation(unified_origin, conversation_id,
+                        history=[*history, {'role': 'assistant', 'content': str(bot_text or '').strip()}])
+                    logger.info('[TogetherCompanion] 已同步观影评论到 AstrBot 对话记录: room=%s conversation=%s',
+                                room.room_id[:10], conversation_id[:10])
+                    return True
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

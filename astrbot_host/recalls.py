@@ -6,7 +6,7 @@ import logging
 
 from companion_v2.adapters.astrbot.native import (
     account_number, event_account_id, event_peer_id, native_client_connected,
-    platform_client_matches,
+    platform_client_matches, event_native_client,
 )
 from companion_v2.conversation.quotes.models import message_number
 from companion_v2.conversation.recalls import MessageRecall
@@ -88,6 +88,38 @@ def _lark_private_message_route(controller, event):
                              native_session.session_id, client, platform=platform, platform_name="lark")
 
 
+def _telegram_private_message_route(controller, event):
+    from companion_v2.adapters.astrbot.telegram import explicit_target, private_text_event
+
+    if not private_text_event(event):
+        return None
+    message, meta, native_session = event.message_obj, event.platform_meta, event.session
+    login, sender = event_account_id(event), event_peer_id(event)
+    target = controller.settings.private_target(meta.id, login, sender)
+    if not explicit_target(controller.settings, target):
+        return None
+    bridge = controller.session.bridge
+    account = bridge.accounts.get((meta.id, login))
+    platform, _ = bridge._pinned(meta.id)
+    client = event_native_client(event)
+    if (account is None or account.bot_id != target.bot_id or platform is None
+            or controller.context.get_platform_inst(meta.id) is not platform
+            or platform.meta().id != meta.id or platform.meta().name != "telegram"
+            or not platform_client_matches(platform, client)
+            or not native_client_connected(platform, login, client)
+            or bridge.telegram_bot_ids.get(meta.id) != client.id):
+        raise TaskError("host_recall_account_changed", "message must come from the current connected platform")
+    if (str(message.raw_message.message.message_id) != str(message.message_id)
+            or getattr(message.type, "value", None) != "FriendMessage" or message.group_id
+            or getattr(native_session.message_type, "value", None) != "FriendMessage"
+            or native_session.platform_id != meta.id or native_session.platform_name != meta.id
+            or native_session.session_id != sender
+            or event.unified_msg_origin != f"{meta.id}:FriendMessage:{sender}"):
+        raise TaskError("host_recall_route", "message fields do not identify one original private route")
+    return NativeNoticeRoute(ScopeKind.PRIVATE, meta.id, target.bot_id, login, sender, sender,
+                             native_session.session_id, client, platform=platform, platform_name="telegram")
+
+
 def authenticate_notice_route(controller, event, kind, *, expected_post="notice"):
     session = controller.session
     if (session is None or controller._terminated or session.application.state != "running"
@@ -96,6 +128,8 @@ def authenticate_notice_route(controller, event, kind, *, expected_post="notice"
     message, meta, native_session = event.message_obj, event.platform_meta, event.session
     if meta.name == "lark" and kind is ScopeKind.PRIVATE and expected_post == "message":
         return _lark_private_message_route(controller, event)
+    if meta.name == "telegram" and kind is ScopeKind.PRIVATE and expected_post == "message":
+        return _telegram_private_message_route(controller, event)
     if not has_post_type(event, expected_post):
         return None
     raw = message.raw_message

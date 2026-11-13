@@ -362,6 +362,10 @@ class PrivateCompanionV2StagingPlugin(Star):
 
     def _fold_private_follow_up(self, event, target, event_ref, text):
         """Join a post-debounce message to the first model request when possible."""
+        # Telegram application replacement must not fold a new client's input
+        # into an older turn whose delivery has just been fenced.
+        if getattr(getattr(event, "platform_meta", None), "name", None) == "telegram":
+            return False
         target_key = getattr(target, "target_id", None)
         if not isinstance(target_key, str) or not target_key:
             return False
@@ -581,14 +585,18 @@ class PrivateCompanionV2StagingPlugin(Star):
         task = self._host_start_task
         if task is None or task.done():
             self._host_start_task = asyncio.create_task(
-                self._wait_for_host_start(), name="companion:host-startup")
+                self._wait_for_host_start(self._host_stops()), name="companion:host-startup")
 
-    async def _wait_for_host_start(self) -> None:
+    def _host_stops(self) -> int:
+        return getattr(self.staging, "_stops", 0)
+
+    async def _wait_for_host_start(self, stops: int) -> None:
         loop = asyncio.get_running_loop()
         started_at = loop.time()
         delay = 0.5
         warned = False
-        while not self.staging._terminated:
+        # A Stop since this retry was scheduled ends it: only a later event starts the host.
+        while not self.staging._terminated and stops == self._host_stops():
             try:
                 finished = await self._try_start_host()
             except asyncio.CancelledError:
@@ -1116,6 +1124,12 @@ class PrivateCompanionV2StagingPlugin(Star):
                 getattr(event, "message_str", ""),
                 target=getattr(target, "target_id", ""),
             )
+        # Only the event that survived the duplicate check, follow-up fold and
+        # debounce takes the linked conversation permit, and never waits for a
+        # sibling message while holding it.
+        links = getattr(getattr(self.staging, "session", None), "linked_conversations", None)
+        if links is not None and not await links.admit(self.staging, event):
+            return
         try:
             prepare_kwargs = {"group_admission": group_admission}
             if core_reply_plan is not None:
@@ -1353,6 +1367,54 @@ class PrivateCompanionV2StagingPlugin(Star):
         event.set_extra("selected_provider", match.provider_id)
         logger.info("[CompanionV2] 时段替换对话模型 event_ref=%s provider=%s rule=%s reason=%s",
                     prepared.get("event_ref"), match.provider_id, match.rule_id, match.reason)
+
+    @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE, priority=1000000)
+    async def guard_linked_companion_commands(self, event: AstrMessageEvent):
+        from .astrbot_host.linked_conversations import SESSION_COMMANDS, refuse_unavailable_link
+        if await refuse_unavailable_link(self.staging, event):
+            return
+        session = getattr(self.staging, "session", None)
+        links = getattr(session, "linked_conversations", None)
+        if links is None or (links.for_event(event) is None
+                             and event.unified_msg_origin not in links.gate.editing_origins):
+            return
+        # AstrBot's own session commands and the companion's full reset run under the
+        # conversation permit; the former are then applied to every member. Binding
+        # stays unavailable. Other plugins' commands and AstrBot's /stop are untouched.
+        from .astrbot_host.reset_command import parse_reset_command
+        links.stop_members(event)
+        if (links.native_command(event, SESSION_COMMANDS)
+                or parse_reset_command(str(getattr(event, "message_str", "") or "")) is not None):
+            await links.admit(self.staging, event, control=True)
+            return
+        binding = getattr(self.staging, "handles_binding", None)
+        if callable(binding) and binding(event):
+            event.stop_event()
+            from astrbot.core.message.message_event_result import MessageChain
+            await event.send(MessageChain().message("共享对话暂不支持绑定或解绑指令。"))
+
+    @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE, priority=-1)
+    async def settle_linked_companion_control(self, event: AstrMessageEvent):
+        links = getattr(getattr(self.staging, "session", None), "linked_conversations", None)
+        if links is not None:
+            await links.settle(event)
+
+    @filter.on_llm_request(priority=1000000)
+    async def check_linked_companion_permit(self, event: AstrMessageEvent, req):
+        session = getattr(self.staging, "session", None)
+        links = getattr(session, "linked_conversations", None)
+        if links is not None:
+            await links.tripwire(event, req)
+
+    @filter.on_waiting_llm_request(priority=1000000)
+    async def admit_linked_companion_turn(self, event: AstrMessageEvent):
+        from .astrbot_host.linked_conversations import refuse_unavailable_link
+        if await refuse_unavailable_link(self.staging, event):
+            return
+        session = getattr(self.staging, "session", None)
+        links = getattr(session, "linked_conversations", None)
+        if links is not None:
+            await links.admit(self.staging, event)
 
     @filter.on_waiting_llm_request(priority=-1000000)
     async def observe_companion_core_waiting_llm_request(self, event: AstrMessageEvent):

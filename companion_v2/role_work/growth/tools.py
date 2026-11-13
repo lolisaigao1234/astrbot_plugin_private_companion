@@ -3,6 +3,7 @@
 import json
 
 from companion_v2.execution.models import TaskError, digest, encode, require
+from companion_v2.conversation.linked_ownership import same_conversation
 from companion_v2.foundation.refs import ReferenceValidationError
 from companion_v2.model_gateway.models import ToolSpec
 from companion_v2.storage.models import OperationState
@@ -74,10 +75,11 @@ class RoleGrowthTools:
         return tuple(available)
 
     def _govern(self, record, context, at):
-        if record.owner != self.reader.owner(context) or record.scope != context.scope or record.updated_at > at:
+        if (record.owner != self.reader.owner(context)
+                or not same_conversation(self.runtime, context.scope, record.scope) or record.updated_at > at):
             raise TaskError("growth_record_unavailable", "growth belongs to another role, scope or time")
         for source in record.sources:
-            if source.scope != context.scope:
+            if not same_conversation(self.runtime, context.scope, source.scope):
                 raise TaskError("growth_source_scope", "growth evidence belongs to another private scope")
             require(self.reader.sources.validate_reference_for_audience(source,
                     recipient=context.actor.subject, observed_at=at))
@@ -106,9 +108,9 @@ class RoleGrowthTools:
     def _list(self, context, at, *, limit=5, kind=None, state=None, after_id=None):
         if type(limit) is not int or not 1 <= limit <= 20:
             raise ValueError("growth page must contain 1..20 records")
-        records = self.ledger.for_role(self.reader.owner(context), scope=context.scope, limit=limit + 1,
-            kind=GrowthKind(kind) if kind is not None else None, state=GrowthState(state) if state is not None else None,
-            after_id=after_id)
+        records = self.reader.records_for_conversation(context, limit=limit + 1,
+            kind=GrowthKind(kind) if kind is not None else None,
+            state=GrowthState(state) if state is not None else None, after_id=after_id)
         items, skipped, used, cursor = [], 0, 0, after_id
         for record in records[:limit]:
             try:

@@ -133,7 +133,7 @@ class RelayToolPort:
         from companion_v2.capabilities.privacy import is_core
         actor_id = invocation.context.actor.principal.native_account_id
         return bool(
-            is_core(self._app().runtime, invocation.context.actor.subject)
+            is_core(self._app().runtime, invocation.context.actor)
             or (settings.get("core_target_id") and actor_id == settings.get("core_target_id"))
         )
 

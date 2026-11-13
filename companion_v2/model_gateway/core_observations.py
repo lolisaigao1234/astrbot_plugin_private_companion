@@ -4,6 +4,7 @@ import json
 import re
 
 from companion_v2.execution.models import digest, encode
+from companion_v2.conversation.linked_ownership import link_for_scope
 from companion_v2.storage.core_reply_telemetry_schema import STATEMENTS, TABLE
 from .usage import CORE_CHAIN_KIND, USAGE_FIELDS
 
@@ -94,7 +95,15 @@ def record_observation(runtime, context, record):
 def observations_for_role(runtime, context, *, start=None, end=None, private_only=False):
     if not available(runtime):
         return []
-    where, values = ["role_key = ?"], [role_key(context)]
+    link = link_for_scope(runtime, context.scope)
+    keys = tuple(dict.fromkeys(digest([scope.installation_id, scope.platform, scope.bot_id, scope.account_id,
+                                     context.role_binding.role])
+                               for scope in (link.scopes if link else (context.scope,))))
+    where, values = ["role_key IN (" + ",".join("?" for _ in keys) + ")"], list(keys)
+    if link:
+        # A role key covers a whole account; the shared view is this conversation's own turns.
+        where.append("json_extract(context_json, '$.audience.scope') IN (" + ",".join("json(?)" for _ in link.scopes) + ")")
+        values.extend(encode(scope) for scope in link.scopes)
     if start is not None:
         where.append("julianday(received_at) >= julianday(?)")
         values.append(start)
@@ -109,7 +118,9 @@ def observations_for_role(runtime, context, *, start=None, end=None, private_onl
         try:
             record = json.loads(row["record_json"])
             if type(record) is dict and record.get("version") == 1:
-                result.append({**record, "context_key": row["context_key"], "context_json": row["context_json"]})
+                result.append({**record, "context_key": row["context_key"], "context_json": row["context_json"],
+                               **({"source_channel": json.loads(row["context_json"])["audience"]["scope"]["platform"]}
+                                  if link else {})})
         except (TypeError, ValueError):
             continue
     return result

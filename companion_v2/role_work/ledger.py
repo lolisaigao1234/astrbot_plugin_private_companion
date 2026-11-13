@@ -7,6 +7,7 @@ original source/asset through its current governance before exposing content.
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
 
+from companion_v2.conversation.linked_ownership import shared_scopes
 from companion_v2.execution.models import digest, encode, require, stamp
 from companion_v2.foundation.refs import OperationRef, ReferenceValidationError, RoleOwnerRef, VersionRef
 from companion_v2.storage.models import OperationState
@@ -157,12 +158,14 @@ class PersistentRoleLifeLedger:
         self._page(limit, None)
         if scope.installation_id != owner.installation_id or scope.bot_id != owner.bot_id:
             raise ReferenceValidationError("activity scope crosses its role owner")
-        rows = self.runtime.read_all("""SELECT record_json FROM role_activities
-            WHERE owner_key = ? AND json_extract(record_json, '$.scope') = json(?) AND updated_at <= ?
+        scopes = shared_scopes(self.runtime, scope)
+        rows = self.runtime.read_all(f"""SELECT record_json FROM role_activities
+            WHERE owner_key = ? AND json_extract(record_json, '$.scope') IN ({",".join("json(?)" for _ in scopes)})
+            AND updated_at <= ?
             ORDER BY CASE state WHEN 'active' THEN 0 WHEN 'paused' THEN 1
                 WHEN 'completed' THEN 2 WHEN 'planned' THEN 3 ELSE 4 END,
                 updated_at DESC, activity_id DESC LIMIT ?""",
-            (self._owner_key(owner), encode(scope), stamp(observed_at), limit))
+            (self._owner_key(owner), *(encode(item) for item in scopes), stamp(observed_at), limit))
         return tuple(activity_from_json(row["record_json"]) for row in rows)
 
     def add_artifact(self, artifact: RoleArtifact, *, owner: RoleOwnerRef) -> RoleArtifact:

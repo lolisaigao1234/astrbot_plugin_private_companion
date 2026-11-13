@@ -34,6 +34,8 @@ class AccountSessionWebAPI:
                  "Choose the shared model provider used to initialize the V2 host"),
                 (PREFIX + "/role", self.add_role, ["POST"],
                  "Create a companion role for one connected Bot and selected native personas"),
+                (PREFIX + "/conversation-link", self.link_conversation, ["POST"],
+                 "Explicitly link exact private endpoints to an existing conversation"),
                 (PREFIX + "/window-link", self.link_window, ["POST"],
                  "Merge private windows into a primary window or share their role"),
                 (PREFIX + "/window-unlink", self.unlink_window, ["POST"],
@@ -112,6 +114,8 @@ class AccountSessionWebAPI:
         return {"mode": "multi", "enabled": enabled,
                 "accounts": list(accounts.values()), "personas": personas, "sessions": targets, "groups": groups,
                 "window_links": deepcopy(section.get("window_links", [])),
+                "conversation_links": (controller.session.linked_conversations.view()
+                                       if controller.session is not None else {}),
                 "model": self._model_view()}
 
     async def _discovered(self):
@@ -191,6 +195,19 @@ class AccountSessionWebAPI:
             return self._error("account_config_invalid", "the role could not be validated")
         except OSError:
             return self._error("account_config_save_failed", "the role could not be saved")
+
+    async def link_conversation(self):
+        try:
+            self._admin()
+            body = await self._body()
+            session = self.controller.session
+            if session is None or session.application.state != "running":
+                raise TaskError("host_not_running", "start the companion before linking conversations")
+            return {"status": "ok", "data": await session.linked_conversations.manage(body)}
+        except (TaskError, HostControlError) as error:
+            return self._error(error.code, str(error))
+        except (ValueError, TypeError, KeyError):
+            return self._error("conversation_link_invalid", "the conversation link could not be validated")
 
     async def link_window(self):
         """Merge selected private windows under one primary window."""

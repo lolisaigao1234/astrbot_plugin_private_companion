@@ -20,14 +20,13 @@ def person_owner_key(installation_id, platform, bot_id, account_id, subject_id, 
                    account_id, subject_id, role_id])
 
 
-def owner_key(context):
-    scope = context.scope
-    return person_owner_key(scope.installation_id, scope.platform, scope.bot_id, scope.account_id,
-                            context.actor.subject.subject_id, context.role_binding.role.subject_id)
+def owner_key(context, scope=None):
+    """``scope`` is the conversation owner where it differs from the physical window."""
+    return owner_for_subject(context, context.actor.subject.subject_id, scope)
 
 
-def owner_for_subject(context, subject_id):
-    scope = context.scope
+def owner_for_subject(context, subject_id, scope=None):
+    scope = scope or context.scope
     return person_owner_key(scope.installation_id, scope.platform, scope.bot_id, scope.account_id,
                             subject_id, context.role_binding.role.subject_id)
 

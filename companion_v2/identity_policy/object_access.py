@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from types import MappingProxyType
 
+from companion_v2.conversation.linked_ownership import endpoint_scope, joined_principal
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.foundation.refs import ReferenceValidationError, ScopeKind, ScopeRef, SubjectRef, normalize_utc
 from companion_v2.storage.codec import decode_timestamp, scope_values
@@ -119,6 +120,23 @@ class ObjectAccessDecision:
     tier: AuthorizationTier
     policy_revision: int
     identity_policy_revision: int
+
+
+def access_tier(runtime, actor) -> AuthorizationTier:
+    """The tier a permission decision may use for an authenticated actor (or a bare subject).
+
+    A private link shares the human subject, never its authority: a principal
+    that joined a conversation through a link is always standard.
+    """
+    principal = getattr(actor, "principal", None)
+    if principal is not None and joined_principal(principal):
+        return AuthorizationTier.STANDARD
+    subject = actor if principal is None else actor.subject
+    row = runtime.read_one(
+        "SELECT tier FROM subject_access_tiers WHERE subject_kind = ? AND subject_id = ?",
+        (subject.kind.value, subject.subject_id),
+    )
+    return AuthorizationTier(row["tier"]) if row else AuthorizationTier.STANDARD
 
 
 class ObjectAccessPolicy:
@@ -263,14 +281,15 @@ class ObjectAccessPolicy:
             definition = self.registry.get(action)
             if definition is None:
                 return Outcome.failed("unknown_access_action", "action has no explicit authorization contract")
-            row = self.runtime.read_one(
-                "SELECT tier FROM subject_access_tiers WHERE subject_kind = ? AND subject_id = ?",
-                (actor.subject.kind.value, actor.subject.subject_id),
-            )
-            tier = AuthorizationTier(row["tier"]) if row else AuthorizationTier.STANDARD
+            tier = access_tier(self.runtime, actor)
             if definition.core_only and tier is not AuthorizationTier.CORE:
                 return Outcome.failed("core_access_required", "action requires installation core membership")
-            route = PersonaDirectory(self.runtime).route(scope) if (
+            permission_scope = endpoint_scope(self.runtime, actor.principal, scope)
+            if permission_scope is None:
+                return Outcome.failed("scope_not_granted", "a linked endpoint acts only inside its own conversation")
+            # The owner of a private window has these features without a grant. In a
+            # linked conversation that standing is the endpoint's own window's.
+            route = PersonaDirectory(self.runtime).route(permission_scope) if (
                 allow_private_owner and definition.private_owner_without_grant
                 and scope.kind is ScopeKind.PRIVATE
             ) else None
@@ -278,11 +297,12 @@ class ObjectAccessPolicy:
             from .grants import PERSON_PERMISSION_GRANT_PREFIX
             explicit_private_decision = scope.kind is ScopeKind.PRIVATE and action in (
                 "conversation.reply", "proactive.contact") and any(
-                    grant.scope == scope and grant.capability == action
+                    grant.scope == permission_scope and grant.capability == action
                     and grant.grant_id.startswith(PERSON_PERMISSION_GRANT_PREFIX)
                     for grant in self.identity.grants_for_subject(actor.subject))
             if explicit_private_decision or tier is AuthorizationTier.STANDARD and not private_owner_feature:
-                granted = self.identity.authorize(actor, scope=scope, capability=action, observed_at=observed_at)
+                granted = self.identity.authorize(actor, scope=permission_scope,
+                                                  capability=action, observed_at=observed_at)
                 if not granted.is_success:
                     return Outcome(failure=granted.failure)
             return Outcome.success(ObjectAccessDecision(tier, self.revision, identity.policy_revision))

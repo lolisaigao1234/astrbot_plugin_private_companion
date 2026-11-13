@@ -73,7 +73,7 @@ class ScreenRepository:
         return self._runtime
 
     def _reader_for(self, resolved: ResolvedIdentity):
-        return _CoreAuthorizer(resolved) if is_core(self._runtime, resolved.subject) else self._authorizer
+        return _CoreAuthorizer(resolved) if is_core(self._runtime, resolved) else self._authorizer
 
     def _core_access_failure(self, resolved: ResolvedIdentity, scope, observed_at):
         """Core defaults apply only while no explicit revocation exists.
@@ -178,7 +178,7 @@ class ScreenRepository:
                 capability_id=SCREEN_READ, subject=resolved.subject, scope=reference.source.scope)
             access = self._authorizer.authorize(resolved, scope=reference.source.scope,
                 capability=SCREEN_READ, observed_at=observed_at)
-            if not is_core(self._runtime, resolved.subject):
+            if not is_core(self._runtime, resolved):
                 if not consent.is_success:
                     return Outcome(failure=consent.failure)
                 if not access.is_success:
@@ -511,7 +511,7 @@ class ScreenRepository:
             extension_id=SCREEN_EXTENSION, capability_id=SCREEN_READ,
             subject=resolved.subject, scope=reference.source.scope,
         )
-        core = is_core(self._runtime, resolved.subject)
+        core = is_core(self._runtime, resolved)
         if core:
             blocked = self._core_access_failure(resolved, reference.source.scope, observed_at)
             if blocked is not None:
@@ -543,7 +543,7 @@ class ScreenRepository:
             return Outcome(failure=role_selection.failure)
         stamps: list[object] = []
         core_group = (reference.source.scope.kind is ScopeKind.GROUP
-                      and is_core(self._runtime, resolved.subject))
+                      and is_core(self._runtime, resolved))
         if core_group:
             # Core administrators are the default audience for privacy
             # capabilities and do not need a per-window consent row.  Re-resolve
@@ -552,7 +552,7 @@ class ScreenRepository:
             if not fresh.is_success:
                 return Outcome(failure=fresh.failure)
             identity = fresh.unwrap()
-            if identity.subject != resolved.subject or not is_core(self._runtime, identity.subject):
+            if identity.subject != resolved.subject or not is_core(self._runtime, identity):
                 return Outcome.failed("screen_core_changed", "core administrator identity changed")
             stamps.append(("core-group", identity.subject.kind.value, identity.subject.subject_id,
                            identity.binding_id, identity.binding_revision))

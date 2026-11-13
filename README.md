@@ -30,7 +30,7 @@
 | 显示名 | 我会永远陪着你 |
 | 当前版本 | `7.1.16`（7.x 架构线，内部领域标识 `private_companion.v2`） |
 | AstrBot 版本 | `>= 4.27.2` |
-| 声明支持平台 | `aiocqhttp`（OneBot v11）、`qq_official`、`qq_official_webhook`、`weixin_oc`（个人微信） |
+| 声明支持平台 | `aiocqhttp`（OneBot v11）、`qq_official`、`qq_official_webhook`、`weixin_oc`（个人微信）、`telegram`（独立私聊文字） |
 | 管理入口 | AstrBot 插件扩展页「陪伴小屋」（支持低配设备开启「性能模式」切换为轻量状态页） |
 | 数据存储 | 独立 SQLite 运行库（覆盖升级自动隔离于 `companion-7` 子目录，支持备份快照与跨盘迁移） |
 | 内置原生扩展 | `Content`、`Image`、`Screen`、`Reality`、`Together`、`Game`、`Live` 七项能力随包内置 |
@@ -139,6 +139,14 @@ https://github.com/menglimi/astrbot_plugin_private_companion
 ---
 
 ### 3.2 首次使用（「陪伴小屋 → 开始使用」八步引导）
+
+Telegram 私聊文字接入：先在 AstrBot 配置 Telegram 通道并让用户给机器人发消息，再由管理员在现有账号与角色配置中添加该用户的精确私聊目标。`platform_id` 与 `account_id` 都填写 AstrBot 的平台实例 ID，`participant_id` 填写完整数字用户 ID，不用机器人用户名或显示名。使用独立的 Bot 归属与角色配置，不关联 QQ 窗口；不接受 `*` 通配目标、窗口别名或聊天中的首次绑定命令。
+
+Telegram 的访问控制沿用 AstrBot：在该 Bot 使用的配置中启用 `platform_settings.enable_id_white_list`，在 `id_whitelist` 填入精确的 `<平台实例 ID>:FriendMessage:<私聊 ID>`。**空 `id_whitelist` 不做白名单检查**；开启 `wl_ignore_admin_on_friend` 时，AstrBot 管理员可以绕过私聊白名单。陪伴目标配置只决定本插件服务哪些窗口，不替代 AstrBot 对其他插件和默认模型回复的访问控制。
+
+当前支持无话题的人类私聊文字、emoji 和链接，长文本拆分与 Markdown 转纯文本回退由 AstrBot 发送器完成。陪伴工具按现有配置和当前端点授权开放文字记忆、便签/提醒、日历、成长/关系提案、时间线/来源、天气/资讯与文字诊断；同聊文字引用保留接收器提供的有界来源快照。独立接入的窗口使用自己的数据，显式关联的共享范围与尚未共享的文字数据见[私聊关联说明](docs/linked-private-conversations.md)。不提供 QQ 戳一戳、QZone、媒体或游戏能力；其他插件的指令、工具与授权继续由 AstrBot 管理。发送异常保守记录为 `unknown`，不自动重放；不区分单次发送内的部分成功。重复投递沿用进程内短期去重，重启后的去重不在本次支持范围。
+
+各账号独立启动和运行：宿主用当前可用的账号启动，通道未加载或客户端未连接的账号不阻塞其他账号，恢复后自动接入，无需重载插件；在陪伴小屋手动启动或保存映射后同样如此，接入失败的窗口会自动重试。所有已配置账号都不可用时继续等待。手动停止会结束接入和此前安排的启动重试，之后由手动启动或新加载的平台重新启动。发往不可用账号的后台消息记为未发送，不改投其他账号。状态文档的 `accounts` 给出每个账号自己的可用状态。Telegram 原生流式发送、真实 API 投递与重连仍需实际通道验收。
 
 首次安装后，先在 AstrBot 中准备好可用的平台适配器（`aiocqhttp`、QQ 官方机器人或 `weixin_oc` 个人微信）、聊天模型和人格，再打开插件扩展页 **「陪伴小屋 → 开始使用」**，按页面左侧分组步骤树完成 **第 1–8 步** 配置：
 

@@ -10,7 +10,7 @@ import asyncio
 import inspect
 import logging
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 
 from companion_v2.execution.models import TaskError, digest, encode, require
@@ -35,7 +35,7 @@ VERIFIED_SERIES = frozenset(("4.27", "4.28", "4.29"))
 # Native routing is verified for the OneBot reverse-WS adapter and the two
 # QQ Official adapter names AstrBot exposes.  Keeping the allow-list here
 # prevents an arbitrary adapter from inheriting route privileges by accident.
-SUPPORTED_PLATFORM_NAMES = frozenset(("aiocqhttp", "qq_official", "qq_official_webhook", "lark", "weixin_oc"))
+SUPPORTED_PLATFORM_NAMES = frozenset(("aiocqhttp", "qq_official", "qq_official_webhook", "lark", "weixin_oc", "telegram"))
 OFFICIAL_PLATFORM_NAMES = frozenset(("qq_official", "qq_official_webhook"))
 _REPORTED_UNVERIFIED = set()
 NATIVE_LOOKUP_TIMEOUT_SECONDS = 20
@@ -198,6 +198,8 @@ def event_account_id(event):
         return route_id(event_platform_id(event))
     if name == "aiocqhttp":
         return account_number(getattr(message, "self_id", None))
+    if name == "telegram":
+        return route_id(event_platform_id(event))
     if name == "lark":
         # Lark (Feishu) has no stable numeric self id on the event; the
         # configured platform instance id is the account key, same as QQ Official.
@@ -224,12 +226,26 @@ def native_user_subject_id(platform_name, sender_id):
         return "onebot-user:" + sender_id
     if official_platform_name(platform_name):
         return "qq-official-user:" + sender_id
+    if platform_name == "telegram":
+        return "telegram-user:" + sender_id
     if platform_name == "lark":
         return "lark-user:" + sender_id
     if platform_name == "weixin_oc":
         return "weixin-user:" + sender_id
     raise ValueError("unsupported native user platform")
 
+
+
+def private_event_supported(event):
+    if event_platform_name(event) == "telegram":
+        from .telegram import private_text_event
+        return private_text_event(event)
+    return True
+
+
+def event_native_client(event):
+    """Use the native accessor supplied by the verified channel adapter."""
+    return getattr(event, "client" if event_platform_name(event) == "telegram" else "bot", None)
 
 
 def platform_client_matches(platform, client):
@@ -264,6 +280,19 @@ def native_client_connected(platform, account_id, client=None):
         return False
     if client is None or not supported_platform_name(getattr(meta, "name", None)):
         return False
+    if meta.name == "telegram":
+        try:
+            application = platform.application
+            # ``application.running`` is the SDK's public lifecycle flag. The two
+            # adapter-private flags only narrow it further (restart and shutdown
+            # windows); a host that renames them still answers on the public one.
+            return (str(meta.id) == str(account_id) and platform.get_client() is client
+                    and application.bot is client and application.running is True
+                    and getattr(platform, "_application_started", True) is True
+                    and not getattr(platform, "_terminating", False)
+                    and type(client.id) is int and client.id > 0)
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            return False
     if meta.name == "aiocqhttp":
         clients = getattr(client, "_wsr_api_clients", None)
         if not isinstance(clients, dict):
@@ -378,6 +407,28 @@ class NativeVideoLocator:
 
 
 @dataclass(frozen=True)
+class NativeReplyEndpoint:
+    """Authenticated physical source and reply destination, held only for this turn."""
+
+    principal: AuthenticatedHostPrincipal
+    scope: ScopeRef
+    target_id: str
+    unified_msg_origin: str
+    event_id: str
+    client: object = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class NativeServedConversation:
+    """Owner window, role and existing role-scoped conversation key being served."""
+
+    target_id: str
+    unified_msg_origin: str
+    scope: ScopeRef
+    role: SubjectRef
+
+
+@dataclass(frozen=True)
 class NativeConversationInput:
     event_id: str
     principal: AuthenticatedHostPrincipal
@@ -393,6 +444,8 @@ class NativeConversationInput:
     audios: tuple[CapturedAudio, ...] = ()
     videos: tuple[CapturedVideo, ...] = ()
     merged_event_ids: tuple[str, ...] = ()
+    source_endpoint: NativeReplyEndpoint | None = None
+    conversation: NativeServedConversation | None = None
 
 
 NativePrivateInput = NativeConversationInput  # Preserve the private adapter's public snapshot name.
@@ -426,6 +479,11 @@ class NativeInputPorts:
         if context.role_binding.role != event.role:
             raise TaskError("host_persona_projection_mismatch", "V2 and the selected host persona must agree")
         return event.instruction
+
+
+def principal_host_id(bridge, scope):
+    resolver = getattr(bridge, "principal_host_id", None)
+    return resolver(scope) if callable(resolver) else bridge.host_id
 
 
 class NativePrivateBridge:
@@ -499,15 +557,35 @@ class NativePrivateBridge:
         if any(p.role.installation_id != installation_id for p in personas):
             raise ValueError("persona projections cross installation")
         self.platforms = {}
+        self.telegram_bot_ids = {}
         for account in accounts:
             platform = context.get_platform_inst(account.platform_id)
             if platform is None:
-                raise TaskError("host_platform_unavailable", "the configured native platform has not loaded")
+                # Not loaded yet: the other accounts start without this channel,
+                # and it is pinned by the first use after it appears.
+                continue
             meta = platform.meta()
             if not supported_platform_name(meta.name) or meta.id != account.platform_id:
                 raise TaskError("host_platform_changed", "the configured platform does not match its native account")
-            self.platforms[account.platform_id] = (platform, platform.get_client())
+            self._pinned(account.platform_id)
         self.ports = NativeInputPorts()
+
+    def _pinned(self, platform_id):
+        """The ``(platform, client)`` pinned for one channel, or ``(None, None)``.
+
+        A channel is pinned once, the first time it is found loaded with the
+        configured kind; later replacements are refused against that pin.
+        """
+        if platform_id not in self.platforms:
+            configured = any(account.platform_id == platform_id for account in self.accounts.values())
+            platform = self.context.get_platform_inst(platform_id) if configured else None
+            meta = platform.meta() if platform is not None else None
+            if meta is None or not supported_platform_name(meta.name) or meta.id != platform_id:
+                return None, None
+            self.platforms[platform_id] = (platform, platform.get_client())
+            if meta.name == "telegram" and native_client_connected(platform, platform_id):
+                self.telegram_bot_ids[platform_id] = platform.get_client().id
+        return self.platforms[platform_id]
 
     def account(self, scope):
         """The registered account a private scope belongs to, or an explicit refusal."""
@@ -519,8 +597,19 @@ class NativePrivateBridge:
 
     def platform(self, scope):
         account = self.account(scope)
-        platform, client = self.platforms[account.platform_id]
+        platform, client = self._pinned(account.platform_id)
+        if platform is None:
+            raise TaskError("host_platform_unavailable", "the configured native platform has not loaded")
         meta = platform.meta()
+        if meta.name == "telegram":
+            current = platform.get_client()
+            if (self.context.get_platform_inst(account.platform_id) is not platform
+                    or not native_client_connected(platform, account.self_id, current)):
+                raise TaskError("host_account_changed", "Telegram application is not current and running")
+            bot_id = self.telegram_bot_ids.setdefault(account.platform_id, current.id)
+            if current.id != bot_id:
+                raise TaskError("host_account_changed", "Telegram authenticated bot account changed")
+            return platform
         if (self.context.get_platform_inst(account.platform_id) is not platform
                 or platform.get_client() is not client or meta.id != account.platform_id
                 or not supported_platform_name(meta.name)):
@@ -529,11 +618,11 @@ class NativePrivateBridge:
 
     def platform_name(self, scope_or_account):
         platform_id = getattr(scope_or_account, "platform_id", None) or getattr(scope_or_account, "platform", None)
-        platform = self.platforms.get(platform_id, (None, None))[0]
+        platform = self._pinned(platform_id)[0]
         return str(platform.meta().name) if platform is not None else ""
 
     def account_connected(self, account, client=None):
-        platform = self.platforms.get(account.platform_id, (None, None))[0]
+        platform = self._pinned(account.platform_id)[0]
         return native_client_connected(platform, account.self_id, client)
 
     def client(self, scope):
@@ -842,6 +931,8 @@ class NativePrivateBridge:
             from companion_v2.conversation.quotes.models import event_audios, event_videos
             if not isinstance(event, self.event_type):
                 raise TaskError("host_event_unsupported", "this profile accepts native private events")
+            if not private_event_supported(event):
+                raise TaskError("host_scene_unsupported", "only native human private text is supported")
             message, meta, session = event.message_obj, event.platform_meta, event.session
             platform_id = meta.id
             if (getattr(message.type, "value", None) != "FriendMessage"
@@ -919,7 +1010,7 @@ class NativePrivateBridge:
             principal = AuthenticatedHostPrincipal(self.installation_id, self.host_id, platform_id, sender, account.bot_id, login)
             actor = require(self.identities.resolve_authenticated(principal, observed_at=at))
             # Freeze all event fields before any host await; later event middleware cannot restamp them.
-            event_client = event.bot
+            event_client = event_native_client(event)
             cid, role, instruction = await self._role(account, sender)
             scope = ScopeRef(self.installation_id, platform_id, ScopeKind.PRIVATE, sender, account.bot_id, login, cid, sender)
             if not platform_client_matches(self.platform(scope), event_client):

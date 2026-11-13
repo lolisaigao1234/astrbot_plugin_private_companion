@@ -12,9 +12,10 @@ from companion_v2.adapters.astrbot.application import AstrBotCompanionHost
 from companion_v2.adapters.astrbot.memory_owner import memory_owner_provider
 from companion_v2.adapters.astrbot.memory_push import memory_push_provider
 from companion_v2.adapters.astrbot.native import (
-    NativeConversationInput, NativePrivateBridge, bounded_native_lookup, event_account_id,
+    NativeConversationInput, NativePrivateBridge, NativeReplyEndpoint, NativeServedConversation,
+    bounded_native_lookup, event_account_id, event_native_client,
     event_peer_id, native_client_connected, native_id, native_user_subject_id,
-    platform_client_matches,
+    platform_client_matches, private_event_supported,
     supported_platform_name,
 )
 from companion_v2.adapters.astrbot.group import NativeGroupBridge, _is_sticker_segment
@@ -139,9 +140,28 @@ class MultiPrivateBridge(NativePrivateBridge):
         target = self.targets.get((scope.platform, scope.account_id, scope.native_scope_id))
         if target is None and scope.kind is ScopeKind.PRIVATE:
             target = self.settings.private_target(scope.platform, scope.account_id, scope.native_scope_id)
-        if scope.kind is not ScopeKind.PRIVATE or target is None or target.bot_id != scope.bot_id:
+        if scope.kind is not ScopeKind.PRIVATE or target is None:
+            raise TaskError("host_target_unavailable", "the native private target is not configured")
+        # A bridge without an authority (assembled before the host attaches one) has
+        # no linked conversations: the target's own bot is then the only owner.
+        authority = getattr(self, "authority", None)
+        if (authority.bot_id(target) if authority is not None else target.bot_id) != scope.bot_id:
             raise TaskError("host_target_unavailable", "the native private target is not configured")
         return target
+
+    def principal_host_id(self, scope):
+        if scope.kind is ScopeKind.GROUP:
+            return self.host_id
+        return self.authority.principal(self.target_for_scope(scope)).host_id
+
+    def account(self, scope):
+        from companion_v2.conversation.linked_ownership import link_for_scope
+        if link_for_scope(self.authority.runtime, scope) is not None:
+            target = self.target_for_scope(scope)
+            account = self.accounts.get((target.platform_id, target.account_id))
+            if account is not None:
+                return replace(account, bot_id=scope.bot_id)
+        return super().account(scope)
 
     def client(self, scope):
         if scope.kind is ScopeKind.GROUP:
@@ -149,11 +169,18 @@ class MultiPrivateBridge(NativePrivateBridge):
         self.target_for_scope(scope)
         return super().client(scope)
 
+    def resolve_core_conversation_owner(self, source_target):
+        """Resolve an explicit served conversation, keeping legacy window links separate."""
+        links = getattr(self, "linked_conversations", None)
+        return links.served(source_target) if links is not None else source_target
+
     async def capture_core_reply(self, event):
         """Authenticate a private route for AstrBot's reply path without reading attachments."""
         try:
             if not isinstance(event, self.event_type):
                 raise TaskError("host_event_unsupported", "core reply requires a verified native event")
+            if not private_event_supported(event):
+                raise TaskError("host_scene_unsupported", "only native human private text is supported")
             message, session, meta = event.message_obj, event.session, event.platform_meta
             platform_id = meta.id
             if (getattr(getattr(message, "type", None), "value", None) != "FriendMessage"
@@ -163,12 +190,16 @@ class MultiPrivateBridge(NativePrivateBridge):
             sender, login = event_peer_id(event), event_account_id(event)
             account = self.accounts.get((platform_id, login))
             target = self.settings.private_target(platform_id, login, sender)
+            if meta.name == "telegram":
+                from companion_v2.adapters.astrbot.telegram import explicit_target
+                if not explicit_target(self.settings, target):
+                    raise TaskError("host_route_mismatch", "Telegram needs an exact independent private target")
             if (not supported_platform_name(meta.name) or session.platform_id != platform_id
                     or session.platform_name != platform_id or session.session_id != sender
                     or event.unified_msg_origin != self._umo(platform_id, sender)
                     or account is None or target is None or target.bot_id != account.bot_id):
                 raise TaskError("host_route_mismatch", "event fields do not identify one registered private route")
-            event_client = event.bot
+            event_client = event_native_client(event)
             platform = self.context.get_platform_inst(platform_id)
             if (platform is None or not platform_client_matches(platform, event_client)
                     or not native_client_connected(platform, login)):
@@ -176,17 +207,30 @@ class MultiPrivateBridge(NativePrivateBridge):
 
             event_id = native_id(message.message_id)
             at = datetime.fromtimestamp(event.created_at, timezone.utc)
-            principal = AuthenticatedHostPrincipal(self.installation_id, self.host_id, platform_id,
-                                                   sender, account.bot_id, login)
-            self.authority.ensure_actor(target)
-            actor = require(self.identities.resolve_authenticated(principal, observed_at=at))
-            conversation_id, role, instruction = await self._role(account, sender)
+            principal = self.authority.principal(target)
+            owner = self.resolve_core_conversation_owner(target)
+            linked_owner = owner if isinstance(owner, NativeServedConversation) else None
+            if linked_owner is not None:
+                owner = target
+            owner_platform, owner_login, owner_peer = owner.route_key
+            owner_account = self.accounts[(owner_platform, owner_login)]
+            conversation_id, role, instruction = await self._role(owner_account, owner_peer)
+            if linked_owner is not None:
+                conversation_id, role = linked_owner.scope.conversation_id, linked_owner.role
             scope = ScopeRef(self.installation_id, platform_id, ScopeKind.PRIVATE, sender,
-                             account.bot_id, login, conversation_id, sender)
+                             principal.bot_id, login, conversation_id, sender)
             if not platform_client_matches(self.platform(scope), event_client):
                 raise TaskError("host_client_mismatch", "private host account changed during persona lookup")
             self.client(scope)
+            self.authority.ensure_actor(target)
+            actor = require(self.identities.resolve_authenticated(principal, observed_at=at))
             recipients = AudienceRef(scope, (actor.subject,))
+            source_endpoint = NativeReplyEndpoint(
+                principal, scope, target.target_id, self._umo(platform_id, sender), event_id, event_client)
+            owner_scope = ScopeRef(self.installation_id, owner_platform, ScopeKind.PRIVATE,
+                owner_peer, owner.bot_id, owner_login, conversation_id, owner_peer)
+            conversation = linked_owner or NativeServedConversation(
+                owner.target_id, self._umo(owner_platform, owner_peer), owner_scope, role)
             pieces = []
             for part in getattr(message, "message", ()):
                 kind = getattr(getattr(part, "type", None), "value", getattr(part, "type", None))
@@ -204,9 +248,14 @@ class MultiPrivateBridge(NativePrivateBridge):
                     if _is_sticker_segment(segment):
                         pieces.append("[表情包]")
             text = "".join(pieces)
+            quotes = ()
+            if meta.name == "telegram":
+                from companion_v2.adapters.astrbot.telegram import text_quote
+                quotes = text_quote(event)
             return Outcome.success(NativeConversationInput(
                 event_id, principal, ConversationRoute(scope, user=actor.subject), recipients,
-                text, at, role, instruction,
+                text, at, role, instruction, quotes=quotes,
+                source_endpoint=source_endpoint, conversation=conversation,
             ))
         except TaskError as error:
             return Outcome.failed(error.code, str(error))
@@ -214,6 +263,8 @@ class MultiPrivateBridge(NativePrivateBridge):
             return Outcome.failed("host_core_reply_capture_failed", "private route or persona could not be verified")
 
     async def capture(self, event):
+        if not private_event_supported(event):
+            return Outcome.failed("host_scene_unsupported", "only native human private text is supported")
         if getattr(getattr(event.message_obj, "type", None), "value", None) == "GroupMessage":
             return await self.groups.capture(event, allow_text_fallback=True)
         message, session, meta = event.message_obj, event.session, event.platform_meta
@@ -229,12 +280,16 @@ class MultiPrivateBridge(NativePrivateBridge):
                     or event.unified_msg_origin != f"{meta.id}:FriendMessage:{sender}"):
                 return await super().capture(event)
             target = self.settings.private_target(meta.id, login, sender)
+            if meta.name == "telegram":
+                from companion_v2.adapters.astrbot.telegram import explicit_target
+                if not explicit_target(self.settings, target):
+                    return Outcome.failed("host_route_mismatch", "Telegram needs an exact independent private target")
             if target is None:
                 return await super().capture(event)
             account = self.accounts.get((meta.id, login))
             platform = self.context.get_platform_inst(meta.id)
             if (account is None or account.bot_id != target.bot_id or platform is None
-                    or not platform_client_matches(platform, event.bot)
+                    or not platform_client_matches(platform, event_native_client(event))
                     or not native_client_connected(platform, login)):
                 raise TaskError("host_client_mismatch", "private event did not originate from its registered Bot account")
             self.authority.ensure_actor(target)
@@ -310,6 +365,9 @@ class MultiPrivateBridge(NativePrivateBridge):
         current = require(self.authority.personas.resolve(scope, observed_at=self.now())).binding
         if current != binding:
             raise TaskError("role_binding_changed", "the native role context was replaced")
+        fence = getattr(self, "command_fences", {}).get(scope)
+        if fence is not None:
+            fence()  # a deterministic command in flight on this linked endpoint
         return result
 
     async def verified_persona(self, scope, binding):
@@ -422,6 +480,14 @@ class CoreReplyPlan:
     context: TaskContext
     debounce: PrivateDebouncePolicy | None = None
 
+    @property
+    def source_endpoint(self):
+        return self.captured.source_endpoint
+
+    @property
+    def conversation(self):
+        return self.captured.conversation
+
 
 class PrivateDialogueDenied(TaskError):
     """A private refusal bound to the exact context that was denied."""
@@ -489,6 +555,10 @@ class MultiHostSession:
             persona_window_snapshot_lookup=persona_window_snapshot_lookup,
             persona_window_snapshot_update=persona_window_snapshot_update,
             file_settings=lambda scope, role: file_intake_settings(runtime, scope, role))
+        from .linked_conversations import LinkedConversations
+        self.linked_conversations = LinkedConversations(self)
+        self.bridge.linked_conversations = self.linked_conversations
+        self.bridge.command_fences = {}
         self.model = AstrBotTextProvider(native_context, bridge=self.bridge,
             binding=ProviderBinding("model.text", common.provider_id, native_types.version, provider_fingerprint),
             provider_id=common.provider_id, version=native_types.version, provider_type=native_types.provider_types,
@@ -550,6 +620,9 @@ class MultiHostSession:
         registry_fields += tuple(field for field in relay_configuration_fields()
                                  if field.field_id not in registry_ids)
         configuration_store = open_configuration_store(runtime)
+        if configuration_store is not None:
+            from companion_v2.conversation.linked_ownership import serve_link_records
+            serve_link_records(configuration_store, runtime)
         self.host = AstrBotCompanionHost(runtime, event_port=self.bridge.ports, identity_port=self.bridge.ports,
             role_port=self.bridge.ports, runtime_identity=RuntimeIdentity("companion", runtime_instance_id, "astrbot", HOST_ID),
             registry=FieldRegistry(version="astrbot-multi.v1", fields=registry_fields),
@@ -575,6 +648,7 @@ class MultiHostSession:
             wake_port=self._wake_snapshot,
             presence_port=MultiPresence(self))
         self.application = self.host.application
+        self.application.outbound.destination = self.linked_conversations.destination
         if hasattr(self.application, "contact_schedule"):
             self.application.contact_schedule.bind_health_source(self.huawei_health)
         self.application.image_fallback.attach_port(ReviewFallbackRoutes(self))
@@ -588,6 +662,7 @@ class MultiHostSession:
         self.core_reply_maintenance = CoreReplyMaintenance(self)
         self.core_reply_observations = None
         self._native_turns_recovered = False
+        self._started_targets = set()
         try:
             from .core_reply_observations import CoreReplyObservations
             self.core_reply_observations = CoreReplyObservations(self)
@@ -596,7 +671,7 @@ class MultiHostSession:
 
     def scope(self, target, conversation_id):
         return ScopeRef(self.runtime.installation_id, target.platform_id, ScopeKind.PRIVATE, target.participant_id,
-                        target.bot_id, target.account_id, conversation_id, target.participant_id)
+                        self.authority.bot_id(target), target.account_id, conversation_id, target.participant_id)
 
     def _wake_snapshot(self, context):
         """Read the Reality wake signals for this exact private target.
@@ -624,6 +699,9 @@ class MultiHostSession:
     async def synchronize(self, target):
         account = self.bridge.accounts[(target.platform_id, target.account_id)]
         cid, role, instruction = await self.bridge._role(account, target.participant_id)
+        owner = self.bridge.resolve_core_conversation_owner(target)
+        if isinstance(owner, NativeServedConversation):
+            cid, role = owner.scope.conversation_id, owner.role
         scope = self.scope(target, cid)
         self.bridge.client(scope)
         context = self.authority.select(target, scope, role)
@@ -674,6 +752,47 @@ class MultiHostSession:
             found[target.target_id] = target
         return tuple(found.values())
 
+    async def bind_available_targets(self, *, late=False):
+        """Run the per-target start-up work for every target whose account is available.
+
+        A target whose account is unavailable is left out and stays due. A
+        ``late`` call comes from a host that is already running: it takes only
+        the targets that are still due, counts one as started once its work
+        succeeded, and keeps one target's failure away from the others. It
+        returns whether a failed target is left to try again.
+        """
+        targets = [target for target in self.settings.primary_targets if target.participant_id != "*"]
+        targets.extend(self._prepared_wildcard_private_targets())
+        seen = set(self._started_targets) if late else set()
+        failed = False
+        for target in targets:
+            if target.target_id in seen:
+                continue
+            seen.add(target.target_id)
+            if not self.bridge.account_connected(self.bridge.accounts[(target.platform_id, target.account_id)]):
+                continue
+            if self.linked_conversations.removed(target):
+                # Closed until it is admitted on its own: no routine runs under it.
+                continue
+            try:
+                context, instruction = await self.synchronize(target)
+                self.application.life_runtime.bind(context, instruction, guard=self.bridge.verify_role)
+                self.application.state_maintenance.bind(context, instruction, guard=self.bridge.verify_role)
+                self.application.contact_schedule.bind_context(context)
+                if self.application.presence is not None:
+                    self.application.presence.bind(context)
+            except Exception as error:
+                # An unmapped target stays unrouted until its V2 window persona is explicit.
+                if getattr(error, "code", None) not in ("host_persona_unmapped", "host_persona_window_unbound"):
+                    if not late:
+                        raise
+                    logger.warning("[CompanionV2] 账号上线后的窗口准备未完成，稍后重试 target=%s code=%s error_type=%s",
+                                   target.target_id, getattr(error, "code", "unknown"), type(error).__name__)
+                    failed = True
+                    continue
+            self._started_targets.add(target.target_id)
+        return failed
+
     async def start(self, *, expected_task_generation, expected_model_generation):
         if self.core_reply_observations is not None and not self._native_turns_recovered:
             from companion_v2.conversation.native_turns import NativeConversationTurns
@@ -681,25 +800,7 @@ class MultiHostSession:
                 return NativeConversationTurns(self.runtime).interrupt_open(at=self.now())
             await asyncio.to_thread(interrupt_previous_runner)
             self._native_turns_recovered = True
-        targets = [target for target in self.settings.primary_targets if target.participant_id != "*"]
-        targets.extend(self._prepared_wildcard_private_targets())
-        seen = set()
-        for target in targets:
-            if target.target_id in seen:
-                continue
-            seen.add(target.target_id)
-            try:
-                context, instruction = await self.synchronize(target)
-            except TaskError as error:
-                if error.code in ("host_persona_unmapped", "host_persona_window_unbound"):
-                    # Leave this target unrouted until its V2 window persona is explicit.
-                    continue
-                raise
-            self.application.life_runtime.bind(context, instruction, guard=self.bridge.verify_role)
-            self.application.state_maintenance.bind(context, instruction, guard=self.bridge.verify_role)
-            self.application.contact_schedule.bind_context(context)
-            if self.application.presence is not None:
-                self.application.presence.bind(context)
+        await self.bind_available_targets()
         for model in self.models:
             model._current()
         if self.application.state != "new":
@@ -869,6 +970,9 @@ class MultiHostSession:
         umo = event.unified_msg_origin
         try:
             cid = await bounded_native_lookup(manager.get_curr_conversation_id(umo), operation="conversation_id")
+            if not cid and self.linked_conversations.for_origin(umo) is not None:
+                # Admission refuses this turn; never open a replacement beside the link.
+                raise TaskError("linked_selection_changed", "a linked endpoint lost its shared conversation")
             if not cid:
                 create = getattr(manager, "new_conversation", None)
                 if not callable(create):
@@ -1100,6 +1204,7 @@ class MultiHostSession:
             presence, typing_context, typing_turn, prepared_ok = None, None, None, False
             try:
                 self.application.require_running()
+                self.linked_conversations.require_permit(event)
                 if plan is None:
                     captured = require(await (
                         self.bridge.capture_text_only(event)
@@ -1117,7 +1222,7 @@ class MultiHostSession:
                     context = self._select_core_reply_context(target, captured)
                 self._validate_core_group_admission(group_admission, context, captured)
                 turn_id = "core-reply:" + digest([context.key, captured.event_id])
-                presence = self.application.presence
+                presence = (None if event.platform_meta.name == "telegram" else self.application.presence)
                 if presence is not None:
                     typing_context, typing_turn = context, turn_id
                     presence.begin_native_reply(context, turn_id)
@@ -1273,6 +1378,9 @@ class MultiHostSession:
                                     private_cooldown_seconds=-1, group_cooldown_seconds=-1,
                                                     extra_prompt=extra_prompt)
                             voice_policy = candidate
+                if event.platform_meta.name == "telegram":
+                    voice_policy = configured_voice_policy = None
+                    reaction_reply_enabled = False
                 from .fish_audio import provider_direction
                 voice_direction = await provider_direction(self.bridge.context, voice_policy, event.unified_msg_origin, channel)
                 source_future = None
@@ -1287,8 +1395,9 @@ class MultiHostSession:
                 except Exception as error:
                     logger.warning("[CompanionV2] 私聊后台绑定调度降级 error_type=%s", type(error).__name__)
                 prepared_ok = True
-                return Outcome.success({
+                prepared = {
                     "context": context,
+                    "platform_name": event.platform_meta.name,
                     "instruction": captured.instruction,
                     "prompt_instruction": prompt_instruction,
                     "stable_prompt_instruction": stable_prompt_instruction,
@@ -1316,7 +1425,14 @@ class MultiHostSession:
                     "configured_voice_reply_policy": configured_voice_policy,
                     "voice_provider_instruction": voice_direction,
                     "reaction_reply_enabled": reaction_reply_enabled,
-                })
+                }
+                from .linked_conversations import EXTRA
+                if event.get_extra(EXTRA) is not None:
+                    prepared["conversation_link"] = dict(event.get_extra(EXTRA))
+                if captured.source_endpoint is not None:
+                    prepared["source_endpoint"] = captured.source_endpoint
+                    prepared["conversation"] = captured.conversation
+                return Outcome.success(prepared)
             except TaskError as error:
                 return CoreReplyOutcome.from_failure(error)
             except Exception as error:
@@ -1329,11 +1445,8 @@ class MultiHostSession:
 
     def _actor_is_core(self, context):
         try:
-            subject = context.actor.subject
-            row = self.runtime.read_one(
-                "SELECT tier FROM subject_access_tiers WHERE subject_kind = ? AND subject_id = ?",
-                (subject.kind.value, subject.subject_id))
-            return bool(row and row["tier"] == AuthorizationTier.CORE.value)
+            from companion_v2.identity_policy.object_access import access_tier
+            return access_tier(self.runtime, context.actor) is AuthorizationTier.CORE
         except Exception:
             return False
 
@@ -1374,6 +1487,11 @@ class MultiHostSession:
                                         "model replies are temporarily blocked in this group")
                 if not isinstance(prepared, Mapping):
                     raise TaskError("core_reply_context_invalid", "prepared core reply context is unavailable")
+                from .linked_conversations import EXTRA
+                if self.linked_conversations.for_origin(event.unified_msg_origin) is not None or prepared.get("conversation_link"):
+                    await self.linked_conversations.validate(event)
+                    if prepared.get("conversation_link") != event.get_extra(EXTRA):
+                        raise TaskError("linked_revision_changed", "prepared work belongs to an earlier link revision")
                 if prepared.get("target_id") != target.target_id:
                     raise TaskError("core_reply_target_changed", "core reply target changed after admission")
                 captured = require(await (
@@ -1434,18 +1552,62 @@ class MultiHostSession:
 
         async with self._intake[target.target_id]:
             self.application.require_running()
-            captured = require(await self.bridge.capture(event))
+            if self.linked_conversations.removed(target):
+                raise TaskError("linked_endpoint_revoked", "this private endpoint no longer belongs to the conversation")
+            # Text commands use the same authenticated physical route and served
+            # conversation as an ordinary Telegram turn, without a reply batch.
+            capture = (self.bridge.capture_core_reply if event.platform_meta.name == "telegram"
+                       else self.bridge.capture)
+            captured = require(await capture(event))
             if (captured.route.scope.kind is not ScopeKind.PRIVATE
                     or self.bridge.target_for_scope(captured.route.scope) != target):
                 raise TaskError("host_target_mismatch", "calendar generation requires its configured private target")
             context = self.authority.select(target, captured.route.scope, captured.role)
             if self.application.private_access_gate.denied(context, at=self.now()):
                 raise TaskError("private_access_dialogue_denied", "this private user has no dialogue permission")
+            if event.platform_meta.name == "telegram":
+                self.application.state_maintenance.bind(context, captured.instruction, guard=self.bridge.verify_role)
             binding = self.application.state_maintenance.bindings.get(context.key)
             if binding is None:
                 raise TaskError("planning_role_changed", "original role binding is unavailable")
-            return await self.application.calendar_planning.run(context, binding[1], mode=mode,
-                slot="manual:" + mode + ":" + captured.event_id, manual=True, refresh=refresh)
+            fence = self._command_fence(event, context, "calendar.write")
+            if fence is not None:
+                # The planner's guard is this endpoint's verify_role: it runs the fence
+                # with the endpoint checks immediately before the calendar effect.
+                self.bridge.command_fences[context.scope] = fence
+            try:
+                return await self.application.calendar_planning.run(context, binding[1], mode=mode,
+                    slot="manual:" + mode + ":" + captured.event_id, manual=True, refresh=refresh)
+            finally:
+                if fence is not None:
+                    try:
+                        # The same checks once more, before the caller sends the receipt.
+                        await self.bridge.verify_role(context.scope, context.role_binding, binding[1])
+                    finally:
+                        del self.bridge.command_fences[context.scope]
+
+    def _command_fence(self, event, context, action):
+        """The link a deterministic command was admitted under, for its later rechecks.
+
+        ``None`` on an endpoint in no link. The fence raises once the link's
+        revision or membership changed, or the endpoint lost the action.
+        """
+        links, umo = self.linked_conversations, event.unified_msg_origin
+        link = links.for_origin(umo)
+        if link is None:
+            return None
+        admitted = (link["link_id"], link["revision"], link["conversation_id"])
+
+        def fence():
+            current = links.for_origin(umo)
+            if current is None or (current["link_id"], current["revision"], current["conversation_id"]) != admitted:
+                raise TaskError("linked_revision_changed", "the conversation link changed during this command")
+            if (links.retiring or umo in links.gate.editing_origins
+                    or not any(row["origin"] == umo for row in current["members"])):
+                raise TaskError("linked_endpoint_revoked", "this private endpoint no longer belongs to the conversation")
+            self.application.calendar.access.check(context, action)
+        fence()
+        return fence
 
     def _record_platform_names(self, event, context):
         """Record platform display names from the already authenticated native
@@ -1515,15 +1677,24 @@ class MultiHostSession:
             sender_type = OneBotGroupSender if group else OneBotPrivateSender
         else:
             sender_type = AstrBotPlatformSender
+        # A linked Telegram endpoint receives the text and nothing else: no QQ poke,
+        # no voice and no image accompany or follow it.
+        from companion_v2.conversation.linked_ownership import link_for_scope
+        text_only = platform_name == "telegram" and link_for_scope(self.runtime, envelope.context.scope) is not None
         sender = sender_type(self.bridge, binding=self.sender_binding, version=self.types.version,
             reverse_api_type=self.types.reverse_api,
             authorize=lambda: self.authorize_group(envelope) if group else self.authorize(envelope.context), now=self.now,
-            voice=self.voice, voice_delivery=self.voice_delivery,
+            voice=None if text_only else self.voice, voice_delivery=None if text_only else self.voice_delivery,
             reaction_image_format=lambda: self.application.semantics.store.settings()["reactions_image_format"]
                 if self.application.semantics is not None else "image")
+        if text_only:
+            if getattr(envelope, "images", ()):
+                return sender._receipt(envelope, "not_sent", failure_code="telegram_text_only")
+            envelope = replace(envelope, voice=None, poke=None)
         return await sender.send(envelope)
 
     async def close(self, *, grace_seconds=0.5):
+        await self.linked_conversations.close()
         await self.core_reply_maintenance.close()
         from .core_reply_tools import close_core_reply_tools
         await close_core_reply_tools(self.application)

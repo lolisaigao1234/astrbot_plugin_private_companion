@@ -122,6 +122,14 @@ async def send_private_notice(controller, event, *, text, route, transport=None)
         return {"state": "delivered", "message_id": identifier,
                 "receipt": digest(["private-notice.v1", route.platform_id, route.login, peer, str(text)])}
 
+    if platform_name == "telegram":
+        from .recalls import authenticate_notice_route
+        try:
+            current = authenticate_notice_route(controller, event, ScopeKind.PRIVATE, expected_post="message")
+        except TaskError:
+            current = None
+        if current is None or current != route or current.client is not route.client:
+            return {"state": "failed", "reason": "private_route_changed"}
     platform = getattr(route, "platform", None)
     if platform is None or not callable(getattr(platform, "send_by_session", None)):
         return {"state": "failed", "reason": "private_transport_unavailable"}
@@ -133,7 +141,7 @@ async def send_private_notice(controller, event, *, text, route, transport=None)
         await platform.send_by_session(MessageSession(route.platform_id, MessageType.FRIEND_MESSAGE, peer),
                                        MessageChain([Plain(str(text))]))
     except Exception:  # noqa: BLE001 - send outcome is unknown, never replayed here
-        return {"state": "failed", "reason": "platform_call_failed"}
+        return {"state": "unknown" if platform_name == "telegram" else "failed", "reason": "platform_call_failed"}
     receipt = digest(["private-session-notice.v1", route.platform_id, route.login, peer, str(text)])
     return {"state": "delivered", "message_id": "session:" + receipt, "receipt": receipt}
 

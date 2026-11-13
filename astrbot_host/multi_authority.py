@@ -17,6 +17,8 @@ from companion_v2.relationships.private_access import (DEFAULT_FOR_CAPABILITY, R
 from companion_v2.storage.codec import scope_values
 from companion_v2.adapters.astrbot.native import native_user_subject_id
 from .group_settings import GroupTarget
+from companion_v2.conversation.linked_ownership import (LINKS_KEY, PRIVATE_HOST_ID, link_records_changed,
+                                                         link_for_endpoint, link_for_scope)
 
 
 logger = logging.getLogger(__name__)
@@ -26,11 +28,14 @@ MANIFEST = "astrbot.multi.manifest.v1"
 VERIFIED_RUNTIME = "astrbot.multi.verified_runtime.v1"
 HOST_ID = "astrbot-native"
 DELIVERY = "message.delivery"
+# Grant id families whose settings owners revoke by prefix.
+SETTINGS_GRANT_FAMILIES = ("growth-grant:", "state-grant:", "life-grant-")
 
 
 class MultiAuthority:
     def __init__(self, runtime, settings, *, now, platform_name=None):
         self.runtime, self.settings, self.now = runtime, settings, now
+        link_records_changed(runtime)  # this host manages links on this store
         self.platform_name = platform_name
         self.identities, self.personas = PersistentIdentityDirectory(runtime), PersonaDirectory(runtime)
         self.core_target_id = None
@@ -54,6 +59,10 @@ class MultiAuthority:
             return None
 
     def _provision_context_grants(self, context):
+        from companion_v2.role_work.state.configuration import settings_decide_grants
+        if not settings_decide_grants(self.runtime, context.scope):
+            # Shared settings issue nothing for a member: its grants are its own saves.
+            return
         from companion_v2.role_work.growth.configuration import (
             GrowthConfigurationOwner, configuration_fields as growth_fields, target_for as growth_target,
         )
@@ -89,6 +98,8 @@ class MultiAuthority:
         with self.runtime.transaction() as connection:
             connection.execute("INSERT INTO runtime_metadata(key, value) VALUES (?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (key, encode(value)))
+        if key == LINKS_KEY:
+            link_records_changed(self.runtime)
 
     def require_manifest(self, current=None):
         manifest = self.read(MANIFEST)
@@ -171,17 +182,63 @@ class MultiAuthority:
             return ("account", "private_target", "persona")
         return ()
 
+    def conversation_link(self, target, participant_id=None):
+        if isinstance(target, GroupTarget):
+            return None
+        return link_for_endpoint(self.runtime, target.platform_id, target.account_id,
+                                 participant_id if participant_id is not None else target.participant_id)
+
+    def fence_removed_endpoint(self, scope):
+        """Called with the link edit that closes an endpoint, for its scope on the conversation.
+
+        Everything the endpoint captured there (saved contexts, queued sends,
+        prepared replies, tool calls, reminders it set) carries the revision of
+        its own role binding on that scope. Advancing it keeps that work refused
+        when the endpoint is linked again; it needs fresh work.
+        """
+        resolution = self.personas.resolve(scope, observed_at=self.now())
+        # The binding of this one window only; an endpoint that never spoke here captured nothing.
+        binding = resolution.unwrap().selected if resolution.is_success else None
+        if binding is not None and binding.selector.kind is SelectorKind.SESSION:
+            self.personas.set_binding(replace(binding, revision=binding.revision + 1),
+                                      expected_revision=binding.revision, observed_at=self.now())
+
+    def bot_id(self, target, participant_id=None):
+        link = self.conversation_link(target, participant_id)
+        return link["anchor"]["scope"]["bot_id"] if link else target.bot_id
+
     def principal(self, target, participant_id=None):
-        return AuthenticatedHostPrincipal(self.runtime.installation_id, HOST_ID, target.platform_id,
-            participant_id if participant_id is not None else target.participant_id, target.bot_id, target.account_id)
+        link = self.conversation_link(target, participant_id)
+        peer = participant_id if participant_id is not None else target.participant_id
+        anchor = link["anchor"]["scope"] if link else None
+        joined = anchor is not None and (target.platform_id, target.account_id, peer) != (
+            anchor["platform"], anchor["account_id"], anchor["native_scope_id"])
+        # A private link must not supersede the native binding used by groups
+        # or by this endpoint's previously independent conversation.
+        return AuthenticatedHostPrincipal(self.runtime.installation_id, PRIVATE_HOST_ID if joined else HOST_ID, target.platform_id,
+            participant_id if participant_id is not None else target.participant_id,
+            self.bot_id(target, participant_id), target.account_id)
 
     def actor(self, target, participant_id=None):
         actor = require(self.identities.resolve_authenticated(self.principal(target, participant_id), observed_at=self.now()))
-        if actor.subject != self.subject(target, participant_id):
+        # While a channel is not loaded its bound participant stands as stored.
+        if (self.platform_known(target) or self.conversation_link(target, participant_id)) \
+                and actor.subject != self.subject(target, participant_id):
             raise TaskError("host_identity_changed", "the configured participant identity changed")
         return actor
 
     def subject(self, target, participant_id=None):
+        link = self.conversation_link(target, participant_id)
+        if link:
+            if "subject" in link["anchor"]:
+                data = link["anchor"]["subject"]
+                return SubjectRef(data["installation_id"], SubjectKind(data["kind"]), data["subject_id"])
+            # Ticket #3 anchors predate the explicit subject. Their persisted
+            # route owns the human even if the original endpoint is unavailable.
+            route = self.personas.route(ScopeRef.restore(link["anchor"]["scope"]))
+            if route is None:
+                raise TaskError("linked_anchor_missing", "the linked conversation has no persisted owner route")
+            return route.user
         participant = participant_id if participant_id is not None else target.participant_id
         name = self.platform_name(target.platform_id) if callable(self.platform_name) else ""
         try:
@@ -192,12 +249,19 @@ class MultiAuthority:
             subject_id = "onebot-user:" + participant
         return SubjectRef(self.runtime.installation_id, SubjectKind.HUMAN, subject_id)
 
+    def platform_known(self, target):
+        """Whether the target's channel is loaded, so its user namespace is not a guess."""
+        return not callable(self.platform_name) or bool(self.platform_name(target.platform_id))
+
     def identity_id(self, target, participant_id=None):
         return "host-multi-person:" + digest(self.principal(target, participant_id))
 
     def ensure_actor(self, target, participant_id=None):
         identifier = self.identity_id(target, participant_id)
-        if self.runtime.read_one("SELECT 1 FROM identity_bindings WHERE binding_id = ?", (identifier,)) is None:
+        existing = self.identities.resolve_authenticated(self.principal(target, participant_id), observed_at=self.now())
+        if existing.failure is not None and existing.failure.code == "unbound_identity":
+            if not self.platform_known(target):
+                raise TaskError("host_platform_unavailable", "the configured native platform has not loaded")
             self.identities.bind(binding_id=identifier, principal=self.principal(target, participant_id),
                 subject=self.subject(target, participant_id), valid_from=datetime.fromisoformat(self.require_manifest()["valid_from"]),
                 expected_revision=self.identities.revision)
@@ -241,10 +305,12 @@ class MultiAuthority:
                 identities[key] = value
             at = datetime.fromisoformat(old["valid_from"])
             for target in self.settings.targets:
-                if target.participant_id == "*":
+                # A channel that is not loaded cannot name its user namespace; its
+                # participant is bound by the first verified use after it appears.
+                if target.participant_id == "*" or not self.platform_known(target):
                     continue
                 principal = self.principal(target)
-                existing = self.identities.resolve_authenticated(principal, observed_at=at)
+                existing = self.identities.resolve_authenticated(principal, observed_at=self.now())
                 if existing.failure is None:
                     if existing.unwrap().subject != self.subject(target):
                         raise TaskError("host_identity_changed", "the configured participant identity changed")
@@ -290,8 +356,11 @@ class MultiAuthority:
             raise TaskError("host_target_unavailable", "the native conversation route is unavailable")
 
     def _scope(self, target, scope, role):
-        local_role = any(p.bot_id == target.bot_id and p.role_id == role.subject_id
+        local_role = any(p.bot_id == self.bot_id(target) and p.role_id == role.subject_id
                          for p in self.settings.personas)
+        conversation = self.conversation_link(target)
+        if conversation:
+            local_role = role.subject_id == conversation["anchor"]["role"]["subject_id"]
         if not local_role:
             link = self.settings.window_link_for_target(target.target_id)
             if link is not None and link.mode == "role":
@@ -300,7 +369,7 @@ class MultiAuthority:
                                  for p in self.settings.personas)
         if (scope.installation_id != self.runtime.installation_id or scope.kind.value != "private"
                 or (scope.platform, scope.account_id, scope.bot_id, scope.native_scope_id, scope.session_id)
-                != (target.platform_id, target.account_id, target.bot_id, target.participant_id, target.participant_id)
+                != (target.platform_id, target.account_id, self.bot_id(target), target.participant_id, target.participant_id)
                 or role.installation_id != self.runtime.installation_id
                 or not local_role):
             raise TaskError("host_target_mismatch", "scope and role must come from this configured private target")
@@ -311,6 +380,7 @@ class MultiAuthority:
         actor = self.ensure_actor(target)
         at = datetime.fromisoformat(self.require_manifest()["valid_from"])
         with self.runtime.transaction():
+            own = self._own_decisions(target, scope)
             exact = self.runtime.read_one(
                 """SELECT role_id, revision FROM role_bindings WHERE installation_id = ? AND platform = ?
                    AND scope_kind = ? AND native_scope_id = ? AND bot_id = ? AND account_id = ?
@@ -346,6 +416,7 @@ class MultiAuthority:
             # 默认关的能力**不签发**——没有授权就是没有权限，页面也会如实显示"未授权"；
             # 默认开的能力即使不在配置能力表里也签发（表管的是宿主能力，不是这两项按人权限）。
             context = TaskContext(actor, resolution.binding, AudienceRef(scope, (actor.subject,)))
+            self._carry_decisions(context, own, at)
             pending = self._defaults(context)
             decided = {grant.capability for grant in self.identities.grants_for_subject(actor.subject)
                        if grant.subject == actor.subject and grant.scope == scope
@@ -392,6 +463,105 @@ class MultiAuthority:
                 self.write(self.context_key(template, role.subject_id), scope.document())
             return context
 
+    def _own_decisions(self, target, scope):
+        """Who decides the settings-derived grants of this scope.
+
+        ``None``: the window's settings, as in every unlinked conversation. Inside
+        a link the settings are shared and authority is not, so provisioners issue
+        and revoke nothing there: a member's grants change only by its own settings
+        writes and by operator decisions. The result holds what an endpoint was
+        allowed in its own conversation (grants by capability, and the consents
+        of its capability packages), carried over once when it joins.
+        """
+        if link_for_scope(self.runtime, scope) is None:
+            return None
+        previous = self.read("host.multi.active:" + target.target_id)
+        if previous == scope.document():
+            return {}, ()
+        principal = self.principal(target)
+        if not previous or principal.host_id != PRIVATE_HOST_ID:
+            return None  # no conversation of its own yet: it starts from the defaults of a new one
+        previous = ScopeRef.restore(previous)
+        own = self.identities.resolve_authenticated(
+            replace(principal, host_id=HOST_ID, bot_id=target.bot_id), observed_at=self.now())
+        if own.failure is not None:
+            return {}, ()
+        own, rows = own.unwrap(), {}
+        for grant in self.identities.grants_for_subject(own.subject):
+            if grant.scope == previous:
+                rows.setdefault(grant.capability, []).append(grant)
+        # A per-person default that was off left no row: that absence is a refusal too.
+        decisions = dict.fromkeys(DEFAULT_FOR_CAPABILITY, (None, ""))
+        for capability, grants in rows.items():
+            access = self.identities.authorize(own, scope=previous, capability=capability, observed_at=self.now())
+            decisions[capability] = (
+                next((grant for grant in grants if grant.grant_id == access.unwrap().grant_id), None)
+                if access.is_success else None,
+                next((family for family in SETTINGS_GRANT_FAMILIES
+                      if any(grant.grant_id.startswith(family) for grant in grants)), ""))
+        return decisions, self._consents(own.subject, previous)
+
+    def _consents(self, subject, scope):
+        return self.runtime.read_all(
+            """SELECT extension_id, capability_id, state, revision FROM capability_authorizations
+               WHERE subject_kind = ? AND subject_id = ? AND installation_id = ? AND platform = ?
+               AND scope_kind = ? AND native_scope_id = ? AND bot_id = ? AND account_id = ?
+               AND conversation_id = ? AND session_id = ?""",
+            (subject.kind.value, subject.subject_id, *scope_values(scope)))
+
+    def _carry_decisions(self, context, own, at):
+        """Joining a conversation gives an endpoint a new scope, not new permissions.
+
+        Before any default is issued, every capability gets the answer this
+        endpoint had in its own conversation: allowed stays allowed, with its
+        expiry, and refused stays refused. On a later rejoin its earlier grants on
+        the linked scope stand only where it is allowed on its own as well.
+        """
+        grants, consents = own or ({}, ())
+        if not grants and not consents:
+            return
+        scope, subject = context.scope, context.actor.subject
+        held = {}
+        for row in self.identities.grants_for_subject(subject):
+            if row.scope == scope:
+                held.setdefault(row.capability, []).append(row)
+        for capability in sorted({*grants, *held}):
+            grant, family = grants.get(capability, (None, ""))
+            if capability in held:
+                # It was a member before: nothing it lacks on its own comes back with the link.
+                for row in held[capability] if grant is None else ():
+                    if row.state is GrantState.ACTIVE:
+                        self.identities.revoke_grant(row.grant_id, revoked_at=self.now(),
+                                                     expected_revision=self.identities.revision)
+                continue
+            # A carried grant stays in the family its settings owner revokes.
+            identifier = self.grant_id(scope, capability)
+            if family == "life-grant-":
+                identifier = family + digest(context.key) + ":linked:" + digest(capability)
+            elif family:
+                from companion_v2.role_work.growth.configuration import target_for
+                identifier = family + digest([target_for(context).key, subject, capability]) + ":linked"
+            self.identities.issue_grant(grant_id=identifier, subject=subject, scope=scope, capability=capability,
+                tier=AuthorizationTier.STANDARD, valid_from=at, expires_at=grant.expires_at if grant else None,
+                expected_revision=self.identities.revision)
+            if grant is None:
+                self.identities.revoke_grant(identifier, revoked_at=self.now(),
+                                             expected_revision=self.identities.revision)
+        from companion_v2.capabilities.models import CapabilityAuthorizationState as Consent
+        from companion_v2.capabilities.repositories import CapabilityRepository
+        own = {(row["extension_id"], row["capability_id"]): Consent(row["state"]) for row in consents}
+        linked = {(row["extension_id"], row["capability_id"]): row for row in self._consents(subject, scope)}
+        for key in sorted({*own, *linked}):
+            state, earlier = own.get(key, Consent.REVOKED), linked.get(key)
+            if earlier is not None and (earlier["state"] != Consent.ACTIVE.value or state is Consent.ACTIVE):
+                continue  # a consent decided on the linked scope stands, unless it allows what its own does not
+            written = CapabilityRepository(self.runtime).set_authorization(
+                extension_id=key[0], capability_id=key[1], subject=subject, scope=scope, state=state,
+                expected_revision=earlier["revision"] if earlier is not None else 0, observed_at=self.now())
+            if earlier is not None:
+                # It was a member before: a consent it lacks on its own must not stay allowed.
+                require(written)
+
     def _grant_core_admin(self, context, scope):
         """Keep the Dashboard-confirmed administrator window actually administrative.
 
@@ -401,6 +571,8 @@ class MultiAuthority:
         the upgrade path.  Only fill a missing tier/grant: an explicit downgrade or
         revoke is a decision and must survive restarts.
         """
+        if context.actor.principal.host_id == PRIVATE_HOST_ID:
+            return
         policy = ObjectAccessPolicy(self.runtime)
         tier = self.runtime.read_one(
             "SELECT tier FROM subject_access_tiers WHERE subject_kind = ? AND subject_id = ?",

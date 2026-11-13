@@ -98,9 +98,8 @@ class ImageQuotaGate:
     def _classify_context(self, context):
         if context.scope.kind is ScopeKind.GROUP:
             return "group"
-        row = self.runtime.read_one("SELECT tier FROM subject_access_tiers WHERE subject_kind = ? AND subject_id = ?",
-                                    (context.actor.subject.kind.value, context.actor.subject.subject_id))
-        return "private_owner" if row is not None and row["tier"] == "core" else "private_friend"
+        from companion_v2.capabilities.privacy import is_core
+        return "private_owner" if is_core(self.runtime, context.actor) else "private_friend"
 
     def _limit(self, context, scope):
         target = ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW, context.role_binding.role,

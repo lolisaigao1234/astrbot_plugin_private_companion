@@ -3,6 +3,7 @@
 import json
 import re
 
+from companion_v2.conversation.linked_ownership import PRIVATE_HOST_ID
 from companion_v2.configuration.models import ConfigLayer, ConfigTarget
 from companion_v2.configuration.owners import SparseConfigurationOwner
 from companion_v2.configuration.registry import FieldDefinition, ValueKind
@@ -164,6 +165,8 @@ def _is_core_actor(runtime, actor):
     kind_value = getattr(kind, "value", kind)
     if runtime is None or not kind_value or not subject_id:
         return False
+    if getattr(getattr(actor, "principal", None), "host_id", None) == PRIVATE_HOST_ID:
+        return False  # a linked endpoint shares this subject, never its tier
     row = runtime.read_one(
         "SELECT tier FROM subject_access_tiers WHERE subject_kind = ? AND subject_id = ?",
         (kind_value, subject_id))

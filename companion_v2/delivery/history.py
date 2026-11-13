@@ -8,7 +8,9 @@ import json
 
 from companion_v2.execution.models import TaskContext, TaskError, digest, require, stamp
 from companion_v2.execution.service import outcome
+from companion_v2.conversation.linked_ownership import conversation_windows, same_conversation, window_filter
 from companion_v2.conversation.reset import background_current, boundary
+from companion_v2.foundation.refs import ScopeRef
 from companion_v2.conversation.private_history import PrivateConversationHistory
 from companion_v2.sources.dependencies import validation_batch
 
@@ -56,7 +58,7 @@ class BackgroundHistory:
         if cache is not None:
             yield cache
             return
-        cache = {"auth": {}, "records": {}, "dialogue": {}}
+        cache = {"auth": {}, "records": {}, "dialogue": {}, "windows": {}}
         token = self._validation.set(cache)
         try:
             yield cache
@@ -118,11 +120,11 @@ class BackgroundHistory:
             cache_key = (identifier, context.key, stamp(at), historical)
             cached = validated_records.get(cache_key) if validated_records is not None else None
             if cached is None:
-                row, request, body = self._validated_history_record(ref, context, at, historical=historical)
+                row, request, body, route = self._validated_history_record(ref, context, at, historical=historical)
                 if validated_records is not None:
-                    validated_records[cache_key] = (dict(ref), row, request, body)
+                    validated_records[cache_key] = (dict(ref), row, request, body, route)
             else:
-                cached_ref, row, request, body = cached
+                cached_ref, row, request, body, route = cached
                 if cached_ref != ref:
                     raise TaskError("delivery_history_changed", "history ancestry changed")
             self._references(body.dependencies)
@@ -130,6 +132,9 @@ class BackgroundHistory:
             if root is None:
                 root = {"owner": request.owner, "delivered_at": row["delivered_at"],
                         "recipient_read": "unknown", "text": body.text}
+                if route is not None:
+                    # A linked conversation's text left through its preferred endpoint.
+                    root["delivered_on"] = route["scope"]["platform"]
                 if round_metadata:
                     root["_history_round"] = "delivery:" + digest([request.owner, request.logical_key])
                     root["_history_part"] = {"sequence": request.sequence + 1,
@@ -142,22 +147,31 @@ class BackgroundHistory:
         row = self.delivery._row(identifier)
         if not historical and not background_current(self.runtime, identifier, context.scope):
             raise TaskError("conversation_context_reset", "the background message precedes this window's reset")
-        if (row["state"] != "delivered" or row["origin_key"] != context.key
+        # A member of a linked conversation also reads what was sent for its other
+        # windows, under its own permission; the receipt is the destination's.
+        origin, windows = row["origin_key"], self._windows(context)
+        if (row["state"] != "delivered" or origin not in (windows or (context.key,))
                 or self.reference(row) != ref or datetime.fromisoformat(row["delivered_at"]) > at):
             raise TaskError("delivery_history_changed", "history requires its original confirmed delivery")
         request = DeliveryRequest.restore(row["request_json"])
+        route = self.delivery.route(identifier) if windows else None
         if self.verify_platform_message is not None:
-            self.verify_platform_message(request.context.scope, row["platform_ref"])
+            self.verify_platform_message(ScopeRef.restore(route["scope"]) if route else request.context.scope,
+                                         row["platform_ref"])
         owner = self.delivery.owners.get(request.owner)
-        if (request.context.key != context.key or request.delivery_id != identifier
+        if (request.context.key != origin or request.delivery_id != identifier
                 or request.payload_hash != row["payload_hash"] or owner is None or owner.history_read is None):
             raise TaskError("delivery_history_unavailable", "history has no original authorized owner")
-        self._authorize(request.context, owner.action, at)
+        if not same_conversation(self.runtime, context.scope, request.context.scope):
+            # Whatever window it is filed under, text sent in another conversation is never shown in this one.
+            raise TaskError("delivery_history_unavailable", "history belongs to another conversation")
+        self._authorize(request.context if origin == context.key else context, owner.action, at)
         receipt = self.runtime.read_one("""SELECT receipt_json FROM background_delivery_receipts
             WHERE delivery_id = ? AND receipt_ref = ?""", (identifier, row["receipt_ref"]))
         proof = json.loads(receipt[0]) if receipt else {}
         if any(proof.get(key) != value for key, value in {
-            "part_id": identifier, "operation_id": row["operation_id"], "origin_key": context.key,
+            "part_id": identifier, "operation_id": row["operation_id"],
+            "origin_key": route["route_key"] if route else origin,
             "payload_hash": row["payload_hash"], "status": "delivered", "delivered_at": row["delivered_at"],
             "sender": json.loads(row["sender_json"]), "platform_ref": row["platform_ref"],
         }.items()):
@@ -166,7 +180,16 @@ class BackgroundHistory:
         if (not isinstance(body, HistoricalText)
                 or manifest_hash(body.text, body.image_manifests) != row["payload_hash"]):
             raise TaskError("delivery_history_changed", "historical body no longer matches the dispatch")
-        return row, request, body
+        return row, request, body, route
+
+    def _windows(self, context):
+        """This window's linked conversation, resolved once per bounded read; ``None`` outside a link."""
+        cache = self._validation.get()
+        if cache is None:
+            return conversation_windows(self.runtime, context)
+        if context.key not in cache["windows"]:
+            cache["windows"][context.key] = conversation_windows(self.runtime, context)
+        return cache["windows"][context.key]
 
     def capture(self, context, at, *, action="conversation.reply", limit=None, max_chars=None):
         with validation_batch(self.runtime, at), self.validation_scope() as cache:
@@ -182,21 +205,22 @@ class BackgroundHistory:
             return snapshot
         scan_limit = max(item_cap, MAX_SCAN_ROUNDS)
         reset = boundary(self.runtime, context.scope)
-        rounds = self.runtime.read_all("""SELECT owner, json_extract(request_json, '$.logical_key') AS logical_key,
+        windows, window = window_filter(self.runtime, context)
+        rounds = self.runtime.read_all(f"""SELECT owner, json_extract(request_json, '$.logical_key') AS logical_key,
                 MAX(delivered_at) AS latest_at
             FROM background_deliveries
-            WHERE origin_key = ? AND state = 'delivered' AND delivered_at <= ? AND rowid > ?
+            WHERE {windows} AND state = 'delivered' AND delivered_at <= ? AND rowid > ?
             GROUP BY owner, logical_key ORDER BY latest_at DESC, owner, logical_key LIMIT ?""",
-            (context.key, stamp(at), reset["background_sequence"] if reset is not None else 0, scan_limit))
+            (window, stamp(at), reset["background_sequence"] if reset is not None else 0, scan_limit))
         if not rounds:
             return snapshot
         clauses = " OR ".join("(owner = ? AND json_extract(request_json, '$.logical_key') = ?)"
                               for _ in rounds)
         pair_values = tuple(value for row in rounds for value in (row["owner"], row["logical_key"]))
         rows = self.runtime.read_all(f"""SELECT * FROM background_deliveries
-            WHERE origin_key = ? AND state = 'delivered' AND delivered_at <= ? AND rowid > ?
+            WHERE {windows} AND state = 'delivered' AND delivered_at <= ? AND rowid > ?
               AND ({clauses}) ORDER BY delivered_at DESC, delivery_id DESC""",
-            (context.key, stamp(at), reset["background_sequence"] if reset is not None else 0, *pair_values))
+            (window, stamp(at), reset["background_sequence"] if reset is not None else 0, *pair_values))
         grouped = {(row["owner"], row["logical_key"]): [] for row in rounds}
         for row in rows:
             request = DeliveryRequest.restore(row["request_json"])
