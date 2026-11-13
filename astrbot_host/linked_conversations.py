@@ -294,6 +294,9 @@ class LinkedConversations:
                 # Persist before selection: an interrupted operation remains closed,
                 # rather than allowing an endpoint to continue in a silent fork.
                 with session.runtime.transaction():
+                    for row in (old or {}).get("members", []):
+                        if all(row["origin"] != member["origin"] for member in members):
+                            session.authority.fence_removed_endpoint(row)
                     records = self.records()
                     records[body["link_id"]] = record
                     session.authority.write(KEY, records)

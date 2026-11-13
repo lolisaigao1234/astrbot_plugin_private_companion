@@ -615,6 +615,60 @@ class UnlinkAndRelinkQQTests(TelegramAloneFixture, unittest.IsolatedAsyncioTestC
         self.assertEqual(invalid["data"]["code"], "conversation_link_invalid")
 
 
+class RejoinFenceTests(TelegramAloneFixture, unittest.IsolatedAsyncioTestCase):
+    """What an endpoint captured before it was removed stays refused after it rejoins."""
+
+    access = UnlinkAndRelinkQQTests.access
+    thought = ProactiveAfterRetirementTests.thought
+
+    async def work_captured_before_a_removal_stays_refused_after_rejoining(self, leaving):
+        staying, names = 1 - leaving, ("first", "second")
+        # Background text goes to the member that stays, so nothing here depends on the one that leaves.
+        self.assertEqual((await self.link(preferred_target_id=names[staying]))["status"], "ok")
+        event, stale = await self.attempt(leaving, "before leaving", "1")
+        captured = stale["context"]
+        _, pending = await self.remind(leaving, "set before leaving", identifier="2", minutes=30)
+        set_before_leaving = self.reminder_id
+        keeper, kept = await self.remind(staying, "set by the member that stays", identifier="3", minutes=30)
+        self.assertEqual(self.access(captured, "memory.read"), "allowed")
+        self.assertEqual((await self.link(revision=1, members=[names[staying]]))["status"], "ok")
+        rejoined = await self.link(revision=2, members=[names[staying], names[leaving]])
+        self.assertEqual((rejoined["status"], rejoined["data"]["detached"]), ("ok", []))
+        self.sent.clear()
+        self.qq_calls().clear()
+        # The saved context, a reply prepared with it and a contact composed for it are refused.
+        for action in ("memory.read", "conversation.reply", "proactive.contact", "reminder.deliver",
+                       "memo.read", "extension.tool.invoke"):
+            self.assertEqual(self.access(captured, action), "role_binding_changed", action)
+        self.assertFalse((await self.controller.authorize_core_reply(event, stale)).is_success)
+        contact = await self.app.proactive.contact(captured, *self.thought(captured),
+            role_instruction=stale["instruction"], selection_seed="captured-before-leaving")
+        self.assertEqual(contact.failure.code, "role_binding_changed")
+        # The reminder it had set comes due after it rejoined and is not delivered.
+        self.assertEqual((await self.settled(keeper, kept, minutes=30))["delivery"], "delivered")
+        await self.idle()
+        dispatch = self.app.runtime.read_one("SELECT state, reason FROM agenda_dispatches WHERE occurrence_id = ?",
+                                             (pending,))
+        self.assertEqual((dispatch["state"], dispatch["reason"]), ("blocked", "role_binding_changed"))
+        delivered = self.telegram_texts() if staying == 1 else self.qq_texts()
+        self.assertEqual([text for _, text in delivered], ["set by the member that stays"])
+        # Fresh work after rejoining is accepted: a turn, and the same reminder once it is set again.
+        fresh = await self.turn(leaving, "back again", "5")
+        self.assertEqual(self.access(fresh["context"], "memory.read"), "allowed")
+        self.assertEqual(self.access(captured, "memory.read"), "role_binding_changed")
+        self.reminder_id = set_before_leaving
+        context, occurrence = await self.reschedule(leaving, identifier="6", minutes=10)
+        self.assertEqual((await self.settled(context, occurrence))["delivery"], "delivered")
+        delivered = self.telegram_texts() if staying == 1 else self.qq_texts()
+        self.assertEqual([text for _, text in delivered][-1], "set before leaving")
+
+    async def test_work_of_the_endpoint_the_conversation_started_on_stays_refused_after_it_rejoins(self):
+        await self.work_captured_before_a_removal_stays_refused_after_rejoining(leaving=0)
+
+    async def test_work_of_the_joined_endpoint_stays_refused_after_it_rejoins(self):
+        await self.work_captured_before_a_removal_stays_refused_after_rejoining(leaving=1)
+
+
 class OneCompanionWithoutQQTests(TelegramAloneFixture, unittest.IsolatedAsyncioTestCase):
     async def test_a_start_without_any_qq_channel_has_one_identity_one_set_of_owners_and_one_schedule(self):
         from companion_v2.conversation.linked_ownership import owner_scope
