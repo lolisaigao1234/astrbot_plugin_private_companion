@@ -754,6 +754,32 @@ class LinkedOwnerTests(LinkedReplyFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(archive.draft.context.scope.platform, "qq-main")
         self.assertEqual((activity.scope.platform, growth.sources[0].scope.platform), ("qq-main", "qq-main"))
 
+    async def test_the_most_recent_growth_reaches_the_reply_context_when_the_conversation_has_more_than_one_scan(self):
+        from datetime import timedelta
+        from companion_v2.role_work.growth import GrowthKind, RoleGrowthRecord
+        from companion_v2.role_work.growth.context import SCAN_LIMIT
+        self.assertEqual((await self.link())["status"], "ok")
+        prepared = [await self.turn(index, "Our growth", "growth-scan-%d" % index) for index in (0, 1)]
+        reader = self.app.role_growth_context.reader
+        # Twenty confirmed records on each endpoint, written alternately: the later, the higher its id.
+        for number in range(SCAN_LIMIT + 8):
+            turn = prepared[number % 2]
+            context, at = turn["context"], self.clock.now() + timedelta(seconds=number)
+            identifier, owner = "growth-%02d" % number, reader.owner(turn["context"])
+            reader.ledger.add(RoleGrowthRecord(identifier, owner, context.scope, GrowthKind.GOAL,
+                "Goal %02d" % number, "", "", (turn["native_source_future"].result(),), at, at,
+                proposed_by=context.actor.subject))
+            reader.ledger.confirm(identifier, owner=owner, scope=context.scope, expected_revision=1,
+                operation_id="confirm-" + identifier, actor=context.actor.subject, observed_at=at)
+        self.clock.advance(timedelta(minutes=5))
+        for turn in prepared:
+            self.grant(turn["context"], "role.growth.read")
+            found = reader.candidates(turn["context"], self.clock.now())
+            newest = [item.reference["growth_id"] for item in found.items]
+            self.assertEqual(newest, ["growth-%02d" % number
+                                      for number in range(SCAN_LIMIT + 7, 7, -1)])
+            self.assertTrue(found.truncated)
+
     async def test_diary_with_its_original_input_and_life_candidates_are_read_through_the_other_endpoint(self):
         from companion_v2.role_work.models import RoleActivity, RoleActivityState
         from companion_v2.role_work.journal.models import JournalContext, JournalDraft, JournalKey, JournalKind

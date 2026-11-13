@@ -69,11 +69,11 @@ class RoleGrowthContextReader:
             require(self.sources.validate_reference_for_audience(
                 source, recipient=context.actor.subject, observed_at=at))
 
-    def records_for_conversation(self, context, *, limit, **filters):
-        """Bounded inventory over the existing linked source scopes; no rows move."""
+    def records_for_conversation(self, context, *, limit, order=lambda record: record.growth_id, **filters):
+        """Bounded inventory over the existing linked source scopes, cut in the caller's order; no rows move."""
         return tuple(sorted((record for scope in shared_scopes(self.runtime, context.scope)
             for record in self.ledger.for_role(self.owner(context), scope=scope, limit=limit, **filters)),
-            key=lambda record: record.growth_id))[:limit]
+            key=order))[:limit]
 
     def _history(self, record, context, at):
         """Earlier progress notes whose evidence is *still* valid for this audience.
@@ -128,8 +128,10 @@ class RoleGrowthContextReader:
     def candidates(self, context, at):
         with self.runtime.read_snapshot():
             self._authorize(context, at)
-            active = self.records_for_conversation(context, state=GrowthState.ACTIVE, limit=SCAN_LIMIT)
-            paused = self.records_for_conversation(context, state=GrowthState.PAUSED, limit=SCAN_LIMIT)
+            def recent(item):
+                return -item.updated_at.timestamp(), item.growth_id
+            active = self.records_for_conversation(context, state=GrowthState.ACTIVE, limit=SCAN_LIMIT, order=recent)
+            paused = self.records_for_conversation(context, state=GrowthState.PAUSED, limit=SCAN_LIMIT, order=recent)
             # Most recently developed first, then active before paused, then by id so
             # the order is total. Ordering by id alone could spend a limited context
             # budget on whichever record happened to sort first.
