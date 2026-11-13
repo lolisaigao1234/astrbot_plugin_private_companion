@@ -140,9 +140,23 @@ class MultiPrivateBridge(NativePrivateBridge):
         target = self.targets.get((scope.platform, scope.account_id, scope.native_scope_id))
         if target is None and scope.kind is ScopeKind.PRIVATE:
             target = self.settings.private_target(scope.platform, scope.account_id, scope.native_scope_id)
-        if scope.kind is not ScopeKind.PRIVATE or target is None or target.bot_id != scope.bot_id:
+        if scope.kind is not ScopeKind.PRIVATE or target is None or self.authority.bot_id(target) != scope.bot_id:
             raise TaskError("host_target_unavailable", "the native private target is not configured")
         return target
+
+    def principal_host_id(self, scope):
+        if scope.kind is ScopeKind.GROUP:
+            return self.host_id
+        return self.authority.principal(self.target_for_scope(scope)).host_id
+
+    def account(self, scope):
+        from companion_v2.conversation.linked_ownership import link_for_scope
+        if link_for_scope(self.authority.runtime, scope) is not None:
+            target = self.target_for_scope(scope)
+            account = self.accounts.get((target.platform_id, target.account_id))
+            if account is not None:
+                return replace(account, bot_id=scope.bot_id)
+        return super().account(scope)
 
     def client(self, scope):
         if scope.kind is ScopeKind.GROUP:
@@ -188,8 +202,7 @@ class MultiPrivateBridge(NativePrivateBridge):
 
             event_id = native_id(message.message_id)
             at = datetime.fromtimestamp(event.created_at, timezone.utc)
-            principal = AuthenticatedHostPrincipal(self.installation_id, self.host_id, platform_id,
-                                                   sender, account.bot_id, login)
+            principal = self.authority.principal(target)
             owner = self.resolve_core_conversation_owner(target)
             linked_owner = owner if isinstance(owner, NativeServedConversation) else None
             if linked_owner is not None:
@@ -197,8 +210,10 @@ class MultiPrivateBridge(NativePrivateBridge):
             owner_platform, owner_login, owner_peer = owner.route_key
             owner_account = self.accounts[(owner_platform, owner_login)]
             conversation_id, role, instruction = await self._role(owner_account, owner_peer)
+            if linked_owner is not None:
+                conversation_id, role = linked_owner.scope.conversation_id, linked_owner.role
             scope = ScopeRef(self.installation_id, platform_id, ScopeKind.PRIVATE, sender,
-                             account.bot_id, login, conversation_id, sender)
+                             principal.bot_id, login, conversation_id, sender)
             if not platform_client_matches(self.platform(scope), event_client):
                 raise TaskError("host_client_mismatch", "private host account changed during persona lookup")
             self.client(scope)
@@ -639,7 +654,7 @@ class MultiHostSession:
 
     def scope(self, target, conversation_id):
         return ScopeRef(self.runtime.installation_id, target.platform_id, ScopeKind.PRIVATE, target.participant_id,
-                        target.bot_id, target.account_id, conversation_id, target.participant_id)
+                        self.authority.bot_id(target), target.account_id, conversation_id, target.participant_id)
 
     def _wake_snapshot(self, context):
         """Read the Reality wake signals for this exact private target.
@@ -667,6 +682,9 @@ class MultiHostSession:
     async def synchronize(self, target):
         account = self.bridge.accounts[(target.platform_id, target.account_id)]
         cid, role, instruction = await self.bridge._role(account, target.participant_id)
+        owner = self.bridge.resolve_core_conversation_owner(target)
+        if isinstance(owner, NativeServedConversation):
+            cid, role = owner.scope.conversation_id, owner.role
         scope = self.scope(target, cid)
         self.bridge.client(scope)
         context = self.authority.select(target, scope, role)

@@ -390,7 +390,8 @@ def with_contact_fields(registry):
 
 def target_for(context):
     return ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW, context.role_binding.role,
-                        context.scope, subject=context.actor.subject)
+                        context.scope, subject=context.actor.subject,
+                        storage_scope=getattr(context, "storage_scope", None))
 
 
 class ContactConfigurationOwner(SparseConfigurationOwner):

@@ -143,7 +143,8 @@ class PrivateImageNarrationService:
 
     def _route_signature(self, context):
         target = ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW,
-                              context.role_binding.role, context.scope)
+                              context.role_binding.role, context.scope,
+                              storage_scope=getattr(context, "storage_scope", None))
         snapshot = require(self.gateway.router.configuration.read(context.actor, target=target,
             group_id="model." + KIND, observed_at=self.tasks.now()))
         return digest({name: item.value for name, item in snapshot.fields.items()})

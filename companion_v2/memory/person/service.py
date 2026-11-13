@@ -9,6 +9,7 @@ content-provided identity.
 
 import json
 
+from companion_v2.conversation.linked_ownership import link_for_scope
 from companion_v2.conversation.foreground import ContextContribution, ContributionState
 from companion_v2.execution.models import TaskError, encode, require, stamp
 from companion_v2.foundation.refs import ScopeKind
@@ -84,13 +85,17 @@ class PersonAcquaintance:
             if not isinstance(events, list):
                 events = []
                 document["display_name_events"] = events
+            channel = ({"source_channel": context.scope.platform}
+                       if link_for_scope(self.runtime, context.scope) else {})
             changed = False
             if nickname and nickname != document["platform_nickname"]:
                 if document["platform_nickname"]:
                     events.insert(0, {"at": now, "kind": "platform_nickname",
-                                      "old": document["platform_nickname"], "new": nickname})
+                                      "old": document["platform_nickname"], "new": nickname, **channel})
                 document["platform_nickname"] = nickname
                 document["nickname_updated_at"] = now
+                if channel:
+                    document["platform_nickname_source_channel"] = context.scope.platform
                 changed = True
             if group_id is not None and card:
                 cards = document["group_cards"]
@@ -100,7 +105,7 @@ class PersonAcquaintance:
                         cards.pop(min(cards, key=lambda key: cards[key]["updated_at"]))
                     if current is not None and current["card"]:
                         events.insert(0, {"at": now, "kind": "group_card", "group_id": group_id,
-                                          "old": current["card"], "new": card})
+                                          "old": current["card"], "new": card, **channel})
                     cards[group_id] = {"card": card, "updated_at": now}
                     changed = True
             if not changed:
@@ -125,11 +130,14 @@ class PersonAcquaintance:
                    "display_name": name, "name_basis": basis,
                    "address_name": legacy, "address_basis": "legacy_private_contact" if legacy else None,
                    "known_names": list(known_names(document, context.scope)),
-                   "recent_renames": [{key: entry.get(key) for key in ("at", "kind", "old", "new")}
+                   "recent_renames": [{**{key: entry.get(key) for key in ("at", "kind", "old", "new")},
+                                       **({"source_channel": entry["source_channel"]} if "source_channel" in entry else {})}
                                       for entry in events[:3]],
                    "msg_count": summary["msg_count"],
                    "active_days": summary["active_days"], "first_seen": summary["first_seen"],
                    "last_seen": summary["last_seen"]}
+        if document.get("platform_nickname_source_channel"):
+            payload["display_name_source_channel"] = document["platform_nickname_source_channel"]
         if with_contexts:
             payload["contexts"] = {key: {"msg_count": entry["msg_count"], "active_days": entry["active_days"],
                                          "last_seen": entry["last_seen"]}

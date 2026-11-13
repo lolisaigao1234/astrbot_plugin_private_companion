@@ -45,7 +45,8 @@ def _target(context, layer):
     if layer is ConfigLayer.INSTALLATION:
         return ConfigTarget(scope.installation_id, layer)
     return ConfigTarget(scope.installation_id, layer, context.role_binding.role,
-                        scope if layer is ConfigLayer.WINDOW else None, bot_id=scope.bot_id)
+                        scope if layer is ConfigLayer.WINDOW else None, bot_id=scope.bot_id,
+                        storage_scope=context.storage_scope if layer is ConfigLayer.WINDOW else None)
 
 
 def _field(value, inherited):
@@ -351,7 +352,7 @@ class ModelManagement:
             scope = self.context.scope
             target = ConfigTarget(scope.installation_id, ConfigLayer.WINDOW,
                 self.context.role_binding.role, scope, bot_id=scope.bot_id,
-                subject=self.context.actor.subject)
+                subject=self.context.actor.subject, storage_scope=self.context.storage_scope)
         else:
             target = _target(self.context, layer)
         inherited_target = next((parent for parent in reversed(target.chain()[:-1])

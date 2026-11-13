@@ -283,7 +283,8 @@ def target_for(context, layer=ConfigLayer.WINDOW):
                             bot_id=context.scope.bot_id)
     if layer is not ConfigLayer.WINDOW:
         raise ValueError("reply configuration supports role defaults or one window")
-    return ConfigTarget(context.scope.installation_id, layer, context.role_binding.role, context.scope)
+    return ConfigTarget(context.scope.installation_id, layer, context.role_binding.role, context.scope,
+                        storage_scope=getattr(context, "storage_scope", None))
 
 
 def validate(values):

@@ -166,7 +166,8 @@ def target_for(context=None, *, installation_id=None):
     if context is None:
         return ConfigTarget(installation_id, ConfigLayer.INSTALLATION)
     return ConfigTarget(installation_id, ConfigLayer.WINDOW,
-                        context.role_binding.role, context.scope)
+                        context.role_binding.role, context.scope,
+                        storage_scope=getattr(context, "storage_scope", None))
 
 
 def migrate_legacy_policy_values(runtime):
@@ -216,7 +217,8 @@ def group_target_for(context):
     if context.scope.kind is not ScopeKind.GROUP:
         raise ConfigurationError("expression_settings_scope_invalid", "select one group")
     return ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW,
-                        context.role_binding.role, context.scope)
+                        context.role_binding.role, context.scope,
+                        storage_scope=getattr(context, "storage_scope", None))
 
 
 def role_scope_target_for(context):

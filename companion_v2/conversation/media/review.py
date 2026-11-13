@@ -314,7 +314,8 @@ class GroupImageReview:
     @staticmethod
     def _target(context):
         return ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW,
-                            context.role_binding.role, context.scope)
+                            context.role_binding.role, context.scope,
+                            storage_scope=getattr(context, "storage_scope", None))
 
     def configuration(self, context):
         snapshot = self.owner.read(self._target(context), configuration_fields())

@@ -92,7 +92,8 @@ def settings_for(runtime, context):
     if context.scope.kind is not ScopeKind.GROUP:
         raise TaskError("episode_group_required", "group episode settings need a group conversation")
     target = ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW,
-                          context.role_binding.role, context.scope)
+                          context.role_binding.role, context.scope,
+                          storage_scope=getattr(context, "storage_scope", None))
     snapshot = EpisodeConfigurationOwner(runtime).read(target, configuration_fields())
     return episode_settings({key.removeprefix(GROUP + "."): item.value
                              for key, item in snapshot.fields.items()

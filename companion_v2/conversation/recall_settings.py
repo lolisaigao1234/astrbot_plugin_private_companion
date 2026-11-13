@@ -30,7 +30,8 @@ LIMITS = {"transcribe_max_items": (1, 20), "transcribe_text_chars": (80, 2000),
 
 def target_for(context):
     return ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW,
-                        context.role_binding.role, context.scope)
+                        context.role_binding.role, context.scope,
+                        storage_scope=getattr(context, "storage_scope", None))
 
 
 def validate(values):

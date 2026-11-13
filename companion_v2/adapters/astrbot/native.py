@@ -481,6 +481,11 @@ class NativeInputPorts:
         return event.instruction
 
 
+def principal_host_id(bridge, scope):
+    resolver = getattr(bridge, "principal_host_id", None)
+    return resolver(scope) if callable(resolver) else bridge.host_id
+
+
 class NativePrivateBridge:
     scope_kind = ScopeKind.PRIVATE
 

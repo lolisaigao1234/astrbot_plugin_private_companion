@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import json
 from zoneinfo import ZoneInfo
 
+from companion_v2.conversation.linked_ownership import same_conversation
 from companion_v2.execution.models import TaskError, digest, encode, require, stamp
 from companion_v2.foundation.refs import OperationRef, RoleOwnerRef, VersionRef, normalize_utc
 from companion_v2.role_work.ledger import PersistentRoleLifeLedger
@@ -81,7 +82,8 @@ class RoleJournalService:
                 raise TaskError("journal_dependency_changed", "journal input revision is no longer current")
             entry = codec.entry_from_row(row)
             if scope is not None:
-                if entry.draft.context.scope != scope or any(a.scope != scope for a in entry.activity_evidence):
+                if not same_conversation(self.runtime, scope, entry.draft.context.scope) or any(
+                        not same_conversation(self.runtime, scope, a.scope) for a in entry.activity_evidence):
                     raise TaskError("journal_context_mismatch", "journal ancestry belongs to another conversation")
                 if (entry.updated_at > at
                         or current.local_date > at.astimezone(ZoneInfo(entry.draft.context.timezone)).date().isoformat()):

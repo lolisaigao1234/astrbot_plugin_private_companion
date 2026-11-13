@@ -23,7 +23,8 @@ LIMITS = {"max_links": (1, 5), "max_chars": (200, 8000), "timeout_seconds": (3, 
 
 def target_for(context):
     return ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW,
-                        context.role_binding.role, context.scope)
+                        context.role_binding.role, context.scope,
+                        storage_scope=getattr(context, "storage_scope", None))
 
 
 def validate(values):
