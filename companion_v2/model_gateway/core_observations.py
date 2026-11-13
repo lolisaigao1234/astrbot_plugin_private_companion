@@ -100,6 +100,10 @@ def observations_for_role(runtime, context, *, start=None, end=None, private_onl
                                      context.role_binding.role])
                                for scope in (link.scopes if link else (context.scope,))))
     where, values = ["role_key IN (" + ",".join("?" for _ in keys) + ")"], list(keys)
+    if link:
+        # A role key covers a whole account; the shared view is this conversation's own turns.
+        where.append("json_extract(context_json, '$.audience.scope') IN (" + ",".join("json(?)" for _ in link.scopes) + ")")
+        values.extend(encode(scope) for scope in link.scopes)
     if start is not None:
         where.append("julianday(received_at) >= julianday(?)")
         values.append(start)
