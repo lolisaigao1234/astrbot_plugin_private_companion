@@ -2,7 +2,7 @@
 
 Explicit links share native model history and the companion owners described below.
 AstrBot, its event origins, provider/tool runner, history format and transports are unchanged.
-Notes, reminders and the proactive schedule are not shared yet; see the boundaries below.
+Notes, reminders and calendar records share storage; preferred background delivery remains #6.
 
 ## Management
 
@@ -57,6 +57,26 @@ copies the joining endpoint's old records nor rewrites either endpoint's history
 
 - Long-term facts, relationship memory, the role body and its maintenance key use their
   existing bot/role/human owners. Person cards use the anchor's storage scope.
+  Read-only legacy memory queries use the existing companion's explicit import mapping at
+  that same anchor; imported rows keep their original channel mapping and historical status.
+- Notes and reminder records use the anchor's storage key. Both endpoints can list, read,
+  edit, complete or reopen notes, cancel or reschedule reminders and look up agenda receipts.
+  Existing records are read and edited in place. Each note retains its creator and physical
+  target; a reminder retains its physical target when the other endpoint changes it. Object
+  checks use that trusted source target with the authenticated caller's own permissions.
+  Storage ownership does not select a delivery endpoint; preferred routing and schedules are #6.
+- Non-role calendar reports and commitments use the same conversation owner. Calendar reads,
+  revisions and cancellation include records from both linked source scopes without moving
+  old records. Cancelling or revising an event can cancel its reminder from either endpoint,
+  subject to the caller's reminder permissions. Evidence and operation scopes stay physical.
+- Growth tools list records from both linked scopes in one ordered, paginated view. A pending
+  proposal can be revised from the other endpoint; each revision keeps its actual evidence.
+  Confirmed growth in reply context uses the same shared view and rechecks the reader's grants.
+- Text diagnostics inspect the shared settings with the requesting endpoint's permissions.
+  Repair proposals can be read and cancelled from either endpoint; their original review stays
+  intact. A review seals its originating actor's edit token, so a peer sees it as stale and must
+  obtain a fresh local review before confirming a configuration change. Diagnostic observations
+  and short-lived report tokens remain tied to the endpoint that performed the check.
 - Window settings are stored once, at the anchor. The address is resolved where configuration
   rows are keyed (the sparse settings owner and the configuration service), not by each
   feature: a target always carries the physical window, so authorization, the grants a
@@ -105,10 +125,9 @@ affected by an unreadable or malformed record; an endpoint known to be a member 
 until the record can be read again. Without an explicit link, owner resolution leaves
 existing addresses, stored record forms and query counts unchanged.
 
-This does **not** yet unify notes, reminders, non-role calendar records, the proactive and
-reminder schedule, proactive contact preferences' legacy fallbacks, or window budget accounts.
-Their owners are coupled to physical delivery or exact-scope accounting and belong to #5 and
-#6. Exact-window diagnostic/legacy usage views also remain physical. A detached anchor
+This does **not** yet unify the proactive and reminder schedule, proactive contact preferences'
+legacy fallbacks, or window budget accounts. Their owners are coupled to physical delivery or
+exact-scope accounting and belong to #6. Exact-window diagnostic/legacy usage views also remain physical. A detached anchor
 endpoint keeps the owner it natively holds; revoking that belongs to #7.
 The plugin's existing Dashboard log-buffer behavior is unchanged; the tagged input log
 is available through AstrBot's plugin logging. Independent-channel startup permits the
@@ -216,8 +235,8 @@ chats and chats that are not companion targets keep AstrBot's own replies.
   by physical origin and message ID, and survives plugin import reload. Durable redelivery
   across a process restart remains deferred per the owner's priorities.
 - Send exceptions retain existing unknown-outcome accounting. There is no automatic replay.
-- On a joining endpoint the open-item section is available but lists that endpoint's own
-  notes: notes, reminders, non-role calendar records and the growth list are not shared yet (#5, #6).
+- The open-item section and text tools see the linked conversation's notes and reminder records.
+  Changing a record does not reroute its delivery destination; preferred background delivery is #6.
 - Coherent controls (#7), cross-endpoint stop, preferred background delivery (#6) and
   operational recovery remain work.
 
@@ -262,7 +281,7 @@ installed plugin or a live data directory:
 python -X utf8 -m unittest -q \
   tests.test_linked_owners tests.test_linked_conversation tests.test_astrbot_linked_turn_contract \
   tests.test_core_reply_conversation_ownership tests.test_telegram_private_reply \
-  tests.test_telegram_linked_conversation
+  tests.test_telegram_linked_conversation tests.test_telegram_text_tools tests.test_linked_text_stores
 ```
 
 No network, installed plugin, deployment state or running AstrBot container is used.
