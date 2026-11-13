@@ -75,7 +75,9 @@ def native_input_images(messages, context, turn_id, *, optional=False):
 def native_offers(messages, context, turn_id):
     row = input_row(messages, context, turn_id)
     reference = source_from_document(json.loads(row["source_json"]))
-    return {"native-input:" + row["observation_id"]: (reference, "text", "current_source")}
+    from .native_quotes import offered
+    return {"native-input:" + row["observation_id"]: (reference, "text", "current_source"),
+            **offered(messages, context, reference, messages.tasks.now())}
 
 
 def group_reference(row):

@@ -201,6 +201,10 @@ class NativeConversationObservations:
                                  quote_sender_ids=tuple(
                                      quote.sender_id for quote in getattr(native_input, "quotes", ())))
         NativeConversationTurns(self.runtime).admit(context, native_input, turn_id, reference)
+        from .native_quotes import NativeTextQuote, publish
+        for quote in getattr(native_input, "quotes", ()):
+            if isinstance(quote, NativeTextQuote):
+                publish(self.messages, context, reference, quote)
         return reference
 
     def capture_output(self, context, *, turn_id, event_id, text, at, state="output_observed"):
