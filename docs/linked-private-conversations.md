@@ -220,8 +220,9 @@ affected by an unreadable or malformed record; an endpoint known to be a member 
 until the record can be read again. Without an explicit link, owner resolution leaves
 existing addresses, stored record forms and query counts unchanged.
 
-This does **not** unify proactive contact preferences' legacy fallbacks or window budget
-accounts, which stay with exact-scope accounting. Exact-window diagnostic/legacy usage views also remain physical.
+This does **not** unify proactive contact preferences' legacy fallbacks or the model
+gateway's window budget accounts, which stay with exact-scope accounting (the daily contact
+allowance is counted for the conversation, see "Reminders and proactive text"). Exact-window diagnostic/legacy usage views also remain physical.
 The plugin's existing Dashboard log-buffer behavior is unchanged; the tagged input log
 is available through AstrBot's plugin logging. Independent-channel startup permits the
 remaining endpoint to restart while the original platform is absent; the memory and
