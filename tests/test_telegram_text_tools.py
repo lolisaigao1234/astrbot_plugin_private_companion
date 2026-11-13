@@ -470,9 +470,16 @@ class TelegramTextToolTests(LinkedTelegramFixture, unittest.IsolatedAsyncioTestC
         await prepared["native_source_future"]
         context = prepared["context"]
         row = input_row(self.app.messages, context, prepared["turn_id"])
+        read, owners = self.app.messages._read_source, []
+
+        def counted(source, *args):
+            owners.append(source.owner)
+            return read(source, *args)
+        self.app.messages._read_source = counted
         history = body(self.app.messages, reference(row), context, self.clock.now())
         self.assertEqual(history["text"], "about that quote")
         self.assertEqual(history["quotes"][0]["text"], "hello 😀 quoted words")
+        self.assertEqual(owners.count("conversation.native_quote"), 1)
 
     async def test_remote_or_unattributed_reply_components_cannot_offer_another_source(self):
         from telegram import Update

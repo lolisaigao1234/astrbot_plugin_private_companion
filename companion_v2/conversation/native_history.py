@@ -71,11 +71,10 @@ def body(messages, ref, context, at, *, historical=False):
         origin = {"execution_path": "reality_local_audio" if local else "reality_chat",
                   "source_label": "现实设备已播放的话" if local else "现实提醒聊天副本"}
     if row["kind"] == "input":
-        from .native_quotes import offered
-        quotes = [json.loads(messages._read_source(ref, context, capability, at).payload)
-                  for ref, capability, _ in offered(messages, context, source, at).values()]
-        return {"role": "user", "received_at": row["observed_at"], "text": record.payload,
-                "owner": source.owner, **({"quotes": quotes} if quotes else {}), **origin}
+        from .native_quotes import snapshot
+        quote = snapshot(messages, context, source, at)
+        return {"role": "user", "received_at": row["observed_at"], "text": record.payload, "owner": source.owner,
+                **({"quotes": [json.loads(quote[1].payload)]} if quote else {}), **origin}
     sent = (messages.runtime.read_one("SELECT sent_at FROM conversation_native_sends WHERE observation_id=?",
                                      (row["observation_id"],))
             if messages.runtime.read_one("SELECT 1 FROM sqlite_master WHERE type='table' AND name='conversation_native_sends'", ()) else None)
