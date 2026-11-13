@@ -105,7 +105,10 @@ def _decide(command, context, session):
     for scope in shared_scopes(session.runtime, context.scope) if session.runtime is not None else ():
         other = ConversationWindow.from_scope(scope)
         if other != window:
-            application.reset_conversation_window(other, reset_id="chat-reset-" + digest([other.key, token]))
+            linked = application.reset_conversation_window(other, reset_id="chat-reset-" + digest([other.key, token]))
+            if linked.failure is not None:
+                return (f"部分完成：本窗口已重置（取消 {batches} 个批次），但共享对话的另一个窗口没有重置"
+                        f"（{_failure_reason(linked.failure)}），记忆没有清理。")
     cleared = management.clear(context, expected_revision_token=token,
                                operation_key="chat-reset-" + digest([window.key, token]))
     if cleared.failure is not None:
