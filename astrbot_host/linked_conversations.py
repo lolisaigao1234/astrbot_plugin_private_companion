@@ -115,7 +115,11 @@ class LinkedConversations:
     async def manage(self, body):
         required = {"schema_version", "link_id", "expected_revision", "conversation_id",
                     "source_target_id", "member_target_ids"}
-        if (set(body) != required or type(body["schema_version"]) is not int or body["schema_version"] != 1
+        # Optional: removed endpoints the administrator admits to independent use.
+        admitted = body.get("independent_target_ids", [])
+        if (set(body) - {"independent_target_ids"} != required or type(admitted) is not list
+                or any(type(value) is not str for value in admitted)
+                or type(body["schema_version"]) is not int or body["schema_version"] != 1
                 or type(body["expected_revision"]) is not int or body["expected_revision"] < 0
                 or any(type(body[key]) is not str or not body[key].strip() or len(body[key]) > 128
                        for key in ("link_id", "conversation_id", "source_target_id"))
@@ -150,6 +154,7 @@ class LinkedConversations:
         origins = {row["origin"] for row in members + (old["members"] if old else [])}
         if source is not None:
             origins.add(origin(source))
+        origins.update(origin(session.settings.target(identifier)) for identifier in admitted)
         if origins & self.gate.editing_origins:
             raise TaskError("linked_busy", "another link operation is in progress")
         if any(active_event_registry._events.get(umo) for umo in origins):
@@ -199,6 +204,14 @@ class LinkedConversations:
                                                "platform_name": source_platform.meta().name}
                 for row in members:
                     detached.pop(row["origin"], None)
+                released = [detached.pop(origin(session.settings.target(identifier)), None) for identifier in admitted]
+                if None in released:
+                    raise TaskError("conversation_link_invalid", "only a removed endpoint can be admitted independently")
+                if any(row["origin"] == anchor["origin"] for row in released):
+                    # Its native bot, role and human keys are the shared owner's: opened
+                    # beside the link it would read what the conversation learns later.
+                    raise TaskError("linked_anchor_endpoint_closed",
+                                    "the endpoint the conversation started on cannot be admitted independently")
                 record = {"schema_version": 1, "link_id": body["link_id"],
                     "revision": body["expected_revision"] + 1, "conversation_id": cid,
                     "anchor": anchor, "members": members, "detached": list(detached.values())}
@@ -221,9 +234,14 @@ class LinkedConversations:
                                 record["revision"]]), principal=principal, subject=subject,
                                 valid_from=session.now(), expected_revision=directory.revision)
                 self.gate.linked_cids.add(cid)
-                self.gate.linked_origins |= linked_origins(records)
+                self.gate.linked_origins = linked_origins(records)
                 for row in members:
                     await manager.switch_conversation(row["origin"], cid)
+                # A removed endpoint keeps no reference to the shared conversation. It
+                # stays refused; what it selects instead is new, empty and its own.
+                for row in record["detached"] + released:
+                    if await manager.get_curr_conversation_id(row["origin"]) in (cid, None):
+                        await manager.new_conversation(row["origin"], row["platform_id"])
                 return record
         finally:
             # The committed record, never a rolled-back attempt, is what owners resolve from.
