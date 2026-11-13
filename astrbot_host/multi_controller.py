@@ -81,6 +81,9 @@ class AstrBotMultiController:
         self._adopting_legacy_profile = False
         self.last_failure = None
         self._waiting_accounts = {}
+        # Late pick-up belongs to the session this controller started; a Stop ends it.
+        self._late_accounts_task = None
+        self._stops = 0
         self._termination_task = None
         self.poke_policy = PokePolicy()
         try:
@@ -234,15 +237,33 @@ class AstrBotMultiController:
     async def serve_available_accounts(self):
         """Run the start-up work of accounts that became available while the host runs.
 
-        Returns whether every configured account is now served, so the start-up
-        retry loop knows when it has nothing left to wait for.
+        Returns whether nothing is left to pick up: every configured account is
+        served and no window's start-up work is left to try again.
         """
         async with self._lifecycle_lock:
             session = self.session
             if self._terminated or session is None or session.application.state != "running":
                 return True
-            await session.bind_available_targets(late=True)
-            return not self._report_waiting_accounts()
+            failed = await session.bind_available_targets(late=True)
+            return not self._report_waiting_accounts() and not failed
+
+    async def _serve_late_accounts(self):
+        delay = 0.5
+        while True:
+            try:
+                if await self.serve_available_accounts():
+                    return
+            except Exception as error:
+                logger.warning("[CompanionV2] 账号接入检查失败，稍后重试 code=%s error_type=%s",
+                               getattr(error, "code", "unknown"), type(error).__name__)
+            await asyncio.sleep(delay)
+            delay = min(delay * 1.8, 30.0)
+
+    def _pick_up_late_accounts(self, wanted):
+        if self._late_accounts_task is not None:
+            self._late_accounts_task.cancel()
+        self._late_accounts_task = asyncio.create_task(
+            self._serve_late_accounts(), name="companion:late-accounts") if wanted else None
 
     @property
     def profile_root(self):
@@ -1264,6 +1285,7 @@ class AstrBotMultiController:
             self._accepting, self.last_failure = True, None
             targets = len(self.settings.all_targets)
             self._report_waiting_accounts()
+            self._pick_up_late_accounts(True)
         return Outcome.success({"state": "running", "targets": targets, "startup": result.unwrap()})
 
     def _startup_generations(self):
@@ -1677,8 +1699,11 @@ class AstrBotMultiController:
 
     async def stop(self, *, grace_seconds=0.5):
         self._accepting = False
+        # A start-up retry that was scheduled before this Stop must not undo it.
+        self._stops += 1
         async with self._lifecycle_lock:
             self._accepting = False
+            self._pick_up_late_accounts(False)
             try:
                 async with self._control_lock:
                     session = self.session

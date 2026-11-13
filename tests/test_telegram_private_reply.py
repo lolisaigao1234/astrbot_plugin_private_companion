@@ -88,6 +88,9 @@ class TelegramPrivateReplyTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         observer = self.controller.session.core_reply_observations
         while pending := observer._pending - observer._intervention_tasks:
             await asyncio.gather(*tuple(pending))
+            # A task can be done with its own done callbacks still queued; gather then
+            # completes without yielding, so yield once to let them clear the set.
+            await asyncio.sleep(0)
 
     async def intake(self, **kwargs):
         event = telegram_event(self.platform, **kwargs)

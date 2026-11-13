@@ -103,10 +103,11 @@ class LinkedConversations:
             conversation_persona_id=conversation.persona_id)
         services = await sp.get_async(scope="umo", scope_id=umo, key="session_service_config", default={}) or {}
         variables = await sp.session_get(umo, "session_variables", {})
-        # Only what AstrBot resolves per origin and that shapes the turn; the runner
-        # and the companion's enablement are required above. Digests only: never
-        # provider credentials or session-variable values.
-        return digest({"provider_settings": cfg.get("provider_settings"),
+        # Only what AstrBot resolves per origin and that shapes the turn, including
+        # the runner's history compression and fallback models; the companion's
+        # enablement is required above. Digests only: never provider credentials
+        # or session-variable values.
+        return digest({"provider_settings": cfg.get("provider_settings"), "agent_runner": cfg.get("agent_runner"),
             "provider": provider.provider_config.get("id"), "model": provider.get_model(),
             "persona": selected[:3], "services": services, "variables": variables})
 
@@ -360,7 +361,8 @@ async def refuse_unavailable_link(controller, event):
             and getattr(getattr(session, "application", None), "state", None) == "running"):
         return False
     gate = LinkedTurnGate.shared()
-    if getattr(gate, "linked_origins", None) is None:
+    linked = getattr(gate, "linked_origins", None)
+    if linked is None:
         # A new process whose host has not assembled yet: read the one
         # management record once, with no migrations, creation or startup.
         root = getattr(controller, "profile_root", None)
@@ -375,12 +377,13 @@ async def refuse_unavailable_link(controller, event):
         try:
             with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as connection:
                 row = connection.execute("SELECT value FROM runtime_metadata WHERE key = ?", (KEY,)).fetchone()
-            gate.linked_origins = linked_origins(json.loads(row[0]) if row else {})
+            linked = gate.linked_origins = linked_origins(json.loads(row[0]) if row else {})
         except (OSError, sqlite3.Error, ValueError, TypeError, KeyError, AttributeError) as error:
-            # Nothing establishes a link for this origin: AstrBot's own reply continues.
+            # Only an exact configured private target can be a link member: without
+            # the record those stay closed, and every other chat keeps AstrBot's reply.
             logger.warning("[CompanionV2] 共享对话记录暂不可读 error_type=%s", type(error).__name__)
-            return False
-    if umo not in gate.linked_origins:
+            linked = {origin(target) for target in controller.settings.targets if target.participant_id != "*"}
+    if umo not in linked:
         return False
     event.stop_event()
     event.set_extra("companion_linked_failure", "linked_host_unavailable")

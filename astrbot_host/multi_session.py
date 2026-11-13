@@ -722,35 +722,38 @@ class MultiHostSession:
 
         A target whose account is unavailable is left out and stays due. A
         ``late`` call comes from a host that is already running: it takes only
-        the targets that are still due, each exactly once, and keeps one
-        target's failure away from the accounts that are being served.
+        the targets that are still due, counts one as started once its work
+        succeeded, and keeps one target's failure away from the others. It
+        returns whether a failed target is left to try again.
         """
         targets = [target for target in self.settings.primary_targets if target.participant_id != "*"]
         targets.extend(self._prepared_wildcard_private_targets())
         seen = set(self._started_targets) if late else set()
+        failed = False
         for target in targets:
             if target.target_id in seen:
                 continue
             seen.add(target.target_id)
             if not self.bridge.account_connected(self.bridge.accounts[(target.platform_id, target.account_id)]):
                 continue
-            self._started_targets.add(target.target_id)
             try:
                 context, instruction = await self.synchronize(target)
-            except TaskError as error:
-                if error.code in ("host_persona_unmapped", "host_persona_window_unbound"):
-                    # Leave this target unrouted until its V2 window persona is explicit.
+                self.application.life_runtime.bind(context, instruction, guard=self.bridge.verify_role)
+                self.application.state_maintenance.bind(context, instruction, guard=self.bridge.verify_role)
+                self.application.contact_schedule.bind_context(context)
+                if self.application.presence is not None:
+                    self.application.presence.bind(context)
+            except Exception as error:
+                # An unmapped target stays unrouted until its V2 window persona is explicit.
+                if getattr(error, "code", None) not in ("host_persona_unmapped", "host_persona_window_unbound"):
+                    if not late:
+                        raise
+                    logger.warning("[CompanionV2] 账号上线后的窗口准备未完成，稍后重试 target=%s code=%s error_type=%s",
+                                   target.target_id, getattr(error, "code", "unknown"), type(error).__name__)
+                    failed = True
                     continue
-                if not late:
-                    raise
-                logger.warning("[CompanionV2] 账号上线后的窗口准备未完成，等它的下一条消息再绑定 target=%s code=%s",
-                               target.target_id, error.code)
-                continue
-            self.application.life_runtime.bind(context, instruction, guard=self.bridge.verify_role)
-            self.application.state_maintenance.bind(context, instruction, guard=self.bridge.verify_role)
-            self.application.contact_schedule.bind_context(context)
-            if self.application.presence is not None:
-                self.application.presence.bind(context)
+            self._started_targets.add(target.target_id)
+        return failed
 
     async def start(self, *, expected_task_generation, expected_model_generation):
         if self.core_reply_observations is not None and not self._native_turns_recovered:

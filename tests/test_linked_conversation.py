@@ -49,11 +49,7 @@ class LinkedConversationConcurrencyTests(LinkedReplyFixture, unittest.IsolatedAs
         a, b = self.event_for(0), self.event_for(1)
         first = await self.dispatch(a)
         await asyncio.wait_for(self.model_done.wait(), 15)
-        reads = len(self.manager.reads)
-        second = await self.dispatch(b)
-        await asyncio.sleep(.05)
-        self.assertEqual(len(self.manager.reads), reads)
-        self.assertEqual(len(self.calls), 1)
+        second = await self.held_at_permit(b)
         self.allow_model.set()
         await asyncio.wait_for(self.manager.saving.wait(), 10)
         await asyncio.sleep(.05)
@@ -119,9 +115,7 @@ class LinkedConversationConcurrencyTests(LinkedReplyFixture, unittest.IsolatedAs
         a, b = self.event_for(0), self.event_for(1)
         first = await self.dispatch(a)
         await asyncio.wait_for(self.model_done.wait(), 15)
-        second = await self.dispatch(b)
-        await asyncio.sleep(.05)
-        self.assertEqual(len(self.calls), 1)
+        second = await self.held_at_permit(b)
         self.allow_model.set()
         await asyncio.wait_for(asyncio.gather(first, second, return_exceptions=True), 20)
         await self.controller.session.linked_conversations.gate.drain()
@@ -181,9 +175,7 @@ class LinkedConversationConcurrencyTests(LinkedReplyFixture, unittest.IsolatedAs
             event.set_extra("synthetic_stream_transport", true_streaming)
         first = await self.dispatch(a)
         await asyncio.wait_for(self.final_model_done.wait(), 15)
-        second = await self.dispatch(b)
-        await asyncio.sleep(.05)
-        self.assertEqual(len(self.calls), 1)
+        second = await self.held_at_permit(b)
         self.allow_final_model.set()
         await asyncio.wait_for(self.manager.saving.wait(), 10)
         self.assertEqual(len(self.calls), 1)
@@ -230,9 +222,7 @@ class LinkedConversationConcurrencyTests(LinkedReplyFixture, unittest.IsolatedAs
             self.pause_model = True
         first = await self.dispatch(self.event_for(0))
         await asyncio.wait_for((self.manager.saving if when == "saving" else self.model_done).wait(), 15)
-        second = await self.dispatch(self.event_for(1))
-        await asyncio.sleep(.05)
-        self.assertEqual(len(self.calls), 1)
+        second = await self.held_at_permit(self.event_for(1))
         first.cancel()
         await asyncio.wait_for(asyncio.gather(first, second, return_exceptions=True), 20)
         await self.controller.session.linked_conversations.gate.drain()
@@ -324,9 +314,28 @@ class LinkedConversationConcurrencyTests(LinkedReplyFixture, unittest.IsolatedAs
         await asyncio.wait_for(await self.dispatch(linked), 10)
         self.assertTrue(linked.is_stopped())
         self.assertEqual(len(self.calls), 2)
-        # A new process has no in-memory index: the failed read stops nothing.
+        # A new process has no in-memory index: after the failed read, group chats
+        # and chats that are not companion targets are still answered by AstrBot.
         LinkedTurnGate.shared().linked_origins = None
-        await answered_by_astrbot(self.event_for(1, "cold", "cold-message"))
+        await answered_by_astrbot(self.event_for(1, "cold", "cold-group", group="300"))
+        await answered_by_astrbot(self.event_for(1, "cold", "cold-stranger", sender="201"))
+
+    async def test_cold_controller_with_an_unreadable_link_record_refuses_the_linked_turn(self):
+        from astrbot_host.linked_turn_gate import LinkedTurnGate
+        from companion_v2.storage.runtime import StorageRuntime
+        self.assertEqual((await self.link())["status"], "ok")
+        await self.controller.terminate()
+        self.controller = self.make_controller()
+        self.plugin.staging = self.controller
+        # A new process: no in-memory index, and the persisted record cannot be read.
+        LinkedTurnGate.shared().linked_origins = None
+        database = self.controller.profile_root / "runtime" / StorageRuntime.DATABASE_FILENAME
+        database.write_bytes(b"synthetic unreadable store")
+        event = self.event_for(1)
+        await asyncio.wait_for(await self.dispatch(event), 10)
+        self.assertTrue(event.is_stopped())
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.manager.writes, [])
 
     async def test_cold_controller_refuses_linked_native_turn_before_host_has_loaded(self):
         from astrbot_host.linked_turn_gate import LinkedTurnGate
@@ -362,9 +371,7 @@ class LinkedConversationConcurrencyTests(LinkedReplyFixture, unittest.IsolatedAs
         first = await self.dispatch(a)
         await asyncio.wait_for(first, 15)
         await asyncio.wait_for(barrier_held.wait(), 5)
-        second = await self.dispatch(self.event_for(1))
-        await asyncio.sleep(.05)
-        self.assertEqual(len(self.calls), 1)
+        second = await self.held_at_permit(self.event_for(1))
         self.assertFalse(second.done())
         self.assertEqual(self.manager.writes, [])
         release_barrier.set()
@@ -548,6 +555,29 @@ class LinkedConversationConcurrencyTests(LinkedReplyFixture, unittest.IsolatedAs
         self.assertFalse(event.is_stopped())
         self.assertEqual(self.contents(await self.history()), ["old", "old-reply", "B", "reply-B"])
         self.assertEqual(self.controller.session.linked_conversations.get("owner-dialogue")["revision"], 1)
+
+    async def test_members_with_different_history_limits_are_refused_before_the_model(self):
+        from copy import deepcopy
+        from types import SimpleNamespace as NS
+        from astrbot.core.pipeline.context import PipelineContext
+        from astrbot.core.pipeline.scheduler import PipelineScheduler
+        self.assertEqual((await self.link())["status"], "ok")
+        # AstrBot resolves the runner's compression policy per origin: one member
+        # is routed to a profile, with its own pipeline, that keeps a single turn.
+        config = deepcopy(self.config)
+        config["agent_runner"]["config"]["compression"].update(max_turns=1, overflow_strategy="truncate_by_turns")
+        profile_id = await self.acm.create_conf(config, name="synthetic-short-history-profile")
+        scheduler = PipelineScheduler(PipelineContext(self.acm.confs[profile_id], NS(context=self.core_context),
+                                                      profile_id, self.db))
+        await scheduler.initialize()
+        self.bus.pipeline_scheduler_mapping[profile_id] = scheduler
+        await self.acm.ucr.update_route(ORIGINS[1], profile_id)
+        event = self.event_for(1)
+        await asyncio.wait_for(await self.dispatch(event), 15)
+        self.assertTrue(event.is_stopped())
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.manager.writes, [])
+        self.assertEqual(self.contents(await self.history()), ["old", "old-reply"])
 
     async def test_links_require_local_runner_and_enabled_companion_hooks(self):
         saved = self.config["agent_runner"]["runner_type"]

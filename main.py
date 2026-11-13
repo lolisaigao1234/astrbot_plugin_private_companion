@@ -545,8 +545,7 @@ class PrivateCompanionV2StagingPlugin(Star):
         self._startup_failure_key = None
         logger.info("[CompanionV2] staging profile %s并开始接收入站消息",
                     "已自动初始化" if initialized_profile else "已加载")
-        # An account that is still unavailable keeps this retry loop alive.
-        return await self.staging.serve_available_accounts()
+        return True
 
     @staticmethod
     def _retry_startup_failure(code: str) -> bool:
@@ -576,31 +575,30 @@ class PrivateCompanionV2StagingPlugin(Star):
             logger.warning("[CompanionV2] 保存的运行档暂不能启动 code=%s error_type=%s detail=%s",
                            code, error_type or "unknown", detail or "unavailable")
 
-    def _host_serving(self) -> bool:
-        session = self.staging.session
-        return bool(self.staging._accepting and session is not None
-                    and session.application.state == "running")
-
     def _schedule_host_start(self) -> None:
         if self.staging._terminated:
+            return
+        session = self.staging.session
+        if (self.staging._accepting and session is not None
+                and session.application.state == "running"):
             return
         task = self._host_start_task
         if task is None or task.done():
             self._host_start_task = asyncio.create_task(
-                self._wait_for_host_start(), name="companion:host-startup")
+                self._wait_for_host_start(self._host_stops()), name="companion:host-startup")
 
-    async def _wait_for_host_start(self) -> None:
+    def _host_stops(self) -> int:
+        return getattr(self.staging, "_stops", 0)
+
+    async def _wait_for_host_start(self, stops: int) -> None:
         loop = asyncio.get_running_loop()
         started_at = loop.time()
         delay = 0.5
         warned = False
-        serving = self._host_serving()
-        while not self.staging._terminated:
+        # A Stop since this retry was scheduled ends it: only a later event starts the host.
+        while not self.staging._terminated and stops == self._host_stops():
             try:
-                # Once the host serves, only accounts that were unavailable are left to
-                # pick up; a host that was stopped since then is not started again here.
-                finished = await (self.staging.serve_available_accounts() if serving
-                                  else self._try_start_host())
+                finished = await self._try_start_host()
             except asyncio.CancelledError:
                 raise
             except Exception as error:
@@ -609,8 +607,7 @@ class PrivateCompanionV2StagingPlugin(Star):
                 return
             if finished:
                 return
-            serving = serving or self._host_serving()
-            if not warned and not serving and loop.time() - started_at >= 30:
+            if not warned and loop.time() - started_at >= 30:
                 logger.warning("[CompanionV2] 运行档尚未进入接收状态，恢复任务仍在运行并会自动重试")
                 warned = True
             await asyncio.sleep(delay)

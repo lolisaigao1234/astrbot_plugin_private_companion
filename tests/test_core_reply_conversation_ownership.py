@@ -76,6 +76,9 @@ class CoreReplyConversationOwnershipTests(MultiFixture, unittest.IsolatedAsyncio
         observer = self.controller.session.core_reply_observations
         while observer._pending:
             await asyncio.gather(*tuple(observer._pending))
+            # A task can be done with its own done callbacks still queued; gather then
+            # completes without yielding, so yield once to let them clear the set.
+            await asyncio.sleep(0)
 
     async def run_native_reply(self, event):
         """Real build, runner, tool dispatch, send and save; only external ports are fake."""
