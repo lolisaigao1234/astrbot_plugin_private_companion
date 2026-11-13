@@ -59,7 +59,8 @@ class MultiAuthority:
             return None
 
     def _provision_context_grants(self, context):
-        if link_for_scope(self.runtime, context.scope) is not None:
+        from companion_v2.role_work.state.configuration import settings_decide_grants
+        if not settings_decide_grants(self.runtime, context.scope):
             # Shared settings issue nothing for a member: its grants are its own saves.
             return
         from companion_v2.role_work.growth.configuration import (

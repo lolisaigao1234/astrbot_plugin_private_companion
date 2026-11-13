@@ -2,7 +2,7 @@
 
 from companion_v2.configuration.models import ApplyMode, ConfigLayer, ConfigTarget, ConfigurationError
 from companion_v2.configuration.registry import FieldDefinition, ValueKind
-from companion_v2.conversation.linked_ownership import link_for_scope
+from companion_v2.conversation.linked_ownership import conversation_link
 from companion_v2.execution.models import digest
 from companion_v2.foundation.refs import ScopeKind
 from companion_v2.identity_policy.models import AuthorizationTier, GrantState
@@ -116,9 +116,10 @@ def settings_decide_grants(runtime, scope):
     """Whether a window's settings may issue or revoke its grants without a save.
 
     Inside a linked conversation the settings are shared and authority is not: a
-    member's grants change only when that member saves a setting itself.
+    member's grants change only when that member saves a setting itself. A
+    removed endpoint's scope is the conversation's too, and gets nothing either.
     """
-    return scope.kind is ScopeKind.PRIVATE and link_for_scope(runtime, scope) is None
+    return scope.kind is ScopeKind.PRIVATE and conversation_link(runtime, scope) is None
 
 
 def ensure_window_presentation_grants(runtime, context, observed_at):

@@ -434,6 +434,12 @@ class LinkedOwnerTests(LinkedReplyFixture, unittest.IsolatedAsyncioTestCase):
         for index in (0, 1):
             await self.turn(index, "Later", "state-read-later-%d" % index)
         self.assertEqual(held(), saved)
+        # Nor does a read while the peer is removed leave it anything to come back to.
+        self.assertEqual((await self.link(revision=1, members=["first"]))["status"], "ok")
+        StateManagement(self.app, second).status(operator)
+        self.assertEqual((await self.link(revision=2))["status"], "ok")
+        second = (await self.turn(1, "A member again", "state-read-rejoined"))["context"]
+        self.assertEqual(held(), saved)
 
     async def test_a_joined_endpoint_keeps_owner_features_on_its_own_window_only(self):
         from companion_v2.identity_policy.object_access import ObjectAccessPolicy
