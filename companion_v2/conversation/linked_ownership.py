@@ -25,10 +25,13 @@ class _Link(dict):
         self.role_id = record["anchor"]["role"]["subject_id"]
         self.endpoints = tuple((member["platform_id"], member["account_id"], member["participant_id"])
                                for member in record["members"])
-        self.scopes = tuple(dict.fromkeys((self.anchor, *(self.scope_at(member["platform_id"],
-            member["account_id"], member["participant_id"])
-            # An endpoint that left, also for a conversation of its own, wrote records here.
-            for member in record["members"] + record.get("detached", []) + record.get("former", [])))))
+        def scopes(rows):
+            return tuple(dict.fromkeys((self.anchor, *(self.scope_at(
+                row["platform_id"], row["account_id"], row["participant_id"]) for row in rows))))
+        # The windows that are this conversation's alone: its members, and removed endpoints while they stay closed.
+        self.windows = scopes(record["members"] + record.get("detached", []))
+        # An endpoint that left for a conversation of its own wrote records here too; its window is that one's now.
+        self.scopes = scopes(record["members"] + record.get("detached", []) + record.get("former", []))
         wanted = preferred_target_id(record)
         self.preferred = next((endpoint for member, endpoint in zip(record["members"], self.endpoints)
                                if wanted is not None and member.get("target_id") == wanted), None)
@@ -206,12 +209,14 @@ def conversation_windows(runtime, context):
     ``None`` outside a link: one window, read as it always was. A member reads,
     in place, what was recorded for the other scopes of its link as well, each
     under the window of that scope's latest turn; nothing is copied or rekeyed.
+    A window is the conversation's only when the scope recorded with it is one
+    of the link's in full: the same endpoint in another conversation is not.
     """
     link = link_for_scope(runtime, context.scope)
     if link is None:
         return None
     from companion_v2.conversation.native_turns import latest_scope
-    latest = (latest_scope(runtime, scope) for scope in link.scopes if scope != context.scope)
+    latest = (latest_scope(runtime, scope, conversation=True) for scope in link.scopes if scope != context.scope)
     return tuple(dict.fromkeys((context.key, *(row["context_key"] for row in latest if row is not None))))
 
 

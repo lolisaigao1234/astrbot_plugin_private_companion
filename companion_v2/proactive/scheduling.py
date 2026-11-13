@@ -298,8 +298,9 @@ class ContactSchedule:
         The endpoints of a linked conversation are one proactive schedule. The
         window the human last used carries it, with that window's own permission
         and evidence, provided its endpoint can: among the members that are
-        available and hold the permission themselves, the one with the most
-        recent turn. Every other window of the conversation waits.
+        available, hold the permission themselves and whose last turn may still
+        run, the one with the most recent turn. Every other window of the
+        conversation waits.
         """
         from companion_v2.conversation.native_turns import latest_scope
 
@@ -311,22 +312,28 @@ class ContactSchedule:
         turns = []
         for endpoint in link.endpoints:
             scope = link.scope_at(*endpoint)
-            turn = latest if scope == context.scope else latest_scope(self.runtime, scope)
+            turn = latest if scope == context.scope else latest_scope(self.runtime, scope, conversation=True)
             if turn is not None:
-                turns.append(((turn["created_at"], turn["batch_id"]), scope, endpoint))
+                turns.append(((turn["created_at"], turn["batch_id"]), scope, endpoint, turn))
         turns.sort(key=lambda item: item[0], reverse=True)
-        carrier = next((scope for _, scope, endpoint in turns if self._can_carry(link, endpoint)),
+        carrier = next((scope for _, scope, endpoint, turn in turns if self._can_carry(link, endpoint, turn)),
                        turns[0][1] if turns else context.scope)
         return carrier != context.scope
 
-    def _can_carry(self, link, endpoint):
-        """The member's own context exists on a connected account and holds the contact permission."""
+    def _can_carry(self, link, endpoint, turn):
+        """The member's own context exists on a connected account and holds the contact permission.
+
+        So does the context its turn was captured with, which is the one the
+        schedule would run from: a turn from before the member was removed stays
+        refused after it rejoins, and the next member carries.
+        """
         destination = self.contacts.delivery.destination
         if destination is None:
             return True
         try:
-            return self.tasks.check_context_access(destination(link, endpoint), action=GROUP,
-                                                   observed_at=self.tasks.now()).is_success
+            captured = TaskContext.restore(json.loads(turn["context_json"]))
+            return all(self.tasks.check_context_access(context, action=GROUP, observed_at=self.tasks.now()).is_success
+                       for context in (destination(link, endpoint), captured))
         except Exception:  # noqa: BLE001 - a member that cannot be resolved cannot carry the schedule
             return False
 
@@ -337,7 +344,7 @@ class ContactSchedule:
         latest = max(event.received_at, datetime.fromisoformat(row["created_at"]))
         link = conversation_link(self.runtime, context.scope)
         for endpoint in link.endpoints if link is not None else ():
-            turn = latest_scope(self.runtime, link.scope_at(*endpoint))
+            turn = latest_scope(self.runtime, link.scope_at(*endpoint), conversation=True)
             if turn is not None:
                 latest = max(latest, datetime.fromisoformat(turn["created_at"]))
         return latest

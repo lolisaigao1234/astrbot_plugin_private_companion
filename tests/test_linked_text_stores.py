@@ -10,8 +10,6 @@ from tests import test_telegram_text_tools as text_tools
 
 
 class LinkedTextStoreFixture(LinkedTelegramFixture):
-    extra_targets = ()
-
     def make_controller(self, config=None):
         from tests.multi_host_support import multi_config
         from companion_v2.adapters.astrbot.staging_config import REQUIRED_CAPABILITIES
@@ -21,9 +19,6 @@ class LinkedTextStoreFixture(LinkedTelegramFixture):
             "calendar.read", "calendar.write", "role.growth.read", "role.growth.propose", "role.life.read",
             "relationship.memory.read", "relationship.memory.propose", "reminder.deliver", "memo.reminder.set",
             "configuration.write"}))
-        for target in self.extra_targets:
-            if not any(row["target_id"] == target["target_id"] for row in config["multi_host"]["targets"]):
-                config["multi_host"]["targets"].append(dict(target))
         return super().make_controller(config)
     turn = text_tools.TelegramTextToolTests.turn
     run_tools = text_tools.TelegramTextToolTests.run_tools
