@@ -302,3 +302,86 @@ class PreferredRouteFenceTests(PreferredChannelFixture, unittest.IsolatedAsyncio
         self.assertEqual(self.receipts(report), [("not_sent", "delivery_route_changed")])
         await self.idle()
         self.assertEqual((self.telegram_texts(), self.qq_texts()), ([], []))
+
+
+class LinkedContactScheduleTests(PreferredChannelFixture, unittest.IsolatedAsyncioTestCase):
+    """The windows of a linked conversation are one proactive schedule: its most recent window's."""
+
+    def evaluated(self, *contexts):
+        """Run one schedule pass; say what it decided about each window."""
+        self.app.contact_schedule.advance()
+        return [self.app.contact_schedule.diagnostic_for(context)["evaluation"]["reason_code"] for context in contexts]
+
+    async def spoken(self, index, identifier):
+        self.clock.advance(timedelta(seconds=5))
+        context = (await self.turn(index, "hello", identifier))["context"]
+        observer = self.controller.session.core_reply_observations
+        while pending := observer._pending - observer._intervention_tasks:
+            await asyncio.gather(*tuple(pending))
+            await asyncio.sleep(0)
+        return context
+
+    async def test_only_the_window_of_the_latest_turn_is_scheduled_also_after_a_restart(self):
+        superseded = "linked_conversation_continues_on_another_endpoint"
+        self.assertEqual((await self.link())["status"], "ok")
+        qq = await self.spoken(0, "qq-1")
+        self.assertNotIn(superseded, self.evaluated(qq))
+        telegram = await self.spoken(1, "tg-1")
+        decided = self.evaluated(qq, telegram)
+        self.assertEqual(decided[0], superseded)
+        self.assertNotEqual(decided[1], superseded)
+        await self.restart()
+        decided = self.evaluated(qq, telegram)
+        self.assertEqual(decided[0], superseded)
+        self.assertNotEqual(decided[1], superseded)
+        qq = await self.spoken(0, "qq-2")
+        decided = self.evaluated(qq, telegram)
+        self.assertNotEqual(decided[0], superseded)
+        self.assertEqual(decided[1], superseded)
+
+    async def test_a_contact_planned_on_one_endpoint_is_withdrawn_when_the_human_speaks_on_the_other(self):
+        from companion_v2.execution.models import TaskError
+        self.assertEqual((await self.link())["status"], "ok")
+        qq = await self.spoken(0, "qq-1")
+        schedule = self.app.contact_schedule
+        latest = schedule.latest_conversation(qq)
+        origin, _, _ = schedule._origin(qq, latest["batch_id"], self.clock.now())
+        await self.spoken(1, "tg-1")
+        with self.assertRaises(TaskError) as refused:
+            schedule._origin(qq, origin["batch_id"], self.clock.now())
+        self.assertEqual(refused.exception.code, "contact_conversation_changed")
+
+
+class TelegramTextOnlyTests(PreferredChannelFixture, unittest.IsolatedAsyncioTestCase):
+    """Through the host's sender: Telegram gets the text; QQ keeps its own follow-ups."""
+
+    async def background(self, context, **presentation):
+        from companion_v2.delivery.models import DeliveryEnvelope
+        from companion_v2.execution.models import digest
+        session = self.controller.session
+        self.spoken_aloud = []
+
+        async def voice(context, speech, **_):
+            self.spoken_aloud.append((context.scope.platform, speech))
+            return None
+        session.voice = voice
+        self.sent.clear()
+        self.qq_calls().clear()
+        return await session.send(DeliveryEnvelope("part-" + context.scope.platform, "operation-" + context.scope.platform,
+            context, 1, "thinking of you", digest("thinking of you"), session.sender_binding, lambda: True,
+            **presentation))
+
+    async def test_telegram_text_has_no_qq_poke_presence_or_voice_follow_up_and_qq_keeps_its_own(self):
+        from companion_v2.delivery.plan import PokePlan, VoicePlan
+        self.assertEqual((await self.link())["status"], "ok")
+        qq, telegram = [(await self.turn(member, "hello", f"hello-{member}"))["context"] for member in (0, 1)]
+        plans = dict(voice=VoicePlan("thinking of you"), poke=PokePlan(count=1))
+        receipt = await self.background(telegram, **plans)
+        self.assertEqual(receipt.status, "delivered")
+        self.assertEqual(self.telegram_texts(), [(str(TELEGRAM_OWNER), "thinking of you")])
+        self.assertEqual((self.spoken_aloud, self.qq_calls(), self.telegram.client.onebot_accesses), ([], [], []))
+        receipt = await self.background(qq, **plans)
+        self.assertEqual(receipt.status, "delivered")
+        self.assertEqual(self.spoken_aloud, [("qq-main", "thinking of you")])
+        self.assertIn("friend_poke", [action for action, _ in self.qq_calls()])
+        self.assertEqual(self.qq_texts(), [("200", "thinking of you")])

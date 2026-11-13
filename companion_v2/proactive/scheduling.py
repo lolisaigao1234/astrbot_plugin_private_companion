@@ -14,6 +14,7 @@ from companion_v2.agenda.models import AgendaError, AgendaTarget
 from companion_v2.agenda.service import AgendaService
 from companion_v2.conversation.busy_gate import (SettingsReader, busy_context, busy_exempt_source,
                                                 proactive_defer_until, readable_items)
+from companion_v2.conversation.linked_ownership import conversation_link
 from companion_v2.conversation.messages import event_from_document
 from companion_v2.execution.models import QUEUED, TaskContext, TaskError, digest, require, stamp
 from companion_v2.foundation.outcome import Outcome
@@ -291,6 +292,23 @@ class ContactSchedule:
                 found.append(datetime.fromisoformat(row["observed_at"]))
         return max(found) if found else None
 
+    def _continues_elsewhere(self, context, latest):
+        """Whether another endpoint of this linked conversation has the more recent turn.
+
+        The endpoints of a linked conversation are one proactive schedule: the
+        window the human last used carries it, with that window's own ledger,
+        permission and evidence. Every other window of the conversation waits.
+        """
+        from companion_v2.conversation.native_turns import latest_scope
+
+        link = conversation_link(self.runtime, context.scope)
+        if link is None or latest is None:
+            return False
+        own = (latest["created_at"], latest["batch_id"])
+        return any((newer["created_at"], newer["batch_id"]) > own
+                   for newer in (latest_scope(self.runtime, scope) for scope in link.scopes if scope != context.scope)
+                   if newer is not None)
+
     def _origin(self, context, batch_id, at):
         """Select the origin conversation, moving forward when it was superseded.
 
@@ -306,6 +324,9 @@ class ContactSchedule:
             JOIN conversation_batches b ON b.batch_id = f.batch_id WHERE f.route_key = ?
             ORDER BY f.sequence DESC LIMIT 1""", (context.scope.key,))
         native = latest_scope(self.runtime, context.scope)
+        if self._continues_elsewhere(context, native if native is not None and (
+                row is None or native["observed_at"] >= row["created_at"]) else row):
+            raise TaskError("contact_conversation_changed", "the linked conversation continued on another endpoint")
         fallback_input = False
         if native is not None and (row is None or native["observed_at"] >= row["created_at"]):
             if (native["context_key"] != context.key or native["generation_state"] != "completed"
@@ -1572,6 +1593,11 @@ class ContactSchedule:
     def _plan_one(self, row, now):
         """Evaluate one candidate off the write transaction."""
         if self._closed or row["origin_key"] in self._workers:
+            return None
+        context = TaskContext.restore(json.loads(row["context_json"]))
+        if self._continues_elsewhere(context, row):
+            self._note_window(context, row, now, "conversation", "skipped",
+                              "linked_conversation_continues_on_another_endpoint")
             return None
         if self._peek(row, now):
             context = TaskContext.restore(json.loads(row["context_json"]))
