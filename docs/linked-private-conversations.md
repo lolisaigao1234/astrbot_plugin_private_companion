@@ -2,7 +2,8 @@
 
 Explicit links share native model history and the companion owners described below.
 AstrBot, its event origins, provider/tool runner, history format and transports are unchanged.
-Notes, reminders and calendar records share storage; preferred background delivery remains #6.
+Notes, reminders and calendar records share storage. Reminders and proactive text leave through
+one preferred endpoint; replies stay on the endpoint a message arrived on.
 
 ## Management
 
@@ -32,6 +33,13 @@ includes `conversation_links`. To replace membership, POST the same link ID and 
 ID, the current `expected_revision`, the original `source_target_id`, and the complete desired
 member list. A stale revision is refused. Changing the conversation anchor is deferred to
 lifecycle controls (#7).
+
+The optional `preferred_target_id` names the member that receives the conversation's
+reminders and proactive text; it must be one of `member_target_ids`. A new link starts with
+its Telegram member, else the endpoint it was created on, else its first member. A later
+operation that does not name it leaves it unchanged. Each link in the account API GET carries
+`preferred_target_id` and `background_destination`: `selected`, or `missing` while the named
+target is not a member.
 
 An existing turn or companion room history writer makes the operation busy. During creation,
 new work is refused on the affected origins. The operation verifies quiescence behind native
@@ -64,7 +72,7 @@ copies the joining endpoint's old records nor rewrites either endpoint's history
   Existing records are read and edited in place. Each note retains its creator and physical
   target; a reminder retains its physical target when the other endpoint changes it. Object
   checks use that trusted source target with the authenticated caller's own permissions.
-  Storage ownership does not select a delivery endpoint; preferred routing and schedules are #6.
+  Storage ownership does not select a delivery endpoint; see the preferred endpoint below.
 - Non-role calendar reports and commitments use the same conversation owner. Calendar reads,
   revisions and cancellation include records from both linked source scopes without moving
   old records. Cancelling or revising an event can cancel its reminder from either endpoint,
@@ -125,14 +133,54 @@ affected by an unreadable or malformed record; an endpoint known to be a member 
 until the record can be read again. Without an explicit link, owner resolution leaves
 existing addresses, stored record forms and query counts unchanged.
 
-This does **not** yet unify the proactive and reminder schedule, proactive contact preferences'
-legacy fallbacks, or window budget accounts. Their owners are coupled to physical delivery or
-exact-scope accounting and belong to #6. Exact-window diagnostic/legacy usage views also remain physical. A detached anchor
+This does **not** unify proactive contact preferences' legacy fallbacks or window budget
+accounts, which stay with exact-scope accounting. Exact-window diagnostic/legacy usage views also remain physical. A detached anchor
 endpoint keeps the owner it natively holds; revoking that belongs to #7.
 The plugin's existing Dashboard log-buffer behavior is unchanged; the tagged input log
 is available through AstrBot's plugin logging. Independent-channel startup permits the
 remaining endpoint to restart while the original platform is absent; the memory and
 archive still resolve through the stored anchor.
+
+## Reminders and proactive text: the preferred endpoint
+
+A linked conversation has one reminder schedule, one proactive schedule and one delivery
+ledger. Its reminders and proactive text go to one member, the preferred endpoint, and to no
+other.
+
+- The destination is decided when a text is dispatched, before anything is sent: the link
+  record names the member, and the text is addressed to that member's own context (its
+  account, its identity, its role binding on the linked scope). The delivery records that
+  concrete destination and the link revision it was resolved from. A reminder made before
+  linking, or made or moved on the other endpoint, takes the same route.
+- Authority is never borrowed. The endpoint the work was recorded on still needs its own
+  permission for it, as before. The destination needs its own permission for the same kind
+  of text (`reminder.deliver`, `proactive.contact`) and for dialogue, a registered and
+  connected account, and its configured target. These and the link revision are checked
+  again immediately before the platform call.
+- Once dispatch has begun the attempt keeps its destination. Selecting another member affects
+  texts that are dispatched afterwards; nothing already sent, failed or uncertain is sent again.
+- Nothing is broadcast and no other member is tried. A destination that refuses, or whose
+  account is unavailable, leaves the text unsent: the delivery is `cancelled` with the
+  refusal code as its reason (for example `authorization_revoked`, `host_account_changed`)
+  when it is refused before dispatch, or `failed` with the sender's code in its receipt when
+  it is refused at the platform call (`delivery_route_changed` when the link changed in
+  between). A send that raises is `unknown` and is never repeated. `delivered` means the
+  channel accepted the send; it says nothing about the human having read it.
+- When the preferred member leaves the link and no other is named, the conversation has no
+  destination (`background_destination: missing`). Texts that come due are recorded as
+  `cancelled` with `delivery_destination_missing`; the reminder, its later occurrences and
+  its history stay. This state is part of the stored link, so a restart keeps it. After an
+  administrator selects a member, later texts go there; earlier ones are not sent.
+- Proactive contact is planned for one window of the conversation: the one with its most
+  recent turn. The other windows wait, and a contact planned on one endpoint is withdrawn
+  when the human speaks on another. Idle time, unanswered contacts, cooldown, budgets and
+  event history are those of that window. Preferences (master switch, quiet hours, pauses)
+  are the conversation's and apply on every endpoint; consent to proactive contact is each
+  endpoint's own.
+- A linked Telegram destination receives the text only. A QQ poke or a voice plan sealed
+  with a contact is dropped, no voice is rendered, and a text that carries an image is not
+  sent (`telegram_text_only`). With QQ as the destination the existing QQ voice, poke and
+  image behaviour is unchanged. Unlinked conversations, on any channel, are not affected.
 
 ## Telegram private text as a linked endpoint
 
@@ -236,9 +284,12 @@ chats and chats that are not companion targets keep AstrBot's own replies.
   across a process restart remains deferred per the owner's priorities.
 - Send exceptions retain existing unknown-outcome accounting. There is no automatic replay.
 - The open-item section and text tools see the linked conversation's notes and reminder records.
-  Changing a record does not reroute its delivery destination; preferred background delivery is #6.
-- Coherent controls (#7), cross-endpoint stop, preferred background delivery (#6) and
-  operational recovery remain work.
+  Changing a record does not change where it is delivered; the link's preferred endpoint does.
+- When the human moves from one endpoint to another, the proactive schedule moves with them
+  and continues with the new window's own contact history: a daily contact allowance or an
+  event already shared on the previous endpoint is not counted on the new one.
+- The QQ proactive platform circuit is recorded for the account the contact was planned on.
+- Coherent controls (#7), cross-endpoint stop and operational recovery remain work.
 
 ## Offline proof
 

@@ -10,6 +10,7 @@ from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA
 from astrbot_host.core_reply_tools import native_tool_name
 from companion_v2.agenda.models import AgendaTarget
 from companion_v2.execution.models import require
+from companion_v2.identity_policy.models import AuthorizationTier
 from tests.linked_reply_support import LinkedTelegramFixture, TELEGRAM_OWNER
 from tests.multi_host_support import multi_config
 
@@ -21,7 +22,7 @@ class PreferredChannelFixture(LinkedTelegramFixture):
         from companion_v2.adapters.astrbot.staging_config import REQUIRED_CAPABILITIES
         from companion_v2.conversation.agenda_tools import TOOL_FIELDS
         config = config or multi_config(capabilities=sorted(
-            REQUIRED_CAPABILITIES | set(TOOL_FIELDS) | {"reminder.deliver", "memo.reminder.set"}))
+            REQUIRED_CAPABILITIES | set(TOOL_FIELDS) | {"reminder.deliver", "memo.reminder.set", "configuration.write"}))
         return super().make_controller(config)
 
     async def turn(self, index, text, identifier):
@@ -434,3 +435,59 @@ class TelegramTextOnlyTests(PreferredChannelFixture, unittest.IsolatedAsyncioTes
         self.assertEqual(self.spoken_aloud, [("qq-main", "thinking of you")])
         self.assertIn("friend_poke", [action for action, _ in self.qq_calls()])
         self.assertEqual(self.qq_texts(), [("200", "thinking of you")])
+
+    async def test_a_text_that_carries_an_image_is_not_sent_to_a_linked_telegram_endpoint(self):
+        import base64
+        from companion_v2.conversation.media.models import PromptImage
+        from companion_v2.delivery.media import ImageDeliveryEnvelope, payload_hash
+        from companion_v2.foundation.refs import SourceRef, VersionRef
+        from tests.test_semantic_integration import picture
+        self.assertEqual((await self.link())["status"], "ok")
+        telegram = (await self.turn(1, "hello", "hello-telegram"))["context"]
+        captured, now, session = picture(), self.clock.now(), self.controller.session
+        source = SourceRef("picture", "conversation.image", telegram.scope, VersionRef("picture", 1), now)
+        parent = SourceRef("parent", "conversation.image", telegram.scope, VersionRef("parent", 1), now)
+        image = PromptImage(source, parent, captured.descriptor, base64.b64encode(captured.content).decode("ascii"))
+        self.sent.clear()
+        receipt = await session.send(ImageDeliveryEnvelope("part-image", "operation-image", telegram, 1, "look",
+            payload_hash("look", (image,)), session.sender_binding, lambda: True, (image,)))
+        self.assertEqual((receipt.status, receipt.failure_code), ("not_sent", "telegram_text_only"))
+        self.assertEqual(self.sent, [])
+
+
+class LinkedContactPreferenceTests(PreferredChannelFixture, unittest.IsolatedAsyncioTestCase):
+    """What the owner set for proactive contact on one endpoint governs the schedule on either."""
+
+    def contact_settings(self, context, changes):
+        from companion_v2.foundation.refs import OperationRef, VersionRef
+        from companion_v2.proactive.configuration import GROUP, target_for
+        target, now = target_for(context), self.clock.now()
+        snapshot = require(self.app.configuration.read(context.actor, target=target, group_id=GROUP, observed_at=now))
+        identifier = "contact-settings-" + snapshot.edit_token[:16]
+        return require(self.app.configuration.patch(context.actor, target=target, group_id=GROUP,
+            expected_edit_token=snapshot.edit_token, changes={GROUP + "." + key: value for key, value in changes.items()},
+            reset_to_inherit=(), operation=OperationRef(identifier, GROUP, target.authorization_scope,
+                                                        VersionRef(identifier, 1), identifier), observed_at=now))
+
+    def refusal(self, context):
+        return require(self.app.proactive.preferences.read(context, observed_at=self.clock.now())).reason("chat")
+
+    async def test_quiet_hours_and_a_pause_set_on_one_endpoint_stop_contact_planned_on_the_other(self):
+        self.assertEqual((await self.link())["status"], "ok")
+        qq, telegram = [(await self.turn(member, "hello", f"hello-{member}"))["context"] for member in (0, 1)]
+        identities = self.controller.authority.identities
+        for context in (qq, telegram):
+            # Consent to proactive contact is each endpoint's own.
+            if not identities.authorize(context.actor, scope=context.scope, capability="proactive.contact",
+                                        observed_at=self.clock.now()).is_success:
+                identities.issue_grant(grant_id="consent-" + context.key, subject=context.actor.subject,
+                    scope=context.scope, capability="proactive.contact", tier=AuthorizationTier.STANDARD,
+                    valid_from=self.clock.now(), expected_revision=identities.revision)
+        self.contact_settings(qq, {"enabled": True})
+        self.assertEqual((self.refusal(qq), self.refusal(telegram)), (None, None))
+        self.contact_settings(qq, {"quiet_enabled": True, "quiet_timezone": "UTC",
+                                   "quiet_start": "00:00", "quiet_end": "23:59"})
+        self.assertEqual((self.refusal(qq), self.refusal(telegram)), ("proactive_quiet_hours",) * 2)
+        self.contact_settings(telegram, {"quiet_enabled": False,
+                                         "pause_until": (self.clock.now() + timedelta(hours=1)).isoformat()})
+        self.assertEqual((self.refusal(qq), self.refusal(telegram)), ("proactive_paused",) * 2)
