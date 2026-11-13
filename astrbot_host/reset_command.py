@@ -11,7 +11,7 @@ V1 的「全部重置 / 重置插件」在 V2 没有聚合服务。这里把它�
 
 from __future__ import annotations
 
-from companion_v2.conversation.linked_ownership import shared_scopes
+from companion_v2.conversation.linked_ownership import link_for_scope
 from companion_v2.conversation.reset import ConversationWindow
 from companion_v2.execution.models import TaskError, digest
 from companion_v2.foundation.outcome import Outcome
@@ -102,7 +102,8 @@ def _decide(command, context, session):
         return f"未执行：会话窗口重置失败（{_failure_reason(reset.failure)}），记忆没有清理。"
     batches = len(reset.unwrap().get("batches") or ())
     # One linked conversation: the other endpoints' temporary context ends with it.
-    for scope in shared_scopes(session.runtime, context.scope) if session.runtime is not None else ():
+    link = link_for_scope(session.runtime, context.scope) if session.runtime is not None else None
+    for scope in link.windows if link is not None else ():
         other = ConversationWindow.from_scope(scope)
         if other != window:
             linked = application.reset_conversation_window(other, reset_id="chat-reset-" + digest([other.key, token]))

@@ -104,7 +104,7 @@ async def observe_context_reset(controller, event):
             link = conversation_link(target) if callable(conversation_link) and kind is ScopeKind.PRIVATE else None
             if link is not None:
                 # One shared conversation: the temporary context of every endpoint ends with it.
-                windows = [ConversationWindow.from_scope(scope) for scope in link.scopes]
+                windows = [ConversationWindow.from_scope(scope) for scope in link.windows]
             for window in reversed(windows):
                 reset_id = "host-reset-" + digest([window, str(event.message_obj.message_id), event.created_at])
                 if session is None:

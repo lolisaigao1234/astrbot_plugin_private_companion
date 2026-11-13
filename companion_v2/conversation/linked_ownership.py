@@ -25,10 +25,13 @@ class _Link(dict):
         self.role_id = record["anchor"]["role"]["subject_id"]
         self.endpoints = tuple((member["platform_id"], member["account_id"], member["participant_id"])
                                for member in record["members"])
-        self.scopes = tuple(dict.fromkeys((self.anchor, *(self.scope_at(member["platform_id"],
-            member["account_id"], member["participant_id"])
-            # An endpoint that left, also for a conversation of its own, wrote records here.
-            for member in record["members"] + record.get("detached", []) + record.get("former", [])))))
+        def scopes(rows):
+            return tuple(dict.fromkeys((self.anchor, *(self.scope_at(
+                row["platform_id"], row["account_id"], row["participant_id"]) for row in rows))))
+        # The windows that are this conversation's alone: its members, and removed endpoints while they stay closed.
+        self.windows = scopes(record["members"] + record.get("detached", []))
+        # An endpoint that left for a conversation of its own wrote records here too; its window is that one's now.
+        self.scopes = scopes(record["members"] + record.get("detached", []) + record.get("former", []))
         wanted = preferred_target_id(record)
         self.preferred = next((endpoint for member, endpoint in zip(record["members"], self.endpoints)
                                if wanted is not None and member.get("target_id") == wanted), None)

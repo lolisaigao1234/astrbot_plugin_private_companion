@@ -716,6 +716,31 @@ class TwoLinkedConversationsTests(ContactLedgerFixture, unittest.IsolatedAsyncio
         qq, _ = await self.telegram_moved_to_the_other_conversation()
         self.assertEqual((self.deliveries_today(qq), self.sent_in_the_background(qq)), ((0, 1), []))
 
+    async def test_a_new_conversation_started_in_the_one_it_left_resets_nothing_in_its_next_one(self):
+        from astrbot.builtin_stars.builtin_commands.commands.conversation import ConversationCommands
+        self.builtin("new", ConversationCommands(self.core_context).new_conv)
+        _, telegram = await self.telegram_moved_to_the_other_conversation()
+        event, _ = await self.attempt(0, "/new", "6")
+        self.assertFalse(event.is_stopped())
+        self.assertNotEqual(self.link_record()["conversation_id"], "conversation-a")
+        self.assertEqual(sorted(self.sent_in_the_background(telegram)),
+                         ["also for the other human", "for the other human"])
+
+    async def test_a_full_reset_in_the_one_it_left_resets_nothing_in_its_next_one(self):
+        import re
+        from companion_v2.identity_policy.models import AuthorizationTier
+        from companion_v2.identity_policy.object_access import ObjectAccessPolicy
+        qq, telegram = await self.telegram_moved_to_the_other_conversation()
+        policy = ObjectAccessPolicy(self.app.runtime)
+        policy.set_tier(qq.actor.subject, AuthorizationTier.CORE, expected_revision=policy.revision,
+                        observed_at=self.clock.now())
+        await self.attempt(0, "陪伴 全部重置", "6")
+        code = re.search(r"确认 ([0-9A-F]{6})", str(self.qq_calls()[-1])).group(1)
+        await self.attempt(0, "陪伴 全部重置 确认 " + code, "7")
+        self.assertIn("已执行", str(self.qq_calls()[-1]))
+        self.assertEqual(sorted(self.sent_in_the_background(telegram)),
+                         ["also for the other human", "for the other human"])
+
 
 class ScheduleCarrierTests(ContactLedgerFixture, unittest.IsolatedAsyncioTestCase):
     """One proactive schedule per conversation, carried by a member that can carry it now."""
