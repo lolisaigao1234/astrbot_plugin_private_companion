@@ -28,8 +28,7 @@ INTEGER_FIELDS = ("journal_material_max_chars",)
 
 def target_for(context):
     return ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW,
-                        context.role_binding.role, context.scope,
-                        storage_scope=getattr(context, "storage_scope", None))
+                        context.role_binding.role, context.scope)
 
 
 def validate(values):

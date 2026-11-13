@@ -6,6 +6,7 @@ from dataclasses import asdict, replace
 from datetime import datetime, timezone
 import json
 
+from companion_v2.conversation.linked_ownership import endpoint_scope
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.foundation.refs import (
     ReferenceValidationError, ScopeKind, ScopeRef, SubjectKind, SubjectRef,
@@ -133,6 +134,10 @@ class PersistentIdentityDirectory:
                 or resolved.subject.installation_id != self.runtime.installation_id):
             return Outcome.failed("scope_installation_mismatch", "account belongs to another installation")
         with self.runtime.read_snapshot():
+            # Members of a linked conversation are judged by their own endpoint's grants.
+            scope = endpoint_scope(self.runtime, resolved.principal, scope)
+            if scope is None:
+                return Outcome.failed("scope_not_granted", "a linked endpoint acts only inside its own conversation")
             return self._directory(
                 resolved.principal, subject=resolved.subject, capability=capability,
             ).authorize(resolved, scope=scope, capability=capability, observed_at=observed_at)

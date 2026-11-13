@@ -95,8 +95,7 @@ def field_names():
 
 def target_for(context):
     return ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW, context.role_binding.role,
-                        context.scope,
-                        storage_scope=getattr(context, "storage_scope", None))
+                        context.scope)
 
 
 @dataclass(frozen=True)

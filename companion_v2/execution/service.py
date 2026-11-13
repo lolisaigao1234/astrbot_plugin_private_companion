@@ -182,9 +182,6 @@ class TaskSupervisor:
             return self.generation
 
     def _context(self, context: TaskContext, now: datetime):
-        from companion_v2.conversation.linked_ownership import owner_scope
-        if context.owner_scope != owner_scope(self.runtime, context.scope):
-            raise TaskError("conversation_owner_changed", "the stored conversation owner is no longer current")
         current = require(self.identity.resolve_authenticated(context.actor.principal, observed_at=now))
         if (current.subject, current.binding_id, current.binding_revision) != (
                 context.actor.subject, context.actor.binding_id, context.actor.binding_revision):

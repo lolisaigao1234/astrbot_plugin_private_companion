@@ -29,12 +29,13 @@ CORE_GROUP_ACTIONS = frozenset((
 
 
 def subject_tier(runtime, subject) -> AuthorizationTier:
-    """Read the subject's current access tier without mutating identity state."""
-    row = runtime.read_one(
-        "SELECT tier FROM subject_access_tiers WHERE subject_kind = ? AND subject_id = ?",
-        (subject.kind.value, subject.subject_id),
-    )
-    return AuthorizationTier(row["tier"]) if row is not None else AuthorizationTier.STANDARD
+    """Read the current access tier without mutating identity state.
+
+    Pass the authenticated actor wherever one exists: a subject alone cannot
+    tell a joined link principal from the conversation's owner.
+    """
+    from companion_v2.identity_policy.object_access import access_tier
+    return access_tier(runtime, subject)
 
 
 def is_core(runtime, subject) -> bool:

@@ -3,6 +3,7 @@
 from companion_v2.execution.models import TaskError, require
 from companion_v2.foundation.refs import ScopeKind, SubjectKind
 from companion_v2.identity_policy.models import AuthorizationTier
+from companion_v2.identity_policy.object_access import access_tier
 
 
 STATE_INTERVENTION = "role.state.intervene"
@@ -15,14 +16,6 @@ INTERVENTION_CAPABILITIES = (
 )
 
 
-def _tier(runtime, subject):
-    row = runtime.read_one(
-        "SELECT tier FROM subject_access_tiers WHERE subject_kind = ? AND subject_id = ?",
-        (subject.kind.value, subject.subject_id),
-    )
-    return AuthorizationTier(row["tier"]) if row else AuthorizationTier.STANDARD
-
-
 def authorized_capabilities(tasks, context, *, at):
     """Return capabilities granted to this authenticated person in this exact window."""
     if (context.scope.kind is not ScopeKind.PRIVATE
@@ -31,7 +24,7 @@ def authorized_capabilities(tasks, context, *, at):
         return frozenset()
     try:
         require(tasks.check_context_access(context, action="conversation.reply", observed_at=at))
-        if _tier(tasks.runtime, context.actor.subject) is AuthorizationTier.CORE:
+        if access_tier(tasks.runtime, context.actor) is AuthorizationTier.CORE:
             return frozenset(INTERVENTION_CAPABILITIES)
         return frozenset(capability for capability in INTERVENTION_CAPABILITIES
             if tasks.identity.authorize(context.actor, scope=context.scope,

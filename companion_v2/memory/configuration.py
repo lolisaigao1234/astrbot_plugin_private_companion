@@ -89,8 +89,7 @@ def extend_registry(registry, defaults):
 
 
 def target_for(context):
-    return ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW, context.role_binding.role, context.scope,
-                        storage_scope=getattr(context, "storage_scope", None))
+    return ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW, context.role_binding.role, context.scope)
 
 
 def role_target_for(context):

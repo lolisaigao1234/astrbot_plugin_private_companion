@@ -64,7 +64,7 @@ async def receive_reset_command(controller, event, *, target=None):
         session = controller.session
         if context.scope.kind is not ScopeKind.PRIVATE:
             return None
-        if not is_core_subject(session.runtime, context.actor.subject):
+        if not is_core_subject(session.runtime, context.actor):
             text = "未执行：全部重置只允许安装核心管理员执行。"
         else:
             text = _decide(command, context, session)

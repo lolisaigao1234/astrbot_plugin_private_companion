@@ -21,7 +21,7 @@ from .models import (
     ApplicationStatus, ApplyMode, ConfigLayer, ConfigTarget, ConfigurationError,
     ConfigurationChanges, ConfigurationPreview, ConfigurationReceipt, ConfigurationSnapshot, encode, fingerprint,
 )
-from .owners import ConfigurationOwner, SparseConfigurationOwner
+from .owners import ConfigurationOwner, SparseConfigurationOwner, storage_target
 from .registry import FieldRegistry
 
 
@@ -71,9 +71,6 @@ class ConfigurationService:
 
     def _authorize(self, actor: ResolvedIdentity, target: ConfigTarget, capability: str, now: datetime,
                    *, core_only: bool = False):
-        from companion_v2.conversation.linked_ownership import owner_scope
-        if target.storage_scope is not None and target.storage_scope != owner_scope(self.runtime, target.scope):
-            raise ConfigurationError("configuration_owner_changed", "the stored settings owner is no longer current")
         if target.installation_id != self.runtime.installation_id:
             raise ConfigurationError("scope_installation_mismatch", "configuration belongs to another installation")
         access = _require(self.policy.scope_access(
@@ -109,7 +106,7 @@ class ConfigurationService:
             raise ConfigurationError("configuration_scope_not_supported", "group is not available at this configuration layer")
         owner = self._owners[definitions[0].owner_id]
         owned = owner.read(target, definitions)
-        layers = target.chain()
+        layers = storage_target(self.runtime, target).chain()
         placeholders = ",".join("?" for _ in layers)
         sequence = self.store.read_one(
             f"""SELECT COALESCE(MAX(sequence), 0) AS n FROM configuration_changes
@@ -189,20 +186,21 @@ class ConfigurationService:
                 if snapshot.edit_token != expected_edit_token:
                     raise ConfigurationError("configuration_revision_conflict", "configuration, inheritance, binding, or policy changed")
                 timestamp = encode_timestamp(observed_at)
+                stored = storage_target(self.runtime, target)
                 connection.execute(
                     "INSERT OR IGNORE INTO configuration_targets VALUES (?, ?, 0, ?)",
-                    (target.key, encode(target.document()), timestamp),
+                    (stored.key, encode(stored.document()), timestamp),
                 )
                 written = owner.write(
                     target, definitions, changes=normalized, reset=reset_to_inherit,
                     expected_revision=snapshot.revision, observed_at=observed_at,
                 )
-                result = {"operation_id": operation.operation_id, "target_key": target.key,
+                result = {"operation_id": operation.operation_id, "target_key": stored.key,
                           "revision": written.revision, "changed_fields": written.changed_fields}
                 connection.execute(
                     """INSERT INTO configuration_changes(operation_id, target_key, group_id, changed, result_json, created_at)
                        VALUES (?, ?, ?, ?, ?, ?)""",
-                    (operation.operation_id, target.key, group_id, int(bool(written.changed_fields)), encode(result), timestamp),
+                    (operation.operation_id, stored.key, group_id, int(bool(written.changed_fields)), encode(result), timestamp),
                 )
                 _require(self.operations.transition(
                     operation.operation_id, expected_state=OperationState.ACCEPTED,
@@ -252,7 +250,7 @@ class ConfigurationService:
                 raise ConfigurationError("invalid_configuration_cursor", "expected a nonnegative cursor and limit 1..100")
             with self.store.read_snapshot():
                 self._snapshot(actor, target, group_id, observed_at)
-                layers = target.chain()
+                layers = storage_target(self.runtime, target).chain()
                 placeholders = ",".join("?" for _ in layers)
                 rows = self.store.read_all(
                     f"""SELECT sequence FROM configuration_changes
@@ -298,7 +296,7 @@ class ConfigurationService:
                 self._authorize(actor, target, "configuration.write", observed_at)
                 row = self.store.read_one(
                     "SELECT result_json, group_id FROM configuration_changes WHERE operation_id = ? AND target_key = ?",
-                    (operation_id, target.key),
+                    (operation_id, storage_target(self.runtime, target).key),
                 )
                 if row is None:
                     raise ConfigurationError("configuration_operation_not_found", "no configuration receipt in this target")

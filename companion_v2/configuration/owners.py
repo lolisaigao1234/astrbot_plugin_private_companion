@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 import json
 from typing import Mapping, Protocol
 
+from companion_v2.conversation.linked_ownership import owner_scope
 from companion_v2.storage.codec import encode_timestamp
 from companion_v2.storage.runtime import StorageRuntime
 
-from .models import ConfigTarget, ConfigurationError, EffectiveValue, Scalar, encode
+from .models import ConfigLayer, ConfigTarget, ConfigurationError, EffectiveValue, Scalar, encode
 from .registry import FieldDefinition
 
 
@@ -47,6 +48,18 @@ class ConfigurationOwner(Protocol):
     ) -> OwnerWrite: ...
 
 
+def storage_target(runtime: StorageRuntime, target: ConfigTarget) -> ConfigTarget:
+    """Where a window's rows are kept: linked private endpoints share one set of settings.
+
+    Only row keys use this address. Authorization, grants and operation
+    receipts stay on the physical ``target.scope`` the caller supplied.
+    """
+    if target.layer is not ConfigLayer.WINDOW:
+        return target
+    owner = owner_scope(runtime, target.scope)
+    return target if owner == target.scope else replace(target, scope=owner)
+
+
 class SparseConfigurationOwner:
     owner_id = "configuration"
     supports_reset = True
@@ -62,7 +75,8 @@ class SparseConfigurationOwner:
     def read(self, target: ConfigTarget, fields: tuple[FieldDefinition, ...]) -> OwnerSnapshot:
         ids = tuple(field.field_id for field in fields)
         placeholders = ",".join("?" for _ in ids)
-        layers = target.chain()
+        stored = storage_target(self.runtime, target)
+        layers = stored.chain()
         revision = 0
         dependencies = []
         records = {}
@@ -84,7 +98,7 @@ class SparseConfigurationOwner:
                 if layer.layer in field.layers and field.field_id in records[layer.key]:
                     stored_value, source_revision = records[layer.key][field.field_id]
                     value = field.validate(stored_value)
-                    source = layer
+                    source = target if layer is stored else layer
             effective[field.field_id] = EffectiveValue(value, source, source == target, source_revision)
         return OwnerSnapshot(revision, tuple(dependencies), effective)
 
@@ -93,6 +107,7 @@ class SparseConfigurationOwner:
         changes: Mapping[str, Scalar], reset: tuple[str, ...],
         expected_revision: int, observed_at: datetime,
     ) -> OwnerWrite:
+        target = storage_target(self.runtime, target)
         with self.store.transaction() as connection:
             row = connection.execute("SELECT revision FROM configuration_targets WHERE target_key = ?", (target.key,)).fetchone()
             revision = row["revision"] if row else 0

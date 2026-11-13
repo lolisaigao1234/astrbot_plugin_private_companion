@@ -73,7 +73,7 @@ class RealitySnapshotAccess:
             ) == (self.package.package_id, self.package.package_version, self.package.artifact_hash)
             active = bool(same and installed.desired_state is CapabilityDesiredState.ACTIVE)
             role_enabled = bool(selection and selection.enabled)
-            core = is_core(self.runtime, self.context.actor.subject)
+            core = is_core(self.runtime, self.context.actor)
             consented = bool(core or
                              (consent and consent["state"] == CapabilityAuthorizationState.ACTIVE.value))
             can_manage = bool(is_core(self.runtime, operator.subject) or

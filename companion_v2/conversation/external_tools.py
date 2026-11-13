@@ -312,7 +312,7 @@ class ExternalToolExecutor:
         action = descriptor.tool.action
         privacy = action in PRIVACY_ACTIONS
         actor = getattr(context, "actor", None)
-        core_admin = actor is not None and is_core(self.runtime, actor.subject)
+        core_admin = actor is not None and is_core(self.runtime, actor)
         core_group = action in CORE_GROUP_ACTIONS
         core = core_admin if privacy else False
         # 现实设备工具对群聊保持常驻挂载，避免按发言人增删工具导致提示词缓存
@@ -361,7 +361,7 @@ class ExternalToolExecutor:
         if context.scope.kind is not ScopeKind.GROUP or action not in CORE_GROUP_ACTIONS:
             return
         actor = getattr(context, "actor", None)
-        if actor is None or not is_core(self.runtime, actor.subject):
+        if actor is None or not is_core(self.runtime, actor):
             raise TaskError("reality_admin_only", "现实设备操作只允许核心管理员使用")
 
     def catalog_for(self, context):

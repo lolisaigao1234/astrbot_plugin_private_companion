@@ -607,6 +607,9 @@ class MultiHostSession:
         registry_fields += tuple(field for field in relay_configuration_fields()
                                  if field.field_id not in registry_ids)
         configuration_store = open_configuration_store(runtime)
+        if configuration_store is not None:
+            from companion_v2.conversation.linked_ownership import serve_link_records
+            serve_link_records(configuration_store, runtime)
         self.host = AstrBotCompanionHost(runtime, event_port=self.bridge.ports, identity_port=self.bridge.ports,
             role_port=self.bridge.ports, runtime_identity=RuntimeIdentity("companion", runtime_instance_id, "astrbot", HOST_ID),
             registry=FieldRegistry(version="astrbot-multi.v1", fields=registry_fields),
@@ -1425,11 +1428,8 @@ class MultiHostSession:
 
     def _actor_is_core(self, context):
         try:
-            subject = context.actor.subject
-            row = self.runtime.read_one(
-                "SELECT tier FROM subject_access_tiers WHERE subject_kind = ? AND subject_id = ?",
-                (subject.kind.value, subject.subject_id))
-            return bool(row and row["tier"] == AuthorizationTier.CORE.value)
+            from companion_v2.identity_policy.object_access import access_tier
+            return access_tier(self.runtime, context.actor) is AuthorizationTier.CORE
         except Exception:
             return False
 

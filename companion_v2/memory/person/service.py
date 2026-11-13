@@ -9,7 +9,7 @@ content-provided identity.
 
 import json
 
-from companion_v2.conversation.linked_ownership import link_for_scope
+from companion_v2.conversation.linked_ownership import link_for_scope, owner_scope
 from companion_v2.conversation.foreground import ContextContribution, ContributionState
 from companion_v2.execution.models import TaskError, encode, require, stamp
 from companion_v2.foundation.refs import ScopeKind
@@ -53,7 +53,7 @@ class PersonAcquaintance:
 
     def observe(self, context, event, connection):
         """Count one admitted input. Optional derived data never rejects intake."""
-        owner = owner_key(context)
+        owner = owner_key(context, owner_scope(self.runtime, context.scope))
         identifier = card_id(owner)
         row = connection.execute("SELECT revision, document_json FROM memory_views WHERE view_id = ? AND kind = ?",
                                  (identifier, KIND)).fetchone()
@@ -73,7 +73,7 @@ class PersonAcquaintance:
         nickname, card = clean_name(nickname), clean_name(card)
         if nickname is None and card is None:
             return
-        owner = owner_key(context)
+        owner = owner_key(context, owner_scope(self.runtime, context.scope))
         with self.runtime.transaction() as connection:
             identifier = card_id(owner)
             row = connection.execute("SELECT revision, document_json FROM memory_views WHERE view_id = ? AND kind = ?",
@@ -182,7 +182,7 @@ class PersonAcquaintance:
             # describes what the sealed turn saw; access is still checked above.
             return ContextContribution("person-speaker-card", OWNER, "current_person_card",
                                        ContributionState.READY, snapshot["payload"])
-        row = self.row(owner_key(context))
+        row = self.row(owner_key(context, owner_scope(self.runtime, context.scope)))
         if row is None or row["state"] != "active":
             return None
         payload = self.projection(context, json.loads(row["document_json"]),
@@ -202,7 +202,7 @@ class PersonAcquaintance:
             self.check(context, at=at)
         except TaskError:
             return False
-        row = self.row(owner_key(context))
+        row = self.row(owner_key(context, owner_scope(self.runtime, context.scope)))
         if row is None or row["state"] != "active":
             return False
         document = json.loads(row["document_json"])
@@ -221,7 +221,7 @@ class PersonAcquaintance:
                 self.check(context, at=at)
         except TaskError:
             return None
-        row = self.row(owner_key(context))
+        row = self.row(owner_key(context, owner_scope(self.runtime, context.scope)))
         if row is None or row["state"] != "active":
             return None
         name, _ = display_name(json.loads(row["document_json"]), context.scope)
@@ -245,7 +245,7 @@ class PersonAcquaintance:
                 raise TaskError("acquaintance_member_unknown", "speaker references use native account numbers")
             subject_id = resolve_subject(self.runtime, context, speaker)
             native = speaker
-        row = self.row(owner_for_subject(context, subject_id))
+        row = self.row(owner_for_subject(context, subject_id, owner_scope(self.runtime, context.scope)))
         if row is None or row["state"] != "active":
             return {"speaker_id": native, "state": "unacquainted"}
         budget = self.settings.read(context)["person.acquaintance_card_chars"] if self.settings is not None else 1024

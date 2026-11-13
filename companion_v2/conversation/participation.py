@@ -181,8 +181,7 @@ def group_participation_settings(runtime, context):
     registered definitions are what the configuration surface validates.
     """
     target = ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW,
-                          context.role_binding.role, context.scope,
-                          storage_scope=getattr(context, "storage_scope", None))
+                          context.role_binding.role, context.scope)
     snapshot = GroupParticipationConfigurationOwner(runtime).read(target, configuration_fields())
     settings = {key.removeprefix(CONFIG_GROUP + "."): item.value for key, item in snapshot.fields.items()}
     for name in CONFIG_SWITCHES:
