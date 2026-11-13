@@ -2,6 +2,7 @@
 from tests import astrbot_data_root  # noqa: F401
 
 import asyncio
+import json
 import unittest
 
 from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA
@@ -110,6 +111,54 @@ class LinkedOwnerTests(LinkedReplyFixture, unittest.IsolatedAsyncioTestCase):
                           is_core_subject(self.app.runtime, second.actor)), (True, False))
         session = self.controller.session
         self.assertEqual((session._actor_is_core(first), session._actor_is_core(second)), (True, False))
+
+    async def test_a_joined_endpoint_gains_no_device_authority_from_the_shared_subject(self):
+        from datetime import timedelta
+        from types import SimpleNamespace
+        from companion_v2.identity_policy.models import AuthorizationTier
+        from companion_v2.identity_policy.object_access import ObjectAccessPolicy
+        from companion_v2.product import PRODUCT_VERSION
+        from companion_v2.reality import provider as reality
+        from tests.native_internal_support import internal_registry
+        from tests.test_mihome_control_profiles import AC_DID, api_for
+        policy = ObjectAccessPolicy(self.app.runtime)
+        first = (await self.turn(0, "Hello", "device-before"))["context"]
+        policy.set_tier(first.actor.subject, AuthorizationTier.CORE,
+                        expected_revision=policy.revision, observed_at=self.clock.now())
+        self.assertEqual((await self.link())["status"], "ok")
+        first = (await self.turn(0, "Hello", "device-owner"))["context"]
+        second = (await self.turn(1, "Hello again", "device-joined"))["context"]
+        self.assertEqual(second.actor.subject, first.actor.subject)
+        api = api_for(admin_only=True)
+        api.plugin.controller = SimpleNamespace(runtime=self.app.runtime)
+        api.plugin.mihome_web_api = api
+        powered = []
+
+        async def control_power(did, is_on, alias):
+            powered.append(did)
+            return True
+        api.plugin.client.control_power = control_power
+        registry = internal_registry(reality.NativeRealityProvider(
+            api.plugin, self.root / "reality", version=PRODUCT_VERSION), now=self.clock.now)
+        self.addAsyncCleanup(registry.aclose)
+        declaration = next(item for item in registry.declarations()
+                           if item.descriptor.tool.action == "reality.device.control")
+
+        async def power(context, identifier):
+            from companion_v2.execution.models import digest
+            arguments = {"alias": "客厅空调", "is_on": True}
+            return await registry.invoke(declaration.host_tool_id, SimpleNamespace(
+                invocation_id=identifier, parent_task_id="task-" + identifier, tool_call_id="call-" + identifier,
+                context=context, descriptor=declaration.descriptor, arguments_json=json.dumps(arguments),
+                arguments_hash=digest(arguments), deadline_at=self.clock.now() + timedelta(minutes=1),
+                before_dispatch=lambda: None, task_run=None))
+
+        refused = await power(second, "joined-power")
+        self.assertEqual((refused.state, refused.effect), ("failed", "not_committed"))
+        self.assertEqual(powered, [])
+        allowed = await power(first, "owner-power")
+        self.assertEqual((allowed.state, allowed.effect), ("succeeded", "committed"))
+        self.assertEqual(powered, [AC_DID])
 
     async def test_a_joined_endpoint_is_fenced_to_the_scopes_of_its_link(self):
         from companion_v2.conversation.reply_settings import GROUP

@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from contextvars import ContextVar
 
 
 _TURN_PREFIX = "<companion_v2_native_"
+# The authenticated actor of the native provider call in flight. A provider
+# forwards only the human subject, which a linked endpoint shares.
+NATIVE_ACTOR = ContextVar("companion_v2_native_actor", default=None)
 
 
 def _text(part):
