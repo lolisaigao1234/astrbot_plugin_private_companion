@@ -252,10 +252,16 @@ class TelegramTextToolTests(LinkedTelegramFixture, unittest.IsolatedAsyncioTestC
         self.assertEqual(len(notes.unwrap()), 0)
 
     async def test_link_revision_changed_while_tool_awaits_real_source_prevents_any_effect(self):
+        await self.revision_changes_while_a_tool_awaits_its_source(1)
+
+    async def test_link_revision_changed_while_a_linked_qq_tool_awaits_real_source_prevents_any_effect(self):
+        await self.revision_changes_while_a_tool_awaits_its_source(0)
+
+    async def revision_changes_while_a_tool_awaits_its_source(self, index):
         from astrbot.core.star.star_handler import EventType
         from astrbot_host.linked_conversations import KEY
         self.assertEqual((await self.link())["status"], "ok")
-        self.steer(1)
+        self.steer(index)
         self.pause_model = True
         source_ready, release_source = asyncio.Event(), asyncio.Event()
         original_source = []
@@ -273,7 +279,7 @@ class TelegramTextToolTests(LinkedTelegramFixture, unittest.IsolatedAsyncioTestC
             prepared["native_source_future"] = asyncio.create_task(paused_return())
 
         self.register(EventType.OnLLMRequestEvent, hold_source_return, priority=-3000000)
-        event = self.event_for(1, "let us practise watercolor")
+        event = self.event_for(index, "let us practise watercolor")
         task = await self.dispatch(event)
         try:
             await asyncio.wait_for(source_ready.wait(), 15)
