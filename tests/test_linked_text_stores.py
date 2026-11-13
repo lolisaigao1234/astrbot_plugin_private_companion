@@ -311,6 +311,91 @@ class LinkedTextStoreTests(LinkedTextStoreFixture, unittest.IsolatedAsyncioTestC
         self.assertEqual(results[5]["payload"]["items"][0]["title"], "persistent growth")
 
 
+class RemovedMemberRecordTests(LinkedTextStoreFixture, unittest.IsolatedAsyncioTestCase):
+    """What a member recorded stays the conversation's when that member is removed afterwards."""
+
+    async def records_of_a_member_removed_afterwards(self, made_on):
+        remaining = 1 - made_on
+        schedule = self.calendar_data("role_plan", "")["schedule"]
+        self.assertEqual((await self.link())["status"], "ok")
+        origin, saved = await self.run_tools(made_on, [("turn.evidence", {}),
+            ("memo.create", {"title": "kept note", "body": "made by the member that leaves"}),
+            ("reminder.create", {"message": "moved later", "schedule": schedule}),
+            ("reminder.create", {"message": "cancelled later", "schedule": schedule}),
+            ("calendar.command", self.calendar_command("create", "kept-plan", 0,
+                                                       self.calendar_data("user_report", "kept plan"))),
+            ("role.growth.propose", lambda args: {"kind": "goal", "title": "kept growth",
+                "evidence_handles": self.prior(args, 0)["evidence_handles"]}),
+            ("diagnostics.inspect", {"check": "configuration", "group_id": "conversation.presentation",
+                "configuration_target": "current_window"}),
+            ("diagnostics.propose", lambda args: {"report_id": self.prior(args)["report"]["report_id"],
+                "changes": {"conversation.presentation.private_debounce_enabled": True}, "rationale": "kept review"})])
+        removed = self.context(origin)
+        memo_id, moved_id, cancelled_id = [item["payload"]["object_id"] for item in saved[1:4]]
+        growth_id, proposal_id = saved[5]["payload"]["growth_id"], saved[7]["proposal"]["proposal_id"]
+        self.assertEqual((await self.link(revision=1, members=[("first", "second")[remaining]]))["status"], "ok")
+        event, results = await self.run_tools(remaining, [("turn.evidence", {}),
+            ("memo.list", {}), ("memo.read", {"memo_id": memo_id}),
+            ("memo.edit", {"memo_id": memo_id, "expected_revision": 1, "changes": {"body": "edited by who remains"}}),
+            ("reminder.list", {}), ("reminder.read", {"reminder_id": moved_id}),
+            ("reminder.reschedule", {"reminder_id": moved_id, "expected_revision": 1,
+                "schedule": {**schedule, "anchor": "2026-10-12T10:00:00+00:00"}}),
+            ("reminder.cancel", {"reminder_id": cancelled_id, "expected_revision": 1}),
+            ("calendar.query", {}),
+            ("calendar.command", self.calendar_command("revise", "kept-plan", 1,
+                                                       self.calendar_data("user_report", "revised plan"))),
+            ("role.growth.list", {}),
+            ("role.growth.revise", lambda args: {"growth_id": growth_id, "expected_revision": 1,
+                "title": "revised growth", "description": "kept", "progress_note": "going on",
+                "evidence_handles": self.prior(args, 0)["evidence_handles"]}),
+            ("diagnostics.proposal.read", {"proposal_id": proposal_id})], identifier=2)
+        self.assertEqual([item["memo_id"] for item in results[1]["payload"]], [memo_id])
+        self.assertEqual(results[2]["payload"]["target"]["scope"], removed.scope.document())
+        self.assertEqual(results[3]["payload"]["revision"], 2)
+        self.assertEqual({item["reminder_id"] for item in results[4]["payload"]}, {moved_id, cancelled_id})
+        self.assertEqual(results[5]["payload"]["target"]["scope"], removed.scope.document())
+        self.assertEqual((results[6]["payload"]["state"], results[7]["payload"]["state"]), ("active", "cancelled"))
+        self.assertEqual([item["id"] for item in results[8]["payload"]["items"]], ["kept-plan"])
+        self.assertEqual(results[9]["payload"]["revision"], 2)
+        self.assertEqual([item["growth_id"] for item in results[10]["payload"]["items"]], [growth_id])
+        growth = self.app.tools.growth
+        self.assertEqual(growth.ledger.record(growth_id, owner=growth.reader.owner(self.context(event))).title,
+                         "revised growth")
+        self.assertEqual(results[12]["proposal"]["proposal_id"], proposal_id)
+        _, cancelled = await self.run_tools(remaining, [("diagnostics.proposal.cancel", {"proposal_id": proposal_id})],
+            text="陪伴 答疑取消 " + proposal_id, identifier=3)
+        self.assertEqual(cancelled[0]["proposal"]["state"], "cancelled")
+        # The reminder that was set again is the remaining member's work; its record keeps its window.
+        moved = self.app.agenda.repository.reminder(moved_id)
+        self.assertEqual((moved.target.scope, moved.requester.principal.platform),
+                         (removed.scope, self.context(event).scope.platform))
+        # The endpoint that left reads none of it, although it made every record.
+        refused = self.app.agenda.read_memo(removed.actor, target=self.target(removed), memo_id=memo_id,
+                                            observed_at=self.clock.now())
+        self.assertEqual(refused.failure and refused.failure.code, "scope_not_granted")
+        from companion_v2.execution.models import TaskError
+        with self.assertRaises(TaskError):
+            self.app.tools.calendar.calendar.read(removed, "kept-plan")
+        self.assertEqual(self.app.tools.growth.catalog_for(removed), ())
+        return memo_id, growth_id
+
+    async def test_records_made_by_the_joined_endpoint_stay_usable_after_it_is_removed(self):
+        memo_id, growth_id = await self.records_of_a_member_removed_afterwards(made_on=1)
+        # Also once the endpoint that made them has been admitted to a conversation of its own.
+        self.assertEqual((await self.link(revision=2, members=["first"],
+                                          independent_target_ids=["second"]))["status"], "ok")
+        event, results = await self.run_tools(0, [("memo.read", {"memo_id": memo_id}),
+            ("memo.edit", {"memo_id": memo_id, "expected_revision": 2, "changes": {"body": "edited once more"}}),
+            ("reminder.list", {}), ("calendar.query", {}), ("role.growth.list", {})], identifier=4)
+        self.assertEqual(results[1]["payload"]["revision"], 3)
+        self.assertEqual(len(results[2]["payload"]), 2)
+        self.assertEqual([item["id"] for item in results[3]["payload"]["items"]], ["kept-plan"])
+        self.assertEqual([item["growth_id"] for item in results[4]["payload"]["items"]], [growth_id])
+
+    async def test_records_made_by_the_endpoint_the_conversation_started_on_stay_usable_after_it_is_removed(self):
+        await self.records_of_a_member_removed_afterwards(made_on=0)
+
+
 class LinkedTextStoreOutsideTests(LinkedTextStoreFixture, unittest.IsolatedAsyncioTestCase):
     extra_targets = ({"target_id": "outside", "platform_id": "qq-main", "account_id": "100",
                       "bot_id": "bot-a", "participant_id": "999"},)

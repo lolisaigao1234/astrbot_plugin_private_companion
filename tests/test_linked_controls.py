@@ -391,6 +391,37 @@ class SharedControlTests(LinkedControlFixture, unittest.IsolatedAsyncioTestCase)
         _, after = await self.turn(1, "three", 8)
         self.assertNotIn("drinks", await self.facts(after, "facts-after-full-reset"))
 
+    async def test_the_full_reset_reports_a_window_of_another_member_that_could_not_be_reset(self):
+        import re
+        from companion_v2.conversation.reset import ConversationWindow
+        from companion_v2.foundation.outcome import Outcome
+        from companion_v2.identity_policy.models import AuthorizationTier
+        from companion_v2.identity_policy.object_access import ObjectAccessPolicy
+        _, first = await self.turn(0, "one", "1")
+        _, second = await self.turn(1, "two", 2)
+        self.learn(first, "tea", "learned-before-failed-reset")
+        policy = ObjectAccessPolicy(self.app.runtime)
+        policy.set_tier(first["context"].actor.subject, AuthorizationTier.CORE,
+                        expected_revision=policy.revision, observed_at=self.clock.now())
+        other, reset = ConversationWindow.from_scope(second["context"].scope), self.app.reset_conversation_window
+
+        def failing(window, *, reset_id):
+            if window == other:
+                return Outcome.failed("conversation_reset_route", "synthetic reset failure on the other member")
+            return reset(window, reset_id=reset_id)
+        self.app.reset_conversation_window = failing
+
+        def qq_notice():
+            return str(self.native.platforms["qq-main"].client._api._wsr_api.calls[-1])
+        await self.turn(0, "陪伴 全部重置", "3")
+        code = re.search(r"确认 ([0-9A-F]{6})", qq_notice()).group(1)
+        await self.turn(0, "陪伴 全部重置 确认 " + code, "4")
+        self.assertNotIn("已执行", qq_notice())
+        self.assertIn("synthetic reset failure on the other member", qq_notice())
+        # The memory the confirmation was for is not forgotten after a reset that did not complete.
+        _, after = await self.turn(1, "three", 5)
+        self.assertIn("The owner drinks tea", await self.facts(after, "facts-after-failed-reset"))
+
 
 if __name__ == "__main__":
     unittest.main()

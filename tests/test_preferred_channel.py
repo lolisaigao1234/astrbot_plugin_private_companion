@@ -251,6 +251,40 @@ class PreferredReminderTests(PreferredChannelFixture, unittest.IsolatedAsyncioTe
                          ([(str(TELEGRAM_OWNER), "after the new conversation")], []))
 
 
+class RoutedBackgroundHistoryTests(PreferredChannelFixture, unittest.IsolatedAsyncioTestCase):
+    """What was sent in the background is part of the reply context of the conversation it was sent in."""
+
+    def sent_in_the_background(self, context):
+        return [{key: value for key, value in item.items() if key not in ("delivered_at", "recipient_read")}
+                for item in require(self.app.background_history.recent(context))]
+
+    async def test_a_reminder_delivered_on_the_preferred_endpoint_is_in_the_background_history_of_both_once(self):
+        self.assertEqual((await self.link())["status"], "ok")
+        telegram = (await self.turn(1, "hello", 1))["context"]
+        qq, occurrence = await self.remind(0, "drink water", identifier="2")
+        self.assertEqual((await self.settled(qq, occurrence))["delivery"], "delivered")
+        self.assertEqual(self.telegram_texts()[-1], (str(TELEGRAM_OWNER), "drink water"))
+        shown = [{"owner": "agenda.reminder", "text": "drink water", "delivered_on": "tg-main"}]
+        self.assertEqual([self.sent_in_the_background(context) for context in (qq, telegram)], [shown, shown])
+        # Also when it was made and delivered on the same member.
+        asked, later = await self.remind(1, "stand up", identifier=3)
+        self.assertEqual((await self.settled(asked, later))["delivery"], "delivered")
+        shown.append({"owner": "agenda.reminder", "text": "stand up", "delivered_on": "tg-main"})
+        self.assertEqual([self.sent_in_the_background(context) for context in (qq, telegram)], [shown, shown])
+        # A removed endpoint reads none of it; the member that remains keeps what it asked for itself.
+        self.assertEqual((await self.link(revision=1, members=["second"]))["status"], "ok")
+        self.assertFalse(self.app.background_history.recent(qq).is_success)
+        self.assertIn(shown[1], self.sent_in_the_background(telegram))
+
+    async def test_an_unlinked_window_keeps_its_own_background_history_as_it_was(self):
+        telegram = (await self.turn(1, "hello", 1))["context"]
+        qq, occurrence = await self.remind(0, "drink water", identifier="2")
+        self.assertEqual((await self.settled(qq, occurrence))["delivery"], "delivered")
+        self.assertEqual(self.qq_texts(), [("200", "drink water")])
+        self.assertEqual([self.sent_in_the_background(context) for context in (qq, telegram)],
+                         [[{"owner": "agenda.reminder", "text": "drink water"}], []])
+
+
 class PreferredOutcomeTests(PreferredChannelFixture, unittest.IsolatedAsyncioTestCase):
     """What became of a text is recorded as it happened; the other endpoint is never used instead."""
 
@@ -316,6 +350,18 @@ class PreferredOutcomeTests(PreferredChannelFixture, unittest.IsolatedAsyncioTes
                                              (occurrence,))
         self.assertEqual((dispatch["state"], dispatch["reason"]), ("blocked", "scope_not_granted"))
         self.assertEqual((self.telegram_texts(), self.qq_texts()), ([], []))
+
+    async def test_a_reminder_of_a_removed_joined_endpoint_is_delivered_once_a_remaining_member_sets_it_again(self):
+        _, _, blocked = await self.linked_reminder(1, "from the removed endpoint")
+        self.assertEqual((await self.link(revision=1, members=["first"], preferred_target_id="first"))["status"], "ok")
+        context, occurrence = await self.reschedule(0, identifier="set-again", minutes=10)
+        self.assertNotEqual(occurrence, blocked)
+        self.sent.clear()
+        self.qq_calls().clear()
+        report = await self.settled(context, occurrence)
+        self.assertEqual(report["delivery"], "delivered", report)
+        await self.idle()
+        self.assertEqual((self.telegram_texts(), self.qq_texts()), ([], [("200", "from the removed endpoint")]))
 
     async def test_a_telegram_send_that_raises_is_unknown_and_is_never_sent_again_on_either_endpoint(self):
         from telegram.error import TimedOut

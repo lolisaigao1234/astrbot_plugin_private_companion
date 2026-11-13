@@ -59,6 +59,10 @@ class MultiAuthority:
             return None
 
     def _provision_context_grants(self, context):
+        from companion_v2.role_work.state.configuration import settings_decide_grants
+        if not settings_decide_grants(self.runtime, context.scope):
+            # Shared settings issue nothing for a member: its grants are its own saves.
+            return
         from companion_v2.role_work.growth.configuration import (
             GrowthConfigurationOwner, configuration_fields as growth_fields, target_for as growth_target,
         )
@@ -183,6 +187,21 @@ class MultiAuthority:
             return None
         return link_for_endpoint(self.runtime, target.platform_id, target.account_id,
                                  participant_id if participant_id is not None else target.participant_id)
+
+    def fence_removed_endpoint(self, scope):
+        """Called with the link edit that closes an endpoint, for its scope on the conversation.
+
+        Everything the endpoint captured there (saved contexts, queued sends,
+        prepared replies, tool calls, reminders it set) carries the revision of
+        its own role binding on that scope. Advancing it keeps that work refused
+        when the endpoint is linked again; it needs fresh work.
+        """
+        resolution = self.personas.resolve(scope, observed_at=self.now())
+        # The binding of this one window only; an endpoint that never spoke here captured nothing.
+        binding = resolution.unwrap().selected if resolution.is_success else None
+        if binding is not None and binding.selector.kind is SelectorKind.SESSION:
+            self.personas.set_binding(replace(binding, revision=binding.revision + 1),
+                                      expected_revision=binding.revision, observed_at=self.now())
 
     def bot_id(self, target, participant_id=None):
         link = self.conversation_link(target, participant_id)
@@ -435,8 +454,7 @@ class MultiAuthority:
                             expected_revision=self.identities.revision)
             if core_admin:
                 self._grant_core_admin(context, scope)
-            if own is None:
-                self._provision_context_grants(context)
+            self._provision_context_grants(context)
             from companion_v2.identity_policy.legacy_import import apply_pending_private_authorization
             apply_pending_private_authorization(self.runtime, actor, scope, role.subject_id, self.now())
             self.write(self.context_key(target, role.subject_id), scope.document())
@@ -481,12 +499,15 @@ class MultiAuthority:
                 if access.is_success else None,
                 next((family for family in SETTINGS_GRANT_FAMILIES
                       if any(grant.grant_id.startswith(family) for grant in grants)), ""))
-        return decisions, self.runtime.read_all(
-            """SELECT extension_id, capability_id, state FROM capability_authorizations
+        return decisions, self._consents(own.subject, previous)
+
+    def _consents(self, subject, scope):
+        return self.runtime.read_all(
+            """SELECT extension_id, capability_id, state, revision FROM capability_authorizations
                WHERE subject_kind = ? AND subject_id = ? AND installation_id = ? AND platform = ?
                AND scope_kind = ? AND native_scope_id = ? AND bot_id = ? AND account_id = ?
                AND conversation_id = ? AND session_id = ?""",
-            (own.subject.kind.value, own.subject.subject_id, *scope_values(previous)))
+            (subject.kind.value, subject.subject_id, *scope_values(scope)))
 
     def _carry_decisions(self, context, own, at):
         """Joining a conversation gives an endpoint a new scope, not new permissions.
@@ -526,13 +547,20 @@ class MultiAuthority:
             if grant is None:
                 self.identities.revoke_grant(identifier, revoked_at=self.now(),
                                              expected_revision=self.identities.revision)
-        from companion_v2.capabilities.models import CapabilityAuthorizationState
+        from companion_v2.capabilities.models import CapabilityAuthorizationState as Consent
         from companion_v2.capabilities.repositories import CapabilityRepository
-        for row in consents:
-            # A consent already decided on the linked scope refuses this write and stands.
-            CapabilityRepository(self.runtime).set_authorization(
-                extension_id=row["extension_id"], capability_id=row["capability_id"], subject=subject, scope=scope,
-                state=CapabilityAuthorizationState(row["state"]), expected_revision=0, observed_at=self.now())
+        own = {(row["extension_id"], row["capability_id"]): Consent(row["state"]) for row in consents}
+        linked = {(row["extension_id"], row["capability_id"]): row for row in self._consents(subject, scope)}
+        for key in sorted({*own, *linked}):
+            state, earlier = own.get(key, Consent.REVOKED), linked.get(key)
+            if earlier is not None and (earlier["state"] != Consent.ACTIVE.value or state is Consent.ACTIVE):
+                continue  # a consent decided on the linked scope stands, unless it allows what its own does not
+            written = CapabilityRepository(self.runtime).set_authorization(
+                extension_id=key[0], capability_id=key[1], subject=subject, scope=scope, state=state,
+                expected_revision=earlier["revision"] if earlier is not None else 0, observed_at=self.now())
+            if earlier is not None:
+                # It was a member before: a consent it lacks on its own must not stay allowed.
+                require(written)
 
     def _grant_core_admin(self, context, scope):
         """Keep the Dashboard-confirmed administrator window actually administrative.
@@ -562,7 +590,6 @@ class MultiAuthority:
 
     def select(self, target, scope, role):
         with self.runtime.transaction():
-            settings_decide = self._own_decisions(target, scope) is None
             self.provision_scope(target, scope, role,
                 core_admin=target.target_id == self.core_target_id)
             key = "host.multi.active:" + target.target_id
@@ -581,12 +608,11 @@ class MultiAuthority:
             ensure_image_access(self.runtime, context, observed_at=self.now())
             from companion_v2.role_work.state.configuration import (
                 ensure_window_presentation_grants, ensure_role_state_grants)
-            if settings_decide:
-                ensure_window_presentation_grants(self.runtime, context, observed_at=self.now())
-                try:
-                    ensure_role_state_grants(self.runtime, context, observed_at=self.now())
-                except Exception:
-                    pass
+            ensure_window_presentation_grants(self.runtime, context, observed_at=self.now())
+            try:
+                ensure_role_state_grants(self.runtime, context, observed_at=self.now())
+            except Exception:
+                pass
             # Provisioning a missing tool grant advances the policy revision.
             # Life and proactive workers must bind the same fresh actor as intake.
             return replace(context, actor=self.actor(target))

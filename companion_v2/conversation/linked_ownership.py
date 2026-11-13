@@ -27,7 +27,8 @@ class _Link(dict):
                                for member in record["members"])
         self.scopes = tuple(dict.fromkeys((self.anchor, *(self.scope_at(member["platform_id"],
             member["account_id"], member["participant_id"])
-            for member in record["members"] + record.get("detached", [])))))
+            # An endpoint that left, also for a conversation of its own, wrote records here.
+            for member in record["members"] + record.get("detached", []) + record.get("former", [])))))
         wanted = preferred_target_id(record)
         self.preferred = next((endpoint for member, endpoint in zip(record["members"], self.endpoints)
                                if wanted is not None and member.get("target_id") == wanted), None)
@@ -156,6 +157,17 @@ def owner_scope(runtime, scope):
     return link.anchor if link else scope
 
 
+def record_owner_scope(runtime, scope):
+    """The owner of a stored record: the conversation its scope was written for.
+
+    Resolved from the link's persisted scopes, which keep an endpoint that has
+    left, so a record stays the conversation's whichever member is removed
+    afterwards. Who may act on it is decided on the acting endpoint.
+    """
+    link = conversation_link(runtime, scope)
+    return link.anchor if link else scope
+
+
 def joined_principal(principal):
     """Private link identities never inherit subject-level administrator tiers."""
     return principal.host_id == PRIVATE_HOST_ID
@@ -186,3 +198,26 @@ def shared_scopes(runtime, scope):
 
 def same_conversation(runtime, reader_scope, source_scope):
     return source_scope in shared_scopes(runtime, reader_scope)
+
+
+def conversation_windows(runtime, context):
+    """The context keys under which a linked conversation's background work is recorded.
+
+    ``None`` outside a link: one window, read as it always was. A member reads,
+    in place, what was recorded for the other scopes of its link as well, each
+    under the window of that scope's latest turn; nothing is copied or rekeyed.
+    """
+    link = link_for_scope(runtime, context.scope)
+    if link is None:
+        return None
+    from companion_v2.conversation.native_turns import latest_scope
+    latest = (latest_scope(runtime, scope) for scope in link.scopes if scope != context.scope)
+    return tuple(dict.fromkeys((context.key, *(row["context_key"] for row in latest if row is not None))))
+
+
+def window_filter(runtime, context, column="origin_key"):
+    """One row predicate and its one value: this window, or its linked conversation's windows."""
+    keys = conversation_windows(runtime, context)
+    if keys is None:
+        return column + " = ?", context.key
+    return column + " IN (SELECT value FROM json_each(?))", json.dumps(keys)

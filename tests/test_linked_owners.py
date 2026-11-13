@@ -330,6 +330,63 @@ class LinkedOwnerTests(LinkedReplyFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual((self.allowed(again, read), self.allowed(again, "memory.read")), (False, True))
         self.assertTrue(self.allowed((await self.turn(0, "The anchor", "rejoin-a-again"))["context"], "memory.read"))
 
+    async def rejoined_after_a_refusal_made_on_its_own(self, refuse, held=lambda context: None):
+        """Member, removed, admitted on its own, refuses something there, linked again."""
+        self.assertEqual((await self.link())["status"], "ok")
+        linked = (await self.turn(1, "A member", "refused-own-member"))["context"]
+        held(linked)
+        self.assertEqual((await self.link(revision=1, members=["first"]))["status"], "ok")
+        self.assertEqual((await self.link(revision=2, members=["first"],
+                                          independent_target_ids=["second"]))["status"], "ok")
+        own = (await self.turn(1, "On my own", "refused-own-independent"))["context"]
+        self.assertNotEqual(own.scope, linked.scope)
+        refuse(own)
+        self.assertEqual((await self.link(revision=3))["status"], "ok")
+        again = (await self.turn(1, "A member again", "refused-own-again"))["context"]
+        self.assertEqual(again.scope, linked.scope)
+        return again
+
+    async def test_a_consent_withdrawn_on_its_own_is_not_restored_by_rejoining(self):
+        from astrbot_host.image_access import IMAGE_EXTENSION
+        from companion_v2.capabilities.models import CapabilityAuthorizationState
+        from companion_v2.capabilities.repositories import CapabilityRepository
+        repository = CapabilityRepository(self.app.runtime)
+
+        def consent(context):
+            return repository.authorize(extension_id=IMAGE_EXTENSION, capability_id="image.generate",
+                                        subject=context.actor.subject, scope=context.scope).is_success
+
+        def withdraw(context):
+            self.assertTrue(consent(context))
+            current = require(repository.consent(extension_id=IMAGE_EXTENSION, capability_id="image.generate",
+                                                 subject=context.actor.subject, scope=context.scope))
+            require(repository.set_authorization(extension_id=IMAGE_EXTENSION, capability_id="image.generate",
+                subject=context.actor.subject, scope=context.scope, state=CapabilityAuthorizationState.REVOKED,
+                expected_revision=current.revision, observed_at=self.clock.now()))
+        again = await self.rejoined_after_a_refusal_made_on_its_own(withdraw)
+        self.assertFalse(consent(again))
+        self.assertFalse(consent((await self.turn(1, "And on the next turn", "refused-own-later"))["context"]))
+        self.assertTrue(consent((await self.turn(0, "The anchor", "refused-own-anchor"))["context"]))
+
+    async def test_a_grant_revoked_on_its_own_is_not_restored_by_rejoining(self):
+        from companion_v2.identity_policy.models import AuthorizationTier
+        directory = self.controller.authority.identities
+
+        def consent(context):
+            directory.issue_grant(grant_id="consent-" + context.key, subject=context.actor.subject,
+                scope=context.scope, capability="proactive.contact", tier=AuthorizationTier.STANDARD,
+                valid_from=self.clock.now(), expected_revision=directory.revision)
+            self.assertTrue(self.allowed(context, "proactive.contact"))
+
+        def refuse(context):
+            consent(context)
+            self.revoke(context, "proactive.contact")
+        again = await self.rejoined_after_a_refusal_made_on_its_own(refuse, held=consent)
+        self.assertEqual((self.allowed(again, "proactive.contact"), self.allowed(again, "conversation.reply")),
+                         (False, True))
+        later = (await self.turn(1, "And on the next turn", "refused-own-later"))["context"]
+        self.assertFalse(self.allowed(later, "proactive.contact"))
+
     async def test_a_later_shared_setting_change_moves_only_the_grants_of_the_endpoint_that_made_it(self):
         self.assertEqual((await self.link())["status"], "ok")
         first = (await self.turn(0, "Growth preferences", "later-setting-a"))["context"]
@@ -349,6 +406,40 @@ class LinkedOwnerTests(LinkedReplyFixture, unittest.IsolatedAsyncioTestCase):
             self.assertEqual((self.allowed(first, read), self.allowed(second, read)), (False, True))
             first = (await self.turn(0, "Later still", "later-setting-a-off-%d" % attempt))["context"]
             second = (await self.turn(1, "Later still", "later-setting-b-off-%d" % attempt))["context"]
+
+    async def test_reading_the_state_page_of_a_peer_changes_no_grant_after_a_shared_setting_was_saved(self):
+        from astrbot_host.management_identity import dashboard_operator
+        from companion_v2.role_work.state.management import StateManagement
+        self.assertEqual((await self.link())["status"], "ok")
+        first = (await self.turn(0, "State preferences", "state-read-a"))["context"]
+        second = (await self.turn(1, "State preferences again", "state-read-b"))["context"]
+        operator = dashboard_operator(self.app.runtime, "synthetic-admin", at=self.clock.now())
+        watched = ("role.state.read", "role.state.maintain", "platform.typing")
+
+        def held():
+            return [{action: self.allowed(context, action) for action in watched} for context in (first, second)]
+        nothing = dict.fromkeys(watched, False)
+        self.assertEqual(held(), [nothing, nothing])
+        page = StateManagement(self.app, first)
+        before = require(page.status(operator))
+        require(page.command(operator, dict(action="configure", operation_key="shared-state-on",
+            edit_token=before["edit_token"], role_edit_token=before["role_edit_token"],
+            changes={"enabled": True, "typing_enabled": True})))
+        saved = [dict.fromkeys(watched, True), nothing]
+        self.assertEqual(held(), saved)
+        # The peer's page shows the shared setting and is only a read.
+        shown = require(StateManagement(self.app, second).status(operator))
+        self.assertEqual((shown["settings"]["enabled"], shown["settings"]["typing_enabled"]), (True, True))
+        self.assertEqual(held(), saved)
+        for index in (0, 1):
+            await self.turn(index, "Later", "state-read-later-%d" % index)
+        self.assertEqual(held(), saved)
+        # Nor does a read while the peer is removed leave it anything to come back to.
+        self.assertEqual((await self.link(revision=1, members=["first"]))["status"], "ok")
+        StateManagement(self.app, second).status(operator)
+        self.assertEqual((await self.link(revision=2))["status"], "ok")
+        second = (await self.turn(1, "A member again", "state-read-rejoined"))["context"]
+        self.assertEqual(held(), saved)
 
     async def test_a_joined_endpoint_keeps_owner_features_on_its_own_window_only(self):
         from companion_v2.identity_policy.object_access import ObjectAccessPolicy
@@ -668,6 +759,32 @@ class LinkedOwnerTests(LinkedReplyFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(archive.draft.body, "We walked together")
         self.assertEqual(archive.draft.context.scope.platform, "qq-main")
         self.assertEqual((activity.scope.platform, growth.sources[0].scope.platform), ("qq-main", "qq-main"))
+
+    async def test_the_most_recent_growth_reaches_the_reply_context_when_the_conversation_has_more_than_one_scan(self):
+        from datetime import timedelta
+        from companion_v2.role_work.growth import GrowthKind, RoleGrowthRecord
+        from companion_v2.role_work.growth.context import SCAN_LIMIT
+        self.assertEqual((await self.link())["status"], "ok")
+        prepared = [await self.turn(index, "Our growth", "growth-scan-%d" % index) for index in (0, 1)]
+        reader = self.app.role_growth_context.reader
+        # Twenty confirmed records on each endpoint, written alternately: the later, the higher its id.
+        for number in range(SCAN_LIMIT + 8):
+            turn = prepared[number % 2]
+            context, at = turn["context"], self.clock.now() + timedelta(seconds=number)
+            identifier, owner = "growth-%02d" % number, reader.owner(turn["context"])
+            reader.ledger.add(RoleGrowthRecord(identifier, owner, context.scope, GrowthKind.GOAL,
+                "Goal %02d" % number, "", "", (turn["native_source_future"].result(),), at, at,
+                proposed_by=context.actor.subject))
+            reader.ledger.confirm(identifier, owner=owner, scope=context.scope, expected_revision=1,
+                operation_id="confirm-" + identifier, actor=context.actor.subject, observed_at=at)
+        self.clock.advance(timedelta(minutes=5))
+        for turn in prepared:
+            self.grant(turn["context"], "role.growth.read")
+            found = reader.candidates(turn["context"], self.clock.now())
+            newest = [item.reference["growth_id"] for item in found.items]
+            self.assertEqual(newest, ["growth-%02d" % number
+                                      for number in range(SCAN_LIMIT + 7, 7, -1)])
+            self.assertTrue(found.truncated)
 
     async def test_diary_with_its_original_input_and_life_candidates_are_read_through_the_other_endpoint(self):
         from companion_v2.role_work.models import RoleActivity, RoleActivityState

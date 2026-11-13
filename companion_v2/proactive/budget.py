@@ -3,6 +3,7 @@
 from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+from companion_v2.conversation.linked_ownership import window_filter
 from companion_v2.execution.models import TaskError, stamp
 from companion_v2.foundation.refs import normalize_utc
 from companion_v2.model_gateway.models import RELEASE_RECEIPT_PREFIX
@@ -87,7 +88,9 @@ class ContactBudget:
                     "unresolved": row["unresolved"], "date": normalize_utc(at, field="contact budget time").astimezone(
                         ZoneInfo(timezone_name)).date().isoformat(), "timezone": timezone_name}
 
-        return {"session": read("c.origin_key = ?", (context.key,), preferences.values["max_contacts_24h"])}
+        # The allowance is the human's: a linked conversation counts every window it was contacted from.
+        windows, window = window_filter(self.runtime, context, "c.origin_key")
+        return {"session": read(windows, (window,), preferences.values["max_contacts_24h"])}
 
     def rhythm_snapshot(self, context, preferences, at):
         """Summarize confirmed contact timing for the generation prompt, without message content."""
@@ -194,12 +197,13 @@ class ContactBudget:
         # Pending drafts reserve a place. An unresolved wire effect continues to
         # reserve it until a trusted receipt resolves what actually happened.
         cutoff = stamp(local_day_start(at, preferences.values["quiet_timezone"]))
-        count = self.runtime.read_one("""SELECT COUNT(DISTINCT c.contact_id) FROM proactive_contacts c
+        windows, window = window_filter(self.runtime, context, "c.origin_key")
+        count = self.runtime.read_one(f"""SELECT COUNT(DISTINCT c.contact_id) FROM proactive_contacts c
             JOIN background_deliveries d ON json_extract(d.request_json, '$.source_ref') = c.contact_id
-            WHERE c.origin_key = ? AND d.owner = 'proactive.contact' AND c.contact_id != ?
+            WHERE {windows} AND d.owner = 'proactive.contact' AND c.contact_id != ?
             AND COALESCE(json_extract(c.record_json, '$.administrator_test'), 0) = 0
             AND (d.state IN ('pending', 'dispatched', 'accepted', 'unknown')
                 OR (d.state = 'delivered' AND d.delivered_at >= ?))""",
-            (context.key, exclude_contact_id, cutoff))[0]
+            (window, exclude_contact_id, cutoff))[0]
         if count >= preferences.values["max_contacts_24h"]:
             raise TaskError("contact_delivery_budget", "contact delivery allowance is exhausted")

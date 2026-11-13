@@ -18,6 +18,7 @@ from companion_v2.adapters.astrbot.group import group_event_route
 from companion_v2.adapters.astrbot.provider import provider_fingerprint
 from companion_v2.adapters.astrbot.provider_catalog import TextProviderSettings, assemble_providers
 from companion_v2.execution.models import TaskContext, TaskError, digest, require
+from companion_v2.conversation.linked_ownership import LINKS_KEY, endpoint_removed
 from companion_v2.conversation.pokes import PokePolicy
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.foundation.refs import ScopeKind, SubjectKind, SubjectRef
@@ -997,9 +998,11 @@ class AstrBotMultiController:
                 target = conversation["target"]
                 if not self.authority.platform_known(target):
                     continue
-                if self.authority.conversation_link(target) is not None:
+                if (self.authority.conversation_link(target) is not None or endpoint_removed(
+                        self.runtime, target.platform_id, target.account_id, target.participant_id)):
                     # A link member answers on the conversation's stored scope, which
                     # start-up selects; its own native scope is not provisioned again.
+                    # An endpoint removed from a link is closed until it is admitted.
                     continue
                 for role_id in conversation["role_ids"]:
                     role = SubjectRef(self.settings.installation_id, SubjectKind.BOT, role_id)
@@ -1028,6 +1031,20 @@ class AstrBotMultiController:
                     logger.warning("[CompanionV2] 映射保存冲突后恢复运行失败 code=%s", recovered.failure.code)
             raise
 
+    def _keep_links_reachable(self, authority, settings):
+        """A mapping save never takes the last configured endpoint away from a linked conversation.
+
+        The conversation is reached only through its endpoints; the link operation
+        refuses to remove the last one for the same reason, with the same code.
+        """
+        def configured(mapping, link):
+            return any(mapping.private_target(row["platform_id"], row["account_id"], row["participant_id"])
+                       is not None for row in link["members"])
+        for link in (authority.read(LINKS_KEY) or {}).values():
+            if configured(self.settings, link) and not configured(settings, link):
+                raise TaskError("conversation_link_last_endpoint", "a linked conversation keeps at least one "
+                    "configured endpoint: link another private endpoint before removing this target")
+
     async def _apply_reviewed_bindings(self, candidate, *, expected_config=None):
         result = None
         settings = None
@@ -1045,6 +1062,8 @@ class AstrBotMultiController:
                 save = getattr(self, "save_plugin_config", None)
                 if not callable(save):
                     raise TaskError("account_config_persistence_unavailable", "the host has no plugin configuration writer")
+                if self.authority is not None:
+                    self._keep_links_reachable(self.authority, settings)
             manifest, _ = await self._probe(settings, include_conversations=False,
                                             allow_unavailable_model=True)
             model_issue = manifest.pop("_model_issue", None)
@@ -1106,6 +1125,8 @@ class AstrBotMultiController:
                     if self.runtime is not None:
                         authority = MultiAuthority(self.runtime, settings, now=self.now,
                             platform_name=self._configured_platform_name)
+                        if opened_here:
+                            self._keep_links_reachable(authority, settings)
                         with self.runtime.transaction():
                             authority.initialize(manifest, reviewed=True,
                                                  allow_legacy_staging=adopting_legacy_profile)

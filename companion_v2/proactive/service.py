@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 from companion_v2.capabilities.memory_push import (DEFAULT_MEMORY_PUSH, PUSH_PROACTIVE_MESSAGE, MemoryPushRecord,
     push_memory, push_memory_id)
 from companion_v2.configuration.models import ConfigurationError
+from companion_v2.conversation.linked_ownership import window_filter
 from companion_v2.conversation.messages import source_from_document
 from companion_v2.conversation.reply_preparation import observed_statements, trim_blank_edges
 from companion_v2.conversation.reply_settings import ReplySettings, voice_policy
@@ -571,14 +572,16 @@ class ProactiveContacts:
         normalized = " ".join(body.split())
         cutoff = stamp(at - timedelta(minutes=minutes)) if minutes else ""
         current = self.runtime.read_one("SELECT created_at FROM proactive_contacts WHERE contact_id = ?", (contact_id,))
-        rows = self.runtime.read_all("""SELECT c.contact_id, c.body, c.created_at, d.*
+        # What the human was already told through another window of a linked conversation counts too.
+        windows, window = window_filter(self.runtime, context, "c.origin_key")
+        rows = self.runtime.read_all(f"""SELECT c.contact_id, c.body, c.created_at, d.*
             FROM proactive_contacts c JOIN background_deliveries d
                 ON json_extract(d.request_json, '$.source_ref') = c.contact_id
-            WHERE c.origin_key = ? AND c.contact_id != ? AND d.owner = ?
+            WHERE {windows} AND c.contact_id != ? AND d.owner = ?
             AND ((d.state = 'delivered' AND d.delivered_at >= ? AND d.delivered_at <= ?)
               OR (d.state IN ('pending', 'dispatched', 'accepted', 'unknown') AND c.created_at >= ?))
             ORDER BY c.created_at DESC, c.contact_id DESC""",
-            (context.key, contact_id, GROUP, cutoff, stamp(at), cutoff))
+            (window, contact_id, GROUP, cutoff, stamp(at), cutoff))
         for row in rows:
             if " ".join(row["body"].split()) != normalized:
                 continue

@@ -6,14 +6,14 @@ from zoneinfo import ZoneInfo
 
 from companion_v2.execution.models import TaskError, digest, require, stamp
 from companion_v2.execution.service import outcome
-from companion_v2.foundation.refs import OperationRef, ScopeKind, VersionRef
+from companion_v2.foundation.refs import OperationRef, VersionRef
 from companion_v2.storage.models import OperationState
 from companion_v2.storage.repositories import OperationRepository
 from companion_v2.delivery.presence_diagnostics import describe_presentation
 from companion_v2.role_work.life.management import RoleLifeManagement
 from .ownership import role_schedule_key
 from .configuration import (DEFAULTS, GROUP, OWNER, PERMISSIONS, role_target_for,
-    sync_window_grants, target_for)
+    settings_decide_grants, sync_window_grants, target_for)
 from .settings_scope import role_preference
 
 
@@ -187,7 +187,7 @@ class StateManagement:
                     candidate = bound[0]
                     if (candidate.key == self.context.key
                             or role_owner(candidate) != owner
-                            or candidate.scope.kind is not ScopeKind.PRIVATE):
+                            or not settings_decide_grants(self.app.runtime, candidate.scope)):
                         continue
                     sync_window_grants(self.app.runtime, target_for(candidate),
                         candidate.actor.subject, current_settings, frozenset({"enabled"}),

@@ -535,6 +535,134 @@ class ProactiveAfterRetirementTests(TelegramAloneFixture, unittest.IsolatedAsync
         self.assertEqual(self.telegram_texts(), [(OWNER, "thinking of you")])
 
 
+class ContactLedgerFixture(TelegramAloneFixture):
+    both_have_spoken = ProactiveAfterRetirementTests.both_have_spoken
+    schedule_decision = ProactiveAfterRetirementTests.schedule_decision
+    thought = ProactiveAfterRetirementTests.thought
+
+    def contact_settings(self, context, **changes):
+        from companion_v2.foundation.refs import OperationRef, VersionRef
+        from companion_v2.proactive.configuration import GROUP, target_for
+        target, now = target_for(context), self.clock.now()
+        snapshot = require(self.app.configuration.read(context.actor, target=target, group_id=GROUP, observed_at=now))
+        identifier = "contact-settings-" + snapshot.edit_token[:16]
+        require(self.app.configuration.patch(context.actor, target=target, group_id=GROUP,
+            expected_edit_token=snapshot.edit_token, changes={GROUP + "." + key: value for key, value in changes.items()},
+            reset_to_inherit=(), operation=OperationRef(identifier, GROUP, target.authorization_scope,
+                                                        VersionRef(identifier, 1), identifier), observed_at=now))
+
+    def deliveries_today(self, context):
+        preferences = require(self.app.proactive.preferences.read(context, observed_at=self.clock.now()))
+        usage = self.app.proactive.budget.usage_summary(context, preferences, self.clock.now())["deliveries"]["session"]
+        return usage["used"], usage["limit"]
+
+    async def composed(self, prepared, text, seed):
+        """One contact composed for this window with this text; what was decided about it."""
+        from tests.native_adapter_support import completion
+
+        async def compose(payload, tools):
+            return completion(json.dumps({"decision": "send", "text": text}))
+        self.native.provider.client.state.behavior = compose
+        context = prepared["context"]
+        opportunity, intents = self.thought(context)
+        opportunity = type(opportunity)("opportunity-" + seed, context.scope, opportunity.opened_at, opportunity.expires_at)
+        intents = tuple(type(intent)(intent.purpose, type(intent.thought)("thought-" + seed, opportunity,
+            intent.thought.kind, intent.thought.summary, intent.thought.evidence, intent.thought.weight))
+            for intent in intents)
+        task = require(await self.app.proactive.contact(context, opportunity, intents,
+            role_instruction=prepared["instruction"], selection_seed=seed)).task
+        async with asyncio.timeout(30):
+            while True:
+                self.app.notify()
+                row = self.app.runtime.read_one("SELECT record_json FROM proactive_contacts WHERE task_id = ?",
+                                                (task.task_id,))
+                delivery = self.app.proactive._delivery_row(task.task_id)
+                if row is not None and (json.loads(row[0])["decision"] == "skip" or (
+                        delivery is not None and delivery["state"] not in ("pending", "dispatched"))):
+                    await self.idle()  # the work has released its background slot
+                    return json.loads(row[0])
+                self.assertEqual(self.app.state, "running", self.app.failure_code)
+                await asyncio.sleep(0.05)
+
+
+class OneContactLedgerTests(ContactLedgerFixture, unittest.IsolatedAsyncioTestCase):
+    """How often the human is contacted is counted for the conversation, not per endpoint."""
+
+    async def test_a_contact_composed_for_one_endpoint_leaves_no_allowance_for_the_other(self):
+        qq, telegram = await self.both_have_spoken(last=1)
+        self.contact_settings(qq["context"], max_contacts_24h=1)
+        self.assertEqual([self.deliveries_today(prepared["context"]) for prepared in (qq, telegram)], [(0, 1), (0, 1)])
+        self.assertEqual(await self.proactive_text(qq, "thinking of you"), "delivered")
+        await self.idle()
+        self.assertEqual([self.deliveries_today(prepared["context"]) for prepared in (qq, telegram)], [(1, 1), (1, 1)])
+        for prepared in (telegram, qq):
+            context = prepared["context"]
+            refused = await self.app.proactive.contact(context, *self.thought(context),
+                role_instruction=prepared["instruction"], selection_seed="no-allowance-left")
+            self.assertEqual(refused.failure and refused.failure.code, "contact_delivery_budget")
+        self.assertEqual((self.telegram_texts(), self.sent_to_qq()), ([(OWNER, "thinking of you")], []))
+
+    async def test_a_text_already_sent_for_one_endpoint_is_not_sent_again_for_the_other(self):
+        qq, telegram = await self.both_have_spoken(last=1)
+        first = await self.composed(qq, "thinking of you", "said-once")
+        self.assertEqual(first["decision"], "send")
+        self.clock.advance(timedelta(minutes=1))
+        repeated = await self.composed(telegram, "thinking of you", "said-again")
+        self.assertEqual((repeated["decision"], repeated["dedup_reason"]), ("skip", "exact_repeat"))
+        self.assertEqual((self.telegram_texts(), self.sent_to_qq()), ([(OWNER, "thinking of you")], []))
+
+    async def test_the_pause_after_an_attempt_holds_on_every_endpoint_of_the_conversation(self):
+        qq, telegram = await self.both_have_spoken(last=1)
+        self.assertEqual(await self.proactive_text(qq, "thinking of you"), "delivered")
+        await self.idle()  # the send has released its background slot
+        # Telegram's window carries the schedule; the attempt was made from QQ's.
+        self.contact_settings(qq["context"], automatic_enabled=True, idle_seconds=1, interval_seconds=600)
+        self.clock.advance(timedelta(seconds=30))
+        self.assertEqual(self.schedule_decision(telegram), "recent_attempt_cooldown")
+        self.assertEqual((self.telegram_texts(), self.sent_to_qq()), ([(OWNER, "thinking of you")], []))
+
+
+class ScheduleCarrierTests(ContactLedgerFixture, unittest.IsolatedAsyncioTestCase):
+    """One proactive schedule per conversation, carried by a member that can carry it now."""
+
+    superseded = ProactiveAfterRetirementTests.superseded
+
+    def evaluated(self, *prepared):
+        """One pass of the host's schedule; what it decided about each window."""
+        schedule = self.app.contact_schedule
+        schedule.advance()
+        return [schedule.diagnostic_for(item["context"])["evaluation"]["reason_code"] for item in prepared]
+
+    async def test_telegram_carries_the_schedule_while_the_qq_that_spoke_last_is_disconnected(self):
+        from tests.native_adapter_support import completion
+
+        async def compose(payload, tools):
+            return completion(json.dumps({"decision": "send", "text": "thinking of you"}))
+        self.native.provider.client.state.behavior = compose
+        qq, telegram = await self.both_have_spoken(last=0)
+        self.qq_disconnect()
+        self.contact_settings(telegram["context"], automatic_enabled=True, idle_seconds=1, interval_seconds=600)
+        self.clock.advance(timedelta(seconds=30))
+        # QQ's window has the latest turn and cannot carry anything; Telegram's does, with its own consent.
+        self.assertEqual(self.evaluated(telegram), ["candidate_queued"])
+        async with asyncio.timeout(30):
+            while not self.telegram_texts():
+                self.app.notify()
+                self.assertEqual(self.app.state, "running", self.app.failure_code)
+                await asyncio.sleep(0.05)
+        await self.idle()
+        self.assertEqual(self.evaluated(qq, telegram), [self.superseded, "recent_attempt_cooldown"])
+        self.assertEqual((self.telegram_texts(), self.sent_to_qq()), ([(OWNER, "thinking of you")], []))
+        self.assertEqual((self.link_record()["preferred_target_id"], (await self.link_view())["background_destination"]),
+                         ("second", "selected"))
+        # QQ returns. Its window carries the one schedule again and counts what was sent meanwhile.
+        self.qq_connect()
+        self.clock.advance(timedelta(seconds=30))
+        self.assertEqual(self.evaluated(qq, telegram), ["recent_attempt_cooldown", self.superseded])
+        await self.idle()
+        self.assertEqual((self.telegram_texts(), self.sent_to_qq()), ([(OWNER, "thinking of you")], []))
+
+
 class UnlinkAndRelinkQQTests(TelegramAloneFixture, unittest.IsolatedAsyncioTestCase):
     def access(self, context, action):
         result = self.app.tasks.check_context_access(context, action=action, observed_at=self.clock.now())
@@ -613,6 +741,74 @@ class UnlinkAndRelinkQQTests(TelegramAloneFixture, unittest.IsolatedAsyncioTestC
         # A link that does not exist yet keeps the general validation answer.
         invalid = await self.link(link_id="another", members=[])
         self.assertEqual(invalid["data"]["code"], "conversation_link_invalid")
+
+
+class RejoinFenceTests(TelegramAloneFixture, unittest.IsolatedAsyncioTestCase):
+    """What an endpoint captured before it was removed stays refused after it rejoins."""
+
+    access = UnlinkAndRelinkQQTests.access
+    thought = ProactiveAfterRetirementTests.thought
+
+    async def work_captured_before_a_removal_stays_refused_after_rejoining(self, leaving):
+        staying, names = 1 - leaving, ("first", "second")
+        # Background text goes to the member that stays, so nothing here depends on the one that leaves.
+        self.assertEqual((await self.link(preferred_target_id=names[staying]))["status"], "ok")
+        event, stale = await self.attempt(leaving, "before leaving", "1")
+        captured = stale["context"]
+        _, pending = await self.remind(leaving, "set before leaving", identifier="2", minutes=30)
+        set_before_leaving = self.reminder_id
+        keeper, kept = await self.remind(staying, "set by the member that stays", identifier="3", minutes=30)
+        self.assertEqual(self.access(captured, "memory.read"), "allowed")
+        self.assertEqual((await self.link(revision=1, members=[names[staying]]))["status"], "ok")
+        rejoined = await self.link(revision=2, members=[names[staying], names[leaving]])
+        self.assertEqual((rejoined["status"], rejoined["data"]["detached"]), ("ok", []))
+        self.sent.clear()
+        self.qq_calls().clear()
+        # The saved context, a reply prepared with it and a contact composed for it are refused.
+        for action in ("memory.read", "conversation.reply", "proactive.contact", "reminder.deliver",
+                       "memo.read", "extension.tool.invoke"):
+            self.assertEqual(self.access(captured, action), "role_binding_changed", action)
+        self.assertFalse((await self.controller.authorize_core_reply(event, stale)).is_success)
+        contact = await self.app.proactive.contact(captured, *self.thought(captured),
+            role_instruction=stale["instruction"], selection_seed="captured-before-leaving")
+        self.assertEqual(contact.failure.code, "role_binding_changed")
+        # The reminder it had set comes due after it rejoined and is not delivered.
+        self.assertEqual((await self.settled(keeper, kept, minutes=30))["delivery"], "delivered")
+        await self.idle()
+        dispatch = self.app.runtime.read_one("SELECT state, reason FROM agenda_dispatches WHERE occurrence_id = ?",
+                                             (pending,))
+        self.assertEqual((dispatch["state"], dispatch["reason"]), ("blocked", "role_binding_changed"))
+        delivered = self.telegram_texts() if staying == 1 else self.qq_texts()
+        self.assertEqual([text for _, text in delivered], ["set by the member that stays"])
+        # Fresh work after rejoining is accepted: a turn, and the same reminder once it is set again.
+        fresh = await self.turn(leaving, "back again", "5")
+        self.assertEqual(self.access(fresh["context"], "memory.read"), "allowed")
+        self.assertEqual(self.access(captured, "memory.read"), "role_binding_changed")
+        self.reminder_id = set_before_leaving
+        context, occurrence = await self.reschedule(leaving, identifier="6", minutes=10)
+        self.assertEqual((await self.settled(context, occurrence))["delivery"], "delivered")
+        delivered = self.telegram_texts() if staying == 1 else self.qq_texts()
+        self.assertEqual([text for _, text in delivered][-1], "set before leaving")
+
+    async def test_work_of_an_endpoint_left_out_when_its_conversation_was_linked_stays_refused_after_it_joins(self):
+        _, stale = await self.attempt(0, "before the link", "1")
+        captured = stale["context"]
+        self.assertEqual(self.access(captured, "memory.read"), "allowed")
+        # The conversation is linked without the endpoint it started on, which is closed from then on.
+        created = await self.link(members=["second"])
+        self.assertEqual((created["status"], [row["origin"] for row in created["data"]["detached"]]), ("ok", [QQ]))
+        self.assertEqual(self.access(captured, "memory.read"), "conversation_link_revoked")
+        self.assertEqual((await self.link(revision=1, members=["second", "first"]))["status"], "ok")
+        self.assertEqual(self.access(captured, "memory.read"), "role_binding_changed")
+        fresh = await self.turn(0, "a member now", "2")
+        self.assertEqual(self.access(fresh["context"], "memory.read"), "allowed")
+        await self.turn(1, "and the other member", 3)
+
+    async def test_work_of_the_endpoint_the_conversation_started_on_stays_refused_after_it_rejoins(self):
+        await self.work_captured_before_a_removal_stays_refused_after_rejoining(leaving=0)
+
+    async def test_work_of_the_joined_endpoint_stays_refused_after_it_rejoins(self):
+        await self.work_captured_before_a_removal_stays_refused_after_rejoining(leaving=1)
 
 
 class OneCompanionWithoutQQTests(TelegramAloneFixture, unittest.IsolatedAsyncioTestCase):
@@ -700,6 +896,52 @@ class LinkedMappingSaveTests(TelegramAloneFixture, unittest.IsolatedAsyncioTestC
         await self.turn(1, "after the save", 4)
         self.assertEqual((await self.history_seen_from(QQ))[-4:],
                          ["after the save", "reply-A", "after the save", "reply-B"])
+
+    async def test_a_mapping_save_that_removes_the_last_configured_endpoint_of_a_link_is_refused_before_anything_stops(self):
+        from companion_v2.execution.models import TaskError
+        self.assertEqual((await self.link())["status"], "ok")
+        await self.turn(0, "from QQ", "1")
+        await self.turn(1, "from Telegram", 2)
+        self.assertEqual((await self.link(revision=1, members=["second"]))["status"], "ok")
+        written, session, before = [], self.controller.session, deepcopy(self.controller.config)
+        self.controller.save_plugin_config = written.append
+        candidate = deepcopy(before)
+        host = candidate["multi_host"]
+        host["targets"] = [row for row in host["targets"] if row["platform_id"] != "tg-main"]
+        host["personas"] = [row for row in host["personas"] if row["bot_id"] != "bot-tg"]
+        with self.assertRaises(TaskError) as refused:
+            await self.controller.apply_bindings(candidate)
+        self.assertEqual(refused.exception.code, "conversation_link_last_endpoint")
+        self.assertIn("at least one", str(refused.exception))
+        # Nothing was stopped or saved: the same session goes on with the same mapping and link.
+        self.assertEqual((written, self.controller.config), ([], before))
+        self.assertIs(self.controller.session, session)
+        self.assertEqual(self.health()[0], ("running", True, None))
+        self.assertEqual([row["origin"] for row in self.link_record()["members"]], [TELEGRAM])
+        await self.turn(1, "still the conversation", 3)
+
+    async def saved_with_a_removed_endpoint_still_configured(self, removed):
+        remaining, names = 1 - removed, ("first", "second")
+        self.assertEqual((await self.link())["status"], "ok")
+        await self.turn(0, "from QQ", "1")
+        await self.turn(1, "from Telegram", 2)
+        self.assertEqual((await self.link(revision=1, members=[names[remaining]]))["status"], "ok")
+        self.controller.save_plugin_config = lambda document: None
+        saved = await self.controller.apply_bindings(deepcopy(self.controller.config))
+        self.assertEqual((saved["started"], saved.get("startup_error")), (True, None), saved)
+        self.assertEqual(self.health()[0], ("running", True, None))
+        self.app = self.controller.session.application
+        # The remaining endpoint goes on; the removed one is as closed as before the save.
+        await self.turn(remaining, "after the save", "3")
+        closed, prepared = await self.attempt(removed, "still closed", "4")
+        self.assertTrue(closed.is_stopped())
+        self.assertIsNone(prepared)
+
+    async def test_saving_the_mapping_starts_the_host_while_the_removed_qq_endpoint_stays_configured(self):
+        await self.saved_with_a_removed_endpoint_still_configured(removed=0)
+
+    async def test_saving_the_mapping_starts_the_host_while_the_removed_telegram_endpoint_stays_configured(self):
+        await self.saved_with_a_removed_endpoint_still_configured(removed=1)
 
 
 if __name__ == "__main__":

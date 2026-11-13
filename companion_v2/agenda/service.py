@@ -162,7 +162,7 @@ class AgendaService:
         return replace(reminder.target, scope=scope) if scope in link.scopes else reminder.target
 
     def same_owner(self, source: AgendaTarget, target: AgendaTarget) -> bool:
-        return self.repository.storage_key(source) == self.repository.storage_key(target)
+        return self.repository.record_key(source) == self.repository.storage_key(target)
 
     def _visible(self, actor, target, action, now, *, allow_private_owner=False):
         return tuple(key for scope in shared_scopes(self.runtime, target.scope)
