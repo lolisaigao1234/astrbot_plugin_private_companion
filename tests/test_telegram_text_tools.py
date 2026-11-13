@@ -69,6 +69,25 @@ class TelegramTextToolTests(LinkedTelegramFixture, unittest.IsolatedAsyncioTestC
         self.assertEqual(result["state"], "failed")
         self.assertEqual(self.sent, [])
 
+    async def test_telegram_command_receipt_send_exception_is_unknown_and_not_replayed(self):
+        from telegram.error import TimedOut
+        from astrbot_host.recalls import authenticate_notice_route
+        from astrbot_host.private_notice import send_private_notice
+        from companion_v2.foundation.refs import ScopeKind
+        attempts = []
+
+        async def uncertain_send(**kwargs):
+            attempts.append(kwargs)
+            raise TimedOut()
+
+        self.telegram.client.send_message = uncertain_send
+        event = self.event_for(1, "生成日程")
+        route = authenticate_notice_route(self.controller, event, ScopeKind.PRIVATE, expected_post="message")
+        receipt = await send_private_notice(self.controller, event, text="calendar result", route=route)
+        self.assertEqual(receipt["state"], "unknown")
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(self.sent, [])
+
     async def test_other_plugins_commands_keep_their_telegram_route_without_companion_model_work(self):
         from astrbot.core.message.message_event_result import MessageChain
         called = []
@@ -176,6 +195,27 @@ class TelegramTextToolTests(LinkedTelegramFixture, unittest.IsolatedAsyncioTestC
         self.assertEqual(qq[0]["payload"], [])
         _, telegram = await self.run_tools(1, [("memo.read", {"memo_id": saved[0]["payload"]["object_id"]})], identifier=3)
         self.assertEqual(telegram[0]["payload"]["title"], "independent Telegram note")
+
+    async def test_linked_text_tools_read_existing_qq_memory_role_calendar_and_timeline(self):
+        evidence = lambda args: self.prior(args, 0)["evidence_handles"]
+        await self.run_tools(0, [("turn.evidence", {}),
+            ("memory.proposal.submit", lambda args: {"proposal": {"operation": "add", "predicate": "drink",
+                "object": "tea", "representation": "The owner drinks tea",
+                "evidence_handles": [self.prior(args, 0)["memory_evidence_handle"]]}}),
+            ("role.growth.propose", lambda args: {"kind": "goal", "title": "Shared watercolor practice",
+                "evidence_handles": evidence(args)}),
+            ("calendar.command", lambda args: {"action": "create", "id": "shared-role-plan", "expected_revision": 0,
+                "evidence_handles": evidence(args), "data": {"kind": "role_plan", "title": "Shared watercolor session",
+                    "detail": "practice", "duration_minutes": 30, "presence": "painting",
+                    "schedule": {"anchor": "2026-10-11T10:00:00+00:00", "timezone_name": "UTC"}}})],
+            text="I drink tea and we can practise watercolor together")
+        self.assertEqual((await self.link())["status"], "ok")
+        _, results = await self.run_tools(1, [("memory.query", {"query_intent": "", "kind": "facts"}),
+            ("calendar.query", {}), ("role.timeline.query", {"kinds": ["growth"]})], identifier=2)
+        self.assertIn("The owner drinks tea", json.dumps(results[0]))
+        self.assertIn("Shared watercolor session", json.dumps(results[1]))
+        self.assertIn("Shared watercolor practice", json.dumps(results[2]))
+        self.assertEqual([platform for platform, _ in self.sent], ["qq-main", "tg-main"])
 
     async def test_repeated_native_tool_call_id_returns_one_note_and_the_original_receipt(self):
         self.tool_call_ids = {0: "same-native-call", 1: "same-native-call"}
