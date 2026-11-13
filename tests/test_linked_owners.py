@@ -779,6 +779,43 @@ class LinkedOwnerTests(LinkedReplyFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(routines), 1)
         self.assertIsNotNone(next(iter(routines.values())).instruction)
 
+    async def test_the_life_routine_runs_through_the_healthy_peer_when_its_first_binder_disconnects(self):
+        from companion_v2.role_work.life.configuration import LifeConfigurationOwner, configuration_fields
+        for index in (0, 1):  # each endpoint enables its routines itself, before the link exists
+            context = (await self.turn(index, "Before linking", "life-failover-own-%d" % index))["context"]
+            self.save(LifeConfigurationOwner(self.app.runtime), configuration_fields(), context,
+                      **{"role.life.enabled": True})
+            await self.turn(index, "Routines are on", "life-failover-enabled-%d" % index)
+        self.assertEqual((await self.link())["status"], "ok")
+        first = (await self.turn(0, "Good morning", "life-failover-a"))["context"]
+        second = (await self.turn(1, "Good morning again", "life-failover-b"))["context"]
+        self.assertEqual((self.allowed(first, "role.life.run"), self.allowed(second, "role.life.run")), (True, True))
+        await asyncio.gather(*tuple(self.controller.session.core_reply_maintenance._pending))
+        life, bridge = self.app.life_runtime, self.controller.session.bridge
+        routine, = self.life_routines(first, second).values()
+        routine.refresh()
+        await routine.preflight()
+        self.assertEqual(routine.context.scope, first.scope)
+        self.native.platforms["qq-main"].client._wsr_api_clients.clear()
+        with self.assertRaises(Exception) as unavailable:
+            await bridge.verify_role(first.scope, first.role_binding, routine.instruction)
+        self.assertEqual(unavailable.exception.code, "host_account_changed")
+        life.bind(second, routine.instruction, guard=bridge.verify_role)
+        ran = require(await routine.diary(local_date=self.clock.now().date().isoformat()))
+        # The member that ran it is the one the work is attributed to.
+        self.assertEqual(routine.context.scope, second.scope)
+        task = self.app.runtime.read_one("SELECT origin_key FROM execution_tasks WHERE task_id = ?",
+                                         (ran.writing_task_id,))
+        self.assertEqual(task["origin_key"], second.key)
+        # Still one routine and one daily schedule for the conversation.
+        self.assertEqual(set(self.life_routines(first, second)), {id(routine)})
+        self.assertEqual([key for key in self.app.journal_schedule._schedules if key.startswith("role.life.daily:")],
+                         ["role.life.daily:" + first.key])
+        # The first binder takes its routine back once its account returns.
+        self.native.platforms["qq-main"].client._wsr_api_clients["100"] = object()
+        await routine.preflight()
+        self.assertEqual(routine.context.scope, first.scope)
+
     async def test_context_records_keep_their_stored_form(self):
         from dataclasses import asdict
         import json
