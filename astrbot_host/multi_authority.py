@@ -493,15 +493,25 @@ class MultiAuthority:
 
         Before any default is issued, every capability gets the answer this
         endpoint had in its own conversation: allowed stays allowed, with its
-        expiry, and refused stays refused.
+        expiry, and refused stays refused. On a later rejoin its earlier grants on
+        the linked scope stand only where it is allowed on its own as well.
         """
         grants, consents = own or ({}, ())
         if not grants and not consents:
             return
         scope, subject = context.scope, context.actor.subject
-        decided = {grant.capability for grant in self.identities.grants_for_subject(subject) if grant.scope == scope}
-        for capability, (grant, family) in sorted(grants.items()):
-            if capability in decided:
+        held = {}
+        for row in self.identities.grants_for_subject(subject):
+            if row.scope == scope:
+                held.setdefault(row.capability, []).append(row)
+        for capability in sorted({*grants, *held}):
+            grant, family = grants.get(capability, (None, ""))
+            if capability in held:
+                # It was a member before: nothing it lacks on its own comes back with the link.
+                for row in held[capability] if grant is None else ():
+                    if row.state is GrantState.ACTIVE:
+                        self.identities.revoke_grant(row.grant_id, revoked_at=self.now(),
+                                                     expected_revision=self.identities.revision)
                 continue
             # A carried grant stays in the family its settings owner revokes.
             identifier = self.grant_id(scope, capability)

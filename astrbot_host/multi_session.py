@@ -1546,6 +1546,8 @@ class MultiHostSession:
 
         async with self._intake[target.target_id]:
             self.application.require_running()
+            if self.linked_conversations.removed(target):
+                raise TaskError("linked_endpoint_revoked", "this private endpoint no longer belongs to the conversation")
             # Text commands use the same authenticated physical route and served
             # conversation as an ordinary Telegram turn, without a reply batch.
             capture = (self.bridge.capture_core_reply if event.platform_meta.name == "telegram"

@@ -71,9 +71,11 @@ quiescence as any link edit, so a turn in flight makes it busy; nothing is copie
 - The endpoint the conversation started on is not admitted independently
   (`linked_anchor_endpoint_closed`): its native identity is the conversation's stored owner, so
   beside the link it would read what the conversation learns later. It can be linked again.
-- Routines a running host had bound to the removed endpoint (diary, sleep, state maintenance,
-  contact schedule) are refused from then on; a remaining endpoint takes them over at the next
-  host start. Restart the companion host after removing the endpoint that was bound first.
+- Routines a running host had bound to the removed endpoint are refused from then on. The
+  life routine (diary, sleep) needs no restart: on the host's next pass it leaves the removed
+  endpoint for a remaining bound member that holds the permission itself. State maintenance
+  and the contact schedule are taken over by a remaining endpoint at the next host start, so
+  restart the companion host for those after removing the endpoint that was bound first.
 - Removing the only remaining endpoint and running without QQ in configuration belong to #12.
   Which endpoint receives background text after a removal belongs to #6: a removed endpoint is
   not a member of the link record, and no send is authorized for it.
@@ -156,6 +158,9 @@ Identity and stored owners are shared across a link. Authority is not.
   that was off counts as refused, and its capability consents (image, Reality, screen and the
   like) are copied with their state. This happens once, before any default is issued. An
   endpoint that never had a conversation of its own starts from the defaults of a new one.
+  A removed endpoint has no authority at all while it is closed. Admitted on its own it is
+  judged by its own settings and grants again, and if it is linked once more its earlier
+  grants on the linked scope stand only where it is allowed on its own as well.
 - Inside a link the settings are shared and the grants are not. The provisioners that derive
   grants from settings (life, growth, state, typing and presence) issue and revoke nothing for
   a member. A later change of a shared setting issues or revokes the grant of the endpoint
@@ -208,8 +213,11 @@ formats, splits and sends, and AstrBot's whitelist still decides which chats rea
   conversation it was admitted under. The endpoint checks, that link and the calendar
   permission are checked again immediately before the planner writes and once more before the
   receipt; after the link changed nothing is written and nothing more is sent on that command.
-  The companion's reset and binding commands are refused on linked endpoints, and the other
-  text commands run inside a gated turn.
+  A `/new` on any member gives the link a new revision, so a command still planning under the
+  old one is refused in the same way; send it again. A removed endpoint's command is refused
+  before anything is read. AstrBot's session commands and the companion's full reset run
+  under the conversation permit, binding commands stay refused, and the other text commands
+  run inside a gated turn.
 - Receiver text replies become separate governed sources, available from `turn.evidence` and
   `source.read`, and remain separate from the human's current text in native history. Whole and
   partial quotes retain the physical account/chat/message/sender and original time. Bot attribution

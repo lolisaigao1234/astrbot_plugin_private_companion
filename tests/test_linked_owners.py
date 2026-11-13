@@ -302,6 +302,34 @@ class LinkedOwnerTests(LinkedReplyFixture, unittest.IsolatedAsyncioTestCase):
         second = (await self.turn(1, "After linking", "image-after"))["context"]
         self.assertEqual((consent(first), consent(second)), (True, False))
 
+    async def test_a_removed_endpoint_has_no_authority_and_a_rejoin_brings_back_nothing_it_lacks_on_its_own(self):
+        read, directory = "role.growth.read", self.controller.authority.identities
+        self.assertEqual((await self.link())["status"], "ok")
+        first = (await self.turn(0, "The anchor", "rejoin-a"))["context"]
+        linked = (await self.turn(1, "A member", "rejoin-b"))["context"]
+        self.growth(linked, read_enabled=True)
+        self.assertTrue(self.allowed(linked, read))
+        # Removed: its grant rows remain, and decide nothing.
+        self.assertEqual((await self.link(revision=1, members=["first"]))["status"], "ok")
+        self.assertTrue(any(grant.scope == linked.scope and grant.capability == read
+                            for grant in directory.grants_for_subject(linked.actor.subject)))
+        refused = directory.authorize(linked.actor, scope=linked.scope, capability=read, observed_at=self.clock.now())
+        self.assertEqual(refused.failure and refused.failure.code, "scope_not_granted")
+        # Admitted on its own: a conversation of its own, decided by its own settings and grants.
+        self.assertEqual((await self.link(revision=2, members=["first"],
+                                          independent_target_ids=["second"]))["status"], "ok")
+        own = (await self.turn(1, "On my own", "rejoin-own"))["context"]
+        self.assertNotEqual(own.scope, linked.scope)
+        self.assertNotEqual(own.actor.principal.host_id, linked.actor.principal.host_id)
+        self.assertFalse(self.allowed(own, read))
+        self.assertTrue(self.allowed(own, "memory.read"))
+        # Linked again: what it had under the earlier membership and lacks on its own stays refused.
+        self.assertEqual((await self.link(revision=3))["status"], "ok")
+        again = (await self.turn(1, "A member again", "rejoin-again"))["context"]
+        self.assertEqual(again.scope, linked.scope)
+        self.assertEqual((self.allowed(again, read), self.allowed(again, "memory.read")), (False, True))
+        self.assertTrue(self.allowed((await self.turn(0, "The anchor", "rejoin-a-again"))["context"], "memory.read"))
+
     async def test_a_later_shared_setting_change_moves_only_the_grants_of_the_endpoint_that_made_it(self):
         self.assertEqual((await self.link())["status"], "ok")
         first = (await self.turn(0, "Growth preferences", "later-setting-a"))["context"]
@@ -779,13 +807,19 @@ class LinkedOwnerTests(LinkedReplyFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(routines), 1)
         self.assertIsNotNone(next(iter(routines.values())).instruction)
 
-    async def test_the_life_routine_runs_through_the_healthy_peer_when_its_first_binder_disconnects(self):
+    async def own_life_routines(self, identifier):
+        """Each endpoint enables its routines itself, before any link exists."""
         from companion_v2.role_work.life.configuration import LifeConfigurationOwner, configuration_fields
-        for index in (0, 1):  # each endpoint enables its routines itself, before the link exists
-            context = (await self.turn(index, "Before linking", "life-failover-own-%d" % index))["context"]
+        for index, name in enumerate(("first", "second")):
+            context = (await self.turn(index, "Before linking", "%s-own-%d" % (identifier, index)))["context"]
             self.save(LifeConfigurationOwner(self.app.runtime), configuration_fields(), context,
                       **{"role.life.enabled": True})
-            await self.turn(index, "Routines are on", "life-failover-enabled-%d" % index)
+            # The window's next activation issues the grants; no host tick runs in between.
+            self.controller.authority.select(self.controller.settings.target(name), context.scope,
+                                             context.role_binding.role)
+
+    async def test_the_life_routine_runs_through_the_healthy_peer_when_its_first_binder_disconnects(self):
+        await self.own_life_routines("life-failover")
         self.assertEqual((await self.link())["status"], "ok")
         first = (await self.turn(0, "Good morning", "life-failover-a"))["context"]
         second = (await self.turn(1, "Good morning again", "life-failover-b"))["context"]
@@ -815,6 +849,24 @@ class LinkedOwnerTests(LinkedReplyFixture, unittest.IsolatedAsyncioTestCase):
         self.native.platforms["qq-main"].client._wsr_api_clients["100"] = object()
         await routine.preflight()
         self.assertEqual(routine.context.scope, first.scope)
+
+    async def test_the_life_routine_leaves_a_removed_first_binder_for_the_remaining_member_without_a_restart(self):
+        await self.own_life_routines("life-removed")
+        self.assertEqual((await self.link())["status"], "ok")
+        first = (await self.turn(0, "Good morning", "life-removed-a"))["context"]
+        second = (await self.turn(1, "Good morning again", "life-removed-b"))["context"]
+        await asyncio.gather(*tuple(self.controller.session.core_reply_maintenance._pending))
+        routine, = self.life_routines(first, second).values()
+        routine.advance()
+        self.assertEqual(routine.context.scope, first.scope)
+        self.assertEqual((await self.link(revision=1, members=["second"]))["status"], "ok")
+        # The host loop's next pass, with no restart and no new bind.
+        routine.advance()
+        self.assertEqual(routine.context.scope, second.scope)
+        ran = require(await routine.diary(local_date=self.clock.now().date().isoformat()))
+        task = self.app.runtime.read_one("SELECT origin_key FROM execution_tasks WHERE task_id = ?",
+                                         (ran.writing_task_id,))
+        self.assertEqual(task["origin_key"], second.key)
 
     async def test_context_records_keep_their_stored_form(self):
         from dataclasses import asdict

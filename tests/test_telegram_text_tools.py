@@ -72,7 +72,14 @@ class TelegramTextToolTests(LinkedTelegramFixture, unittest.IsolatedAsyncioTestC
         task = await self.dispatch(self.event_for(index, "生成日程"))
         try:
             await asyncio.wait_for(planning.wait(), 15)
-            if link_changes:
+            if link_changes == "new conversation":
+                # AstrBot's own /new on the other endpoint, registered as its loader registers it.
+                from astrbot.builtin_stars.builtin_commands.commands.conversation import ConversationCommands
+                self.builtin("new", ConversationCommands(self.core_context).new_conv)
+                await asyncio.wait_for(await self.dispatch(self.event_for(0, "/new", 2)), 20)
+                await self.controller.session.linked_conversations.gate.drain()
+                self.assertEqual(self.controller.session.linked_conversations.get("owner-dialogue")["revision"], 2)
+            elif link_changes:
                 records = self.controller.session.linked_conversations.records()
                 records["owner-dialogue"]["revision"] += 1
                 self.controller.authority.write(KEY, records)
@@ -80,7 +87,8 @@ class TelegramTextToolTests(LinkedTelegramFixture, unittest.IsolatedAsyncioTestC
             release.set()
         await asyncio.wait_for(task, 30)
         context = self.controller.authority.context("first", "role-a")
-        return self.app.calendar.inventory(context)["items"], [receipt["text"] for _, receipt in self.sent]
+        return self.app.calendar.inventory(context)["items"], [
+            receipt["text"] for platform, receipt in self.sent if platform == "tg-main"]
 
     async def test_calendar_command_on_a_linked_endpoint_writes_its_plan_and_returns_the_receipt(self):
         plans, receipts = await self.calendar_command_with_the_planning_model_paused(1, link_changes=False)
@@ -90,6 +98,12 @@ class TelegramTextToolTests(LinkedTelegramFixture, unittest.IsolatedAsyncioTestC
 
     async def test_link_revision_changed_while_a_calendar_command_plans_prevents_entry_and_receipt(self):
         plans, receipts = await self.calendar_command_with_the_planning_model_paused(1, link_changes=True)
+        self.assertEqual((plans, receipts), ([], []))
+
+    async def test_a_new_conversation_started_while_a_calendar_command_plans_prevents_entry_and_receipt(self):
+        # /new gives the link a new revision: a command still planning under the old one is refused.
+        plans, receipts = await self.calendar_command_with_the_planning_model_paused(
+            1, link_changes="new conversation")
         self.assertEqual((plans, receipts), ([], []))
 
     async def test_command_receipt_refuses_a_client_replaced_since_route_authentication(self):

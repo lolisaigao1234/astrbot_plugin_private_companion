@@ -116,6 +116,16 @@ class RoleLifeRuntime:
             return
         raise failure
 
+    def _leave_unauthorized_member(self):
+        """A member that lost the permission, or the link, hands the routine to one that holds it."""
+        for context in (self.context, *self._members.values()):
+            try:
+                self.authorize(context)
+            except TaskError:
+                continue
+            self.context = context
+            return
+
     def event(self, label, text, *, at=None):
         at = at or self.app.now()
         identifier = "life-source-" + digest([self.context.key, label, at])
@@ -339,6 +349,8 @@ class RoleLifeRuntime:
         if self.instruction is None or self._retired:
             return
         try:
+            if len(self._members) > 1:
+                self._leave_unauthorized_member()
             self.refresh()
             if not self.settings or not self.settings["enabled"]:
                 return
