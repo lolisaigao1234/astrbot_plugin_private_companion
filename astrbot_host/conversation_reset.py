@@ -97,15 +97,21 @@ async def observe_context_reset(controller, event):
                 if root is None or not (root / "runtime" / StorageRuntime.DATABASE_FILENAME).is_file():
                     return Outcome.success({"handled": False})
                 controller._open()
-            window = ConversationWindow(controller.runtime.installation_id, target.platform_id, kind,
-                                        native_scope_id, target.bot_id, target.account_id, session_id)
-            reset_id = "host-reset-" + digest([window, str(event.message_obj.message_id), event.created_at])
+            windows = [ConversationWindow(controller.runtime.installation_id, target.platform_id, kind,
+                                          native_scope_id, target.bot_id, target.account_id, session_id)]
             session = controller.session or controller.last_session
-            if session is None:
-                result = reset_window(controller.runtime, window, reset_id=reset_id, at=controller.now())
-            else:
-                async with session._intake[target.target_id]:
-                    result = require(session.application.reset_conversation_window(window, reset_id=reset_id))
+            conversation_link = getattr(getattr(session, "authority", None), "conversation_link", None)
+            link = conversation_link(target) if callable(conversation_link) and kind is ScopeKind.PRIVATE else None
+            if link is not None:
+                # One shared conversation: the temporary context of every endpoint ends with it.
+                windows = [ConversationWindow.from_scope(scope) for scope in link.scopes]
+            for window in reversed(windows):
+                reset_id = "host-reset-" + digest([window, str(event.message_obj.message_id), event.created_at])
+                if session is None:
+                    result = reset_window(controller.runtime, window, reset_id=reset_id, at=controller.now())
+                else:
+                    async with session._intake[target.target_id]:
+                        result = require(session.application.reset_conversation_window(window, reset_id=reset_id))
             event.set_extra(OBSERVED_MARKER, True)
         return Outcome.success(result)
     except Exception as error:

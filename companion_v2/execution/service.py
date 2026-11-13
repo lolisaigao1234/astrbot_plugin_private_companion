@@ -18,6 +18,7 @@ from types import MappingProxyType
 from typing import Callable
 from uuid import uuid4
 
+from companion_v2.conversation.linked_ownership import endpoint_removed
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.foundation.refs import ScopeKind, normalize_utc
 from companion_v2.identity_policy.object_access import ObjectAccessPolicy
@@ -187,6 +188,9 @@ class TaskSupervisor:
                 context.actor.subject, context.actor.binding_id, context.actor.binding_revision):
             raise TaskError("binding_rebound", "task belongs to the original account binding")
         principal, scope = current.principal, context.scope
+        if scope.kind is ScopeKind.PRIVATE and endpoint_removed(
+                self.runtime, scope.platform, scope.account_id, scope.native_scope_id):
+            raise TaskError("conversation_link_revoked", "this endpoint was removed from its linked conversation")
         if (scope.installation_id != self.runtime.installation_id or
                 (principal.platform, principal.bot_id, principal.account_id) !=
                 (scope.platform, scope.bot_id, scope.account_id)):

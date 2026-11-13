@@ -269,6 +269,9 @@ class LinkedReplyFixture(MultiFixture):
         self.register(EventType.OnLLMRequestEvent, record_final_request, priority=-2000000)
         self.register(EventType.AdapterMessageEvent, self.plugin.guard_linked_companion_commands,
             [EventMessageTypeFilter(EventMessageType.PRIVATE_MESSAGE)], priority=1000000)
+        self.register(EventType.AdapterMessageEvent, self.plugin.settle_linked_companion_control,
+            [EventMessageTypeFilter(EventMessageType.PRIVATE_MESSAGE)], priority=-1)
+        self.register(EventType.OnDecoratingResultEvent, self.plugin.observe_companion_context_reset, priority=100000)
         self.register(EventType.OnLLMRequestEvent, self.plugin.check_linked_companion_permit, priority=1000000)
         self.register(EventType.OnWaitingLLMRequestEvent, self.plugin.admit_linked_companion_turn, priority=1000000)
         self.scheduler = PipelineScheduler(PipelineContext(self.config, NS(context=core_context), "default", self.db))
