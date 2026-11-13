@@ -17,6 +17,7 @@ import stat
 from threading import RLock
 
 from companion_v2.execution.models import TaskError, digest, encode
+from companion_v2.conversation.linked_ownership import owner_scope
 from companion_v2.execution.service import outcome
 from companion_v2.foundation.refs import ScopeKind
 from companion_v2.legacy.sqlite_snapshot import open_readonly_sqlite_snapshot
@@ -979,11 +980,12 @@ class LegacyMemoryMaterials:
         connection = sqlite3.connect(path, timeout=5)
         connection.row_factory = sqlite3.Row
         try:
-            target = (context.scope.installation_id, context.scope.bot_id,
+            scope = owner_scope(self.runtime, context.scope)
+            target = (scope.installation_id, scope.bot_id,
                       context.role_binding.role.subject_id, scope_kind,
-                      context.scope.native_scope_id,
+                      scope.native_scope_id,
                       context.actor.subject.subject_id if scope_kind == ScopeKind.PRIVATE.value else "",
-                      context.scope.platform, context.scope.account_id)
+                      scope.platform, scope.account_id)
             native_scope_match = ("target_native_scope_id=?" if scope_kind == ScopeKind.GROUP.value
                                   else "target_native_scope_id IN ('', ?)")
             generations = connection.execute(f"""SELECT i.source_fingerprint,i.snapshot_sha256,i.binding_sha256
@@ -1115,9 +1117,10 @@ class LegacyMemoryMaterials:
                 raise TaskError("group_memory_access_denied", "legacy group history requires group.memory.read")
         else:
             raise TaskError("memory_conversation_context_required", "legacy memory requires a private or group conversation")
-        target = (context.scope.installation_id, context.scope.bot_id,
+        scope = owner_scope(self.runtime, context.scope)
+        target = (scope.installation_id, scope.bot_id,
                   context.role_binding.role.subject_id, scope_kind,
-                  context.scope.native_scope_id, actor_id, context.scope.platform, context.scope.account_id)
+                  scope.native_scope_id, actor_id, scope.platform, scope.account_id)
         if type(items) is not list or len(items) > 50:
             raise TaskError("legacy_memory_result_invalid", "historical result exceeded its verification budget")
         path = self.runtime.data_root / DATABASE_FILENAME

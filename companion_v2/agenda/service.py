@@ -20,6 +20,7 @@ from companion_v2.storage.models import OperationState
 from companion_v2.storage.codec import scope_from_row
 from companion_v2.storage.repositories import OperationRepository
 from companion_v2.storage.runtime import StorageRuntime
+from companion_v2.conversation.linked_ownership import link_for_scope, shared_scopes
 
 from .models import (
     AgendaError, AgendaReceipt, AgendaTarget, DueClaim, DueCursor, DuePage, LocalPreparation,
@@ -112,7 +113,11 @@ class AgendaService:
     def _authorize(
         self, actor: ResolvedIdentity, target: AgendaTarget, action: str, now: datetime, object_key: str | None = None,
     ) -> int:
-        access = self.policy.authorize(actor, scope=target.scope, action=action, owner=target.owner,
+        scope = target.scope
+        if object_key is not None:
+            domain, identifier = object_key.split(":", 1)
+            scope = self.object_scope(target, domain.removeprefix("agenda."), identifier)
+        access = self.policy.authorize(actor, scope=scope, action=action, owner=target.owner,
                                        object_key=object_key, observed_at=now,
                                        allow_private_owner=action == "memo.read")
         if access.failure is not None and access.failure.code.startswith("object_"):
@@ -120,17 +125,33 @@ class AgendaService:
         decision = require(access)
         return self._role_revision(target, decision.tier, now)
 
+    def object_scope(self, target: AgendaTarget, domain: str, identifier: str):
+        """Object registrations retain the actual source, independent of storage ownership."""
+        if link_for_scope(self.runtime, target.scope) is None:
+            return target.scope
+        record = (self._memo(identifier, target, include_deleted=True) if domain == "memo" else
+                  self._reminder(identifier, target) if domain == "reminder" else None)
+        return record.target.scope if record is not None else target.scope
+
     def _memo(self, memo_id: str, target: AgendaTarget, *, include_deleted: bool = False) -> Memo:
         memo = self.repository.memo(opaque(memo_id))
-        if memo is None or memo.target != target or (memo.state == "deleted" and not include_deleted):
+        if memo is None or not self.same_owner(memo.target, target) or (memo.state == "deleted" and not include_deleted):
             raise AgendaError("agenda_object_not_found", "object is unavailable in the authorized view")
         return memo
 
     def _reminder(self, reminder_id: str, target: AgendaTarget) -> Reminder:
         reminder = self.repository.reminder(opaque(reminder_id))
-        if reminder is None or reminder.target != target:
+        if reminder is None or not self.same_owner(reminder.target, target):
             raise AgendaError("agenda_object_not_found", "object is unavailable in the authorized view")
         return reminder
+
+    def same_owner(self, source: AgendaTarget, target: AgendaTarget) -> bool:
+        return self.repository.storage_key(source) == self.repository.storage_key(target)
+
+    def _visible(self, actor, target, action, now, *, allow_private_owner=False):
+        return tuple(key for scope in shared_scopes(self.runtime, target.scope)
+                     for key in require(self.policy.permitted_object_keys(actor, scope=scope, action=action,
+                         owner=target.owner, observed_at=now, allow_private_owner=allow_private_owner)))
 
     def _command(
         self, actor: ResolvedIdentity, target: AgendaTarget, action: str, operation: OperationRef,
@@ -158,7 +179,7 @@ class AgendaService:
                     return Outcome.success(replace(AgendaReceipt(**json.loads(row["result_json"])), replayed=True))
                 result = replace(mutate(), operation_id=reservation.operation.operation_id, action=action)
                 connection.execute("INSERT INTO agenda_results VALUES (?, ?, ?, ?, ?)", (
-                    result.operation_id, target.key, actor.subject.subject_id, action, encode(result),
+                    result.operation_id, self.repository.storage_key(target), actor.subject.subject_id, action, encode(result),
                 ))
                 self.policy.register_object(self.object_key("operation", result.operation_id), owner=actor.subject,
                                             scope=target.scope, domain="operation")
@@ -379,21 +400,21 @@ class AgendaService:
                 decision = require(self.policy.feature_access(actor, scope=target.scope, action="memo.list",
                     observed_at=observed_at, allow_private_owner=True))
                 self._role_revision(target, decision.tier, observed_at)
-                visible = require(self.policy.permitted_object_keys(actor, scope=target.scope, action="memo.read",
-                    owner=target.owner, observed_at=observed_at, allow_private_owner=True))
+                visible = self._visible(actor, target, "memo.read", observed_at, allow_private_owner=True)
                 ids = tuple(key[len("agenda.memo:"):] for key in visible if key.startswith("agenda.memo:"))
                 rows = []
                 result = []
                 scan_cursor = cursor
+                target_filter, target_key = self.repository.target_filter(target)
                 while len(result) < limit:
                     rows = self.runtime.read_all(
-                    """SELECT memo_id, pinned FROM agenda_memos WHERE target_key = ? AND state != 'deleted'
+                    f"""SELECT memo_id, pinned FROM agenda_memos WHERE {target_filter} AND state != 'deleted'
                        AND memo_id IN (SELECT value FROM json_each(?))
                        AND (pinned < ? OR (pinned = ? AND memo_id > ?))
                        AND (? IS NULL OR COALESCE(json_extract(record_json, '$.purpose'), 'note') = ?)
                        AND (? = 'all' OR state = ?) AND (instr(json_extract(record_json, '$.title'), ?) > 0
                        OR instr(json_extract(record_json, '$.body'), ?) > 0) ORDER BY pinned DESC, memo_id LIMIT ?""",
-                    (target.key, encode(ids), scan_cursor[0], *scan_cursor, purpose, purpose,
+                    (target_key, encode(ids), scan_cursor[0], *scan_cursor, purpose, purpose,
                      state, state, search, search, limit),
                     )
                     if not rows:
@@ -434,13 +455,13 @@ class AgendaService:
             with self.runtime.read_snapshot():
                 decision = require(self.policy.feature_access(actor, scope=target.scope, action="reminder.list", observed_at=observed_at))
                 self._role_revision(target, decision.tier, observed_at)
-                visible = require(self.policy.permitted_object_keys(actor, scope=target.scope, action="reminder.read",
-                                                                    owner=target.owner, observed_at=observed_at))
+                visible = self._visible(actor, target, "reminder.read", observed_at)
                 ids = tuple(key[len("agenda.reminder:"):] for key in visible if key.startswith("agenda.reminder:"))
+                target_filter, target_key = self.repository.target_filter(target)
                 rows = self.runtime.read_all(
-                    """SELECT reminder_id FROM agenda_reminders WHERE target_key = ? AND reminder_id > ?
+                    f"""SELECT reminder_id FROM agenda_reminders WHERE {target_filter} AND reminder_id > ?
                        AND reminder_id IN (SELECT value FROM json_each(?)) ORDER BY reminder_id LIMIT ?""",
-                    (target.key, after_id, encode(ids), limit),
+                    (target_key, after_id, encode(ids), limit),
                 )
                 result = tuple(self.repository.reminder(row["reminder_id"]) for row in rows)
             return Outcome.success(result)
@@ -452,14 +473,19 @@ class AgendaService:
     ) -> Outcome[AgendaReceipt]:
         try:
             with self.runtime.read_snapshot():
+                target_filter, target_key = self.repository.target_filter(target)
                 row = self.runtime.read_one(
-                    "SELECT result_json, subject_id FROM agenda_results WHERE operation_id = ? AND target_key = ?",
-                    (opaque(operation_id), target.key),
+                    f"SELECT result_json, subject_id FROM agenda_results WHERE operation_id = ? AND {target_filter}",
+                    (opaque(operation_id), target_key),
                 )
                 if row is None:
                     raise AgendaError("agenda_object_not_found", "original result is unavailable in this view")
                 requester = SubjectRef(self.runtime.installation_id, SubjectKind.HUMAN, row["subject_id"])
-                access = self.policy.authorize(actor, scope=target.scope, action="operation.lookup", owner=requester,
+                source_scope = target.scope
+                if len(shared_scopes(self.runtime, target.scope)) > 1:
+                    original = require(self.operations.get(operation_id))
+                    source_scope = original.operation.scope
+                access = self.policy.authorize(actor, scope=source_scope, action="operation.lookup", owner=requester,
                                                object_key=self.object_key("operation", operation_id), observed_at=observed_at)
                 if access.failure is not None and access.failure.code.startswith("object_"):
                     raise AgendaError("agenda_object_not_found", "original result is unavailable in this view")
