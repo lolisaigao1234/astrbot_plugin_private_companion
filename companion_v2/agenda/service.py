@@ -20,7 +20,7 @@ from companion_v2.storage.models import OperationState
 from companion_v2.storage.codec import scope_from_row
 from companion_v2.storage.repositories import OperationRepository
 from companion_v2.storage.runtime import StorageRuntime
-from companion_v2.conversation.linked_ownership import link_for_scope, shared_scopes
+from companion_v2.conversation.linked_ownership import conversation_link, link_for_scope, shared_scopes
 
 from .models import (
     AgendaError, AgendaReceipt, AgendaTarget, DueClaim, DueCursor, DuePage, LocalPreparation,
@@ -152,7 +152,9 @@ class AgendaService:
         keeps the window it was made on; the requester, and the role binding
         revision recorded with it, belong to the endpoint that last set the time.
         """
-        link = link_for_scope(self.runtime, reminder.target.scope)
+        # Also when the window it was made on has left the link: the record stays
+        # the conversation's, and a remaining member that set the time answers for it.
+        link = conversation_link(self.runtime, reminder.target.scope)
         if link is None:
             return reminder.target
         principal = reminder.requester.principal

@@ -997,6 +997,10 @@ class AstrBotMultiController:
                 target = conversation["target"]
                 if not self.authority.platform_known(target):
                     continue
+                if self.authority.conversation_link(target) is not None:
+                    # A link member answers on the conversation's stored scope, which
+                    # start-up selects; its own native scope is not provisioned again.
+                    continue
                 for role_id in conversation["role_ids"]:
                     role = SubjectRef(self.settings.installation_id, SubjectKind.BOT, role_id)
                     from companion_v2.foundation.refs import ScopeKind, ScopeRef

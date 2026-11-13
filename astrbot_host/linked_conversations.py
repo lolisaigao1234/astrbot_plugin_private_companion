@@ -65,9 +65,22 @@ class LinkedConversations:
 
     def view(self):
         """The stored links, each saying whether its reminders and proactive text have a destination now."""
-        return {link_id: {**link, "background_destination": "selected" if any(
-                    row["target_id"] == preferred_target_id(link) for row in link["members"]) else "missing"}
+        return {link_id: {**link, "background_destination": self.destination_state(link)}
                 for link_id, link in self.records().items()}
+
+    def destination_state(self, link):
+        """``selected``, or why text that comes due now would be left unsent.
+
+        ``missing``: the named target is no member, or is no longer configured.
+        ``unavailable``: a configured member whose account is not connected at the moment.
+        """
+        member = next((row for row in link["members"] if row["target_id"] == preferred_target_id(link)), None)
+        if member is None or self.session.settings.private_target(
+                member["platform_id"], member["account_id"], member["participant_id"]) is None:
+            return "missing"
+        bridge = self.session.bridge
+        account = bridge.accounts.get((member["platform_id"], member["account_id"]))
+        return "selected" if account is not None and bridge.account_connected(account) else "unavailable"
 
     def for_origin(self, umo):
         if umo not in self.gate.linked_origins:
@@ -161,8 +174,7 @@ class LinkedConversations:
                 or type(body["expected_revision"]) is not int or body["expected_revision"] < 0
                 or any(type(body[key]) is not str or not body[key].strip() or len(body[key]) > 128
                        for key in ("link_id", "conversation_id", "source_target_id"))
-                or type(body["member_target_ids"]) is not list or not body["member_target_ids"]
-                or len(body["member_target_ids"]) > 32
+                or type(body["member_target_ids"]) is not list or len(body["member_target_ids"]) > 32
                 or any(type(value) is not str for value in body["member_target_ids"])
                 or len(set(body["member_target_ids"])) != len(body["member_target_ids"])
                 or ("preferred_target_id" in body and preferred not in body["member_target_ids"])):
@@ -171,6 +183,13 @@ class LinkedConversations:
             raise TaskError("linked_busy", "the companion is stopping")
         session, cid = self.session, body["conversation_id"]
         old = self.get(body["link_id"])
+        if not body["member_target_ids"]:
+            if old is None:
+                raise TaskError("conversation_link_invalid", "supply a versioned conversation link and exact private members")
+            # The conversation belongs to the companion and is reached through its
+            # endpoints: without one it would stay stored and silently unreachable.
+            raise TaskError("conversation_link_last_endpoint", "a linked conversation keeps at least one endpoint: "
+                            "link another private endpoint before removing the last one")
         if (old["revision"] if old else 0) != body["expected_revision"]:
             raise TaskError("conversation_link_revision_conflict", "reload the current conversation link before editing")
         if old and old["conversation_id"] != cid:
@@ -183,8 +202,19 @@ class LinkedConversations:
             if (session.settings.window_link_for_target(target.target_id) is not None
                     or session.settings.window_links_for_primary(target.target_id)):
                 raise TaskError("conversation_link_invalid", "remove the legacy window link first")
-        members = [{**asdict(target), "origin": origin(target),
-                    "platform_name": session.bridge.context.get_platform_inst(target.platform_id).meta().name}
+        known = {row["origin"]: row["platform_name"]
+                 for row in (old or {}).get("members", []) + (old or {}).get("detached", [])}
+
+        def platform_name(target):
+            # An endpoint of the link keeps the channel kind stored with it: an edit
+            # must not need the channel of a member that is down to be loaded.
+            platform = session.bridge.context.get_platform_inst(target.platform_id)
+            if platform is not None:
+                return platform.meta().name
+            if origin(target) not in known:
+                raise TaskError("host_platform_unavailable", "an endpoint's channel must be loaded when it is linked")
+            return known[origin(target)]
+        members = [{**asdict(target), "origin": origin(target), "platform_name": platform_name(target)}
                    for target in targets]
         for row in members:
             collision = self.for_origin(row["origin"])
