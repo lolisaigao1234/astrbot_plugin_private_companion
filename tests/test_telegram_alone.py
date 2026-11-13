@@ -662,6 +662,20 @@ class OtherConversationTests(ContactLedgerFixture, unittest.IsolatedAsyncioTestC
                          ((0, 1), []))
 
 
+    async def test_a_member_that_has_not_spoken_since_it_joined_holds_no_schedule_with_its_earlier_conversation(self):
+        qq = await self.turn(0, "hello", "1")
+        self.clock.advance(timedelta(minutes=10))
+        own = await self.turn(1, "before joining", 2)
+        self.consent_to_contact(qq["context"], own["context"])
+        self.assertEqual((await self.link())["status"], "ok")
+        self.contact_settings(qq["context"], enabled=True, automatic_enabled=True, idle_seconds=300,
+                              interval_seconds=600)
+        self.clock.advance(timedelta(seconds=30))
+        # QQ has the conversation's only turn, ten minutes old: it carries, and the idle period is over.
+        self.assertNotIn(self.schedule_decision(qq), (ProactiveAfterRetirementTests.superseded,
+                                                     "idle_period_not_elapsed"))
+
+
 class TwoLinkedConversationsTests(ContactLedgerFixture, unittest.IsolatedAsyncioTestCase):
     """Two humans each have a linked conversation on the one QQ bot; Telegram moves from one to the other."""
 

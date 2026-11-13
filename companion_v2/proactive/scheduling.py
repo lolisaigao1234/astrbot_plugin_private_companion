@@ -311,7 +311,7 @@ class ContactSchedule:
         turns = []
         for endpoint in link.endpoints:
             scope = link.scope_at(*endpoint)
-            turn = latest if scope == context.scope else latest_scope(self.runtime, scope)
+            turn = latest if scope == context.scope else latest_scope(self.runtime, scope, conversation=True)
             if turn is not None:
                 turns.append(((turn["created_at"], turn["batch_id"]), scope, endpoint))
         turns.sort(key=lambda item: item[0], reverse=True)
@@ -337,7 +337,7 @@ class ContactSchedule:
         latest = max(event.received_at, datetime.fromisoformat(row["created_at"]))
         link = conversation_link(self.runtime, context.scope)
         for endpoint in link.endpoints if link is not None else ():
-            turn = latest_scope(self.runtime, link.scope_at(*endpoint))
+            turn = latest_scope(self.runtime, link.scope_at(*endpoint), conversation=True)
             if turn is not None:
                 latest = max(latest, datetime.fromisoformat(turn["created_at"]))
         return latest
