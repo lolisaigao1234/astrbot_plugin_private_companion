@@ -82,6 +82,13 @@ class LinkedTurnGate:
             del self.owners[task]
             lock.release()
 
+    def follow(self, key, successor):
+        """The conversation continues under a new native id: one coordinator, never two."""
+        self.locks[successor] = self.locks.setdefault(key, asyncio.Lock())
+        for task, owned in self.owners.items():
+            if owned[0] == key:
+                self.owners[task] = (successor, *owned[1:])
+
     async def drain(self, keys=None):
         """Unload must await admitted tasks AND deferred native-lock cleanup."""
         while True:

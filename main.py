@@ -1378,16 +1378,26 @@ class PrivateCompanionV2StagingPlugin(Star):
         if links is None or (links.for_event(event) is None
                              and event.unified_msg_origin not in links.gate.editing_origins):
             return
-        # Only session-changing commands wait for the coherent lifecycle ticket:
-        # AstrBot's own and the companion's reset and binding. Other plugins'
-        # commands and AstrBot's /stop are untouched.
+        # AstrBot's own session commands and the companion's full reset run under the
+        # conversation permit; the former are then applied to every member. Binding
+        # stays unavailable. Other plugins' commands and AstrBot's /stop are untouched.
         from .astrbot_host.reset_command import parse_reset_command
-        binding = getattr(self.staging, "handles_binding", None)
-        if (links.native_command(event, SESSION_COMMANDS) or (callable(binding) and binding(event))
+        links.stop_members(event)
+        if (links.native_command(event, SESSION_COMMANDS)
                 or parse_reset_command(str(getattr(event, "message_str", "") or "")) is not None):
+            await links.admit(self.staging, event, control=True)
+            return
+        binding = getattr(self.staging, "handles_binding", None)
+        if callable(binding) and binding(event):
             event.stop_event()
             from astrbot.core.message.message_event_result import MessageChain
-            await event.send(MessageChain().message("共享对话暂不支持会话切换、重置或配置指令。"))
+            await event.send(MessageChain().message("共享对话暂不支持绑定或解绑指令。"))
+
+    @filter.event_message_type(filter.EventMessageType.PRIVATE_MESSAGE, priority=-1)
+    async def settle_linked_companion_control(self, event: AstrMessageEvent):
+        links = getattr(getattr(self.staging, "session", None), "linked_conversations", None)
+        if links is not None:
+            await links.settle(event)
 
     @filter.on_llm_request(priority=1000000)
     async def check_linked_companion_permit(self, event: AstrMessageEvent, req):
