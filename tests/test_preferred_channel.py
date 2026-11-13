@@ -271,6 +271,10 @@ class RoutedBackgroundHistoryTests(PreferredChannelFixture, unittest.IsolatedAsy
         self.assertEqual((await self.settled(asked, later))["delivery"], "delivered")
         shown.append({"owner": "agenda.reminder", "text": "stand up", "delivered_on": "tg-main"})
         self.assertEqual([self.sent_in_the_background(context) for context in (qq, telegram)], [shown, shown])
+        # A removed endpoint reads none of it; the member that remains keeps what it asked for itself.
+        self.assertEqual((await self.link(revision=1, members=["second"]))["status"], "ok")
+        self.assertFalse(self.app.background_history.recent(qq).is_success)
+        self.assertIn(shown[1], self.sent_in_the_background(telegram))
 
     async def test_an_unlinked_window_keeps_its_own_background_history_as_it_was(self):
         telegram = (await self.turn(1, "hello", 1))["context"]
