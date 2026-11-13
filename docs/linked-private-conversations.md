@@ -82,6 +82,31 @@ is available through AstrBot's plugin logging. Independent-channel startup permi
 remaining endpoint to restart while the original platform is absent; the memory and
 archive still resolve through the stored anchor.
 
+## Telegram private text as a linked endpoint
+
+A Telegram private chat that is already an exact companion private target is linked like any
+other endpoint: name its target in `member_target_ids`. Nothing Telegram-specific is configured
+and the companion adds no poller, webhook or Telegram call. AstrBot's Telegram channel receives,
+formats, splits and sends, and AstrBot's whitelist still decides which chats reach any plugin.
+
+- The conversation the Telegram chat held while it was independent stays stored as it was. It is
+  no longer selected and nothing from it is merged into the shared conversation.
+- A turn on either channel loads the one shared history and its reply returns only to the chat
+  the message arrived on. Equal message numbers on QQ and Telegram are different inputs; a
+  redelivered input is admitted once.
+- The Telegram endpoint checks (a human's private text outside topics, the exact target, the
+  current running application and client) run together with the link's revision and membership:
+  on arrival, before tools and before each send. A private topic in the linked chat shares the
+  chat's origin and is refused, as is a message from a stopped or replaced application.
+- Linking does not widen the tools of the Telegram endpoint. The companion offers it only
+  `turn.evidence`, as on an unlinked Telegram endpoint; QQ-only actions are not offered. AstrBot's
+  own tools stay as AstrBot offers them for that chat, and its `send_message_to_user` remains
+  limited to the chat the message arrived on. Further text tools belong to #5.
+- A Telegram send that raises is recorded as `unknown` and is not sent again on either channel.
+  AstrBot has stored the reply in the shared history by then, as it does on QQ.
+- Either channel can be disconnected or removed. The other keeps the conversation, including
+  across a host restart.
+
 ## Turn lifetime
 
 The shared gate is keyed by the AstrBot CID, independent of link ID/revision. Authenticated
@@ -147,8 +172,12 @@ chats and chats that are not companion targets keep AstrBot's own replies.
   by physical origin and message ID, and survives plugin import reload. Durable redelivery
   across a process restart remains deferred per the owner's priorities.
 - Send exceptions retain existing unknown-outcome accounting. There is no automatic replay.
-- Completing the remaining shared owners (#11), Telegram linked dialogue (#4), coherent controls
-  (#7), cross-endpoint stop, preferred background delivery and operational recovery remain work.
+- On a joining endpoint, QQ or Telegram, the reply background omits the relationship and
+  open-item sections: both still require the endpoint's own grant and records from that exact
+  private route. The stored relationship memory is shared; reading it into a joined endpoint's
+  reply is part of the remaining shared owners (#11).
+- Completing the remaining shared owners (#11), further Telegram text tools (#5), coherent controls
+  (#7), cross-endpoint stop, preferred background delivery (#6) and operational recovery remain work.
 
 ## Offline proof
 
@@ -159,7 +188,9 @@ and ConversationManager over temporary SQLite. Companion intake, authorization, 
 native send guards and observations run for real. Handlers are registered through the normal
 AstrBot metadata/registry APIs; no core function or registry implementation is patched.
 
-Only provider and platform/transport ports are synthetic. A Context is assembled from those
+Only provider and platform/transport ports are synthetic. For Telegram these are the
+application and its client; the event is AstrBot's `TelegramPlatformEvent` with the channel's
+own metadata and session sender. A Context is assembled from those
 services without starting AstrBot's application lifecycle. The manager subclass adds read/write
 instrumentation and explicit pause/failure points, delegating every actual read and successful
 write to AstrBot. Streaming uses the real provider/runner/respond path: QQ's adapter buffers;
@@ -178,13 +209,18 @@ plugins' commands, restart, revoked origins, a stopped host, a new process whose
 cannot be read, and unload/reload. Each ordering case waits until the second turn is queued on
 the permit and checks that it loads no history, so it fails if the gate stops serializing.
 
+`tests.test_telegram_linked_conversation` repeats the continuation, ordering, redelivery,
+fencing, send-failure and shared-owner cases with the joining endpoint on Telegram, and adds
+its tool boundary and each channel running without the other.
+
 Run these suites with an AstrBot SDK environment that uses a temporary data root, never an
 installed plugin or a live data directory:
 
 ```sh
 python -X utf8 -m unittest -q \
   tests.test_linked_owners tests.test_linked_conversation tests.test_astrbot_linked_turn_contract \
-  tests.test_core_reply_conversation_ownership tests.test_telegram_private_reply
+  tests.test_core_reply_conversation_ownership tests.test_telegram_private_reply \
+  tests.test_telegram_linked_conversation
 ```
 
 No network, installed plugin, deployment state or running AstrBot container is used.
