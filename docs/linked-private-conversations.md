@@ -203,9 +203,10 @@ Identity and stored owners are shared across a link. Authority is not.
   own as well: a consent it withdrew on its own is withdrawn on the linked scope too, and a
   refusal that cannot be recorded stops the endpoint instead of passing silently.
 - Inside a link the settings are shared and the grants are not. The provisioners that derive
-  grants from settings (life, growth, state, typing and presence) refuse a member themselves,
-  whoever calls them: a read, the Dashboard state page included, changes no endpoint's
-  grants, and the role-wide walk of a state save does not reach the other members. A later
+  grants from settings (life, growth, state, typing and presence) refuse every scope of a
+  linked conversation themselves, a member's and a removed endpoint's alike, whoever calls
+  them: a read, the Dashboard state page included, changes no endpoint's grants, and the
+  role-wide walk of a state save does not reach the other members. A later
   change of a shared setting issues or revokes the grant of the endpoint that saved it, when
   turned on and when turned off, and leaves every other endpoint's grants as they were, also
   after its next turn. An operator's decision on an endpoint applies to that endpoint.
