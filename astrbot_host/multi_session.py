@@ -639,6 +639,7 @@ class MultiHostSession:
             wake_port=self._wake_snapshot,
             presence_port=MultiPresence(self))
         self.application = self.host.application
+        self.application.outbound.destination = self.linked_conversations.destination
         if hasattr(self.application, "contact_schedule"):
             self.application.contact_schedule.bind_health_source(self.huawei_health)
         self.application.image_fallback.attach_port(ReviewFallbackRoutes(self))

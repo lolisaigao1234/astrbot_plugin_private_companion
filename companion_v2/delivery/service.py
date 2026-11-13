@@ -17,6 +17,7 @@ from companion_v2.execution.models import (
     Lane, SideEffect, TaskContext, TaskDefinition, TaskError, TaskRegistration, TaskResult,
     TaskSpec, digest, encode, require, stamp,
 )
+from companion_v2.conversation.linked_ownership import conversation_link
 from companion_v2.execution.service import outcome
 from companion_v2.foundation.refs import OperationRef, VersionRef, normalize_utc
 from companion_v2.identity_policy.models import _opaque
@@ -76,6 +77,9 @@ class DeliveryOwner:
     action: str
     read: object
     history_read: object = None
+    # Reminders and proactive text follow a linked conversation's preferred
+    # endpoint. Anything that answers an input stays on the window it came from.
+    preferred_route: bool = False
 
     def __post_init__(self):
         _opaque(self.name, field="delivery owner")
@@ -90,6 +94,25 @@ class DeliveryOwner:
         return "delivery." + self.name
 
 
+ROUTE_KEY = "delivery.route.v1:"
+
+
+class DeliveryUnroutable(TaskError):
+    """The conversation's destination refused this delivery before anything was sent."""
+
+
+@dataclass(frozen=True)
+class DeliveryRoute:
+    """The one endpoint an attempt goes to, as resolved from the link at dispatch."""
+    context: TaskContext
+    link_id: str
+    link_revision: int
+
+    @property
+    def key(self):
+        return (self.context.key, self.link_id, self.link_revision)
+
+
 class OutboundDelivery:
     def __init__(self, runtime, sender, owners, *, concurrency=2):
         owners = tuple(owners)
@@ -99,6 +122,8 @@ class OutboundDelivery:
         self.owners = MappingProxyType({o.name: o for o in owners})
         self.on_delivered = None
         self.on_receipt = None
+        # Host port: the current context of a link member, or a TaskError naming why it has none.
+        self.destination = None
         self.tasks = None
         self.operations = OperationRepository(runtime)
         self.registrations = tuple(TaskRegistration(TaskDefinition(o.kind, "delivery", o.action,
@@ -186,6 +211,36 @@ class OutboundDelivery:
             return require(self.tasks.submit(TaskSpec(task_id, request.context, owner.kind, identifier,
                 identifier, request.not_before, request.deadline_at)))
 
+    def _route(self, request):
+        """Where a linked conversation's background text goes now; ``None`` keeps the stored window.
+
+        The stored context says whose work this is. The destination is the link's
+        preferred member, with that endpoint's own identity, role binding and
+        permission for this kind of text: nothing is borrowed from the endpoint
+        the work was recorded on, and no other member is ever tried instead.
+        """
+        owner = self.owners[request.owner]
+        try:
+            link = conversation_link(self.runtime, request.context.scope) if owner.preferred_route else None
+            if link is None:
+                return None
+            if link.preferred is None or self.destination is None:
+                raise TaskError("delivery_destination_missing", "the conversation has no preferred endpoint to deliver to")
+            context = self.destination(link, link.preferred)
+            require(self.tasks.check_context_access(context, action=owner.action, observed_at=self.tasks.now()))
+        except TaskError as error:
+            raise DeliveryUnroutable(error.code, str(error)) from error
+        return DeliveryRoute(context, link["link_id"], link["revision"])
+
+    def _fence(self, run, request, route):
+        """Before the platform call: the task, the link and the destination are what was resolved."""
+        def check():
+            run.validate()
+            current = self._route(request)
+            if current is None or current.key != route.key:
+                raise TaskError("delivery_route_changed", "the conversation's destination changed after it was resolved")
+        return check
+
     def _dispatch(self, run):
         if run.supervisor is not self.tasks:
             raise ValueError("delivery must use its original supervisor")
@@ -197,20 +252,41 @@ class OutboundDelivery:
             request = DeliveryRequest.restore(row["request_json"])
             content = self._content(request, self.tasks.now())
             text, images = content.text, content.images
+            route = self._route(request)
+            destination = route.context if route is not None else request.context
             run.begin_effect()
-            operation = OperationRef("dispatch-" + row["delivery_id"], "delivery", request.context.scope,
+            operation = OperationRef("dispatch-" + row["delivery_id"], "delivery", destination.scope,
                 VersionRef(row["delivery_id"], 1), row["delivery_id"])
             require(self.operations.reserve(operation, parameter_hash=digest([
-                request.context.key, row["payload_hash"], request.source_ref, self.sender.binding]), observed_at=self.tasks.now()))
+                destination.key, row["payload_hash"], request.source_ref, self.sender.binding]), observed_at=self.tasks.now()))
             run.record_operation(operation.operation_id)
             connection.execute("""UPDATE background_deliveries SET state = 'dispatched', operation_id = ?,
                 dispatched_at = ? WHERE delivery_id = ?""", (operation.operation_id, stamp(self.tasks.now()), row["delivery_id"]))
+            if route is not None:
+                # From here this attempt has one route: receipts are matched against it.
+                connection.execute("INSERT INTO runtime_metadata VALUES (?, ?)", (ROUTE_KEY + row["delivery_id"], encode({
+                    "link_id": route.link_id, "link_revision": route.link_revision, "route_key": destination.key,
+                    "scope": destination.scope.document(), "resolved_at": stamp(self.tasks.now())})))
             envelope = ImageDeliveryEnvelope if images else DeliveryEnvelope
-            return envelope(row["delivery_id"], operation.operation_id, request.context, request.sequence,
-                text, row["payload_hash"], self.sender.binding, run.validate,
+            return envelope(row["delivery_id"], operation.operation_id, destination, request.sequence,
+                text, row["payload_hash"], self.sender.binding,
+                self._fence(run, request, route) if route is not None else run.validate,
                 voice=content.voice, poke=content.poke,
                 **({"images": images, "allow_cross_scope_images": content.allow_cross_scope_images}
                    if images else {}))
+
+    def route(self, delivery_id):
+        """The concrete destination a dispatched delivery was given, if its conversation is linked."""
+        row = self.runtime.read_one("SELECT value FROM runtime_metadata WHERE key = ?", (ROUTE_KEY + delivery_id,))
+        return json.loads(row["value"]) if row is not None else None
+
+    def _unrouted(self, delivery_id, code):
+        """Nothing left and nothing will: the delivery keeps the reason, and no other endpoint is tried."""
+        with self.runtime.transaction() as connection:
+            connection.execute("UPDATE background_deliveries SET state = 'cancelled', reason = ? WHERE delivery_id = ? AND state = 'pending'",
+                (code, delivery_id))
+        logger.warning("V2 outbound delivery has no usable destination delivery=%s code=%s", delivery_id, code)
+        return TaskResult("failed")
 
     def _operation_state(self, row, state):
         current = require(self.operations.get(row["operation_id"]))
@@ -225,7 +301,10 @@ class OutboundDelivery:
                 self._operation_state(self._row(identifier), OperationState.UNKNOWN)
 
     async def deliver(self, run):
-        envelope = self._dispatch(run)
+        try:
+            envelope = self._dispatch(run)
+        except DeliveryUnroutable as error:
+            return self._unrouted(run.task.spec.request_ref, error.code)
         try:
             receipt = await self.sender.send(envelope)
             if not isinstance(receipt, DeliveryReceipt) or (receipt.part_id, receipt.operation_id) != (envelope.part_id, envelope.operation_id):
@@ -244,7 +323,9 @@ class OutboundDelivery:
     def record_receipt(self, receipt: DeliveryReceipt):
         with self.runtime.transaction() as connection:
             row = self._row(receipt.part_id)
-            if (row["operation_id"] != receipt.operation_id or row["origin_key"] != receipt.origin_key
+            route = self.route(receipt.part_id)
+            if (row["operation_id"] != receipt.operation_id
+                    or (route["route_key"] if route is not None else row["origin_key"]) != receipt.origin_key
                     or row["payload_hash"] != receipt.payload_hash or row["sender_json"] != encode(receipt.sender)
                     or row["dispatched_at"] is None):
                 raise TaskError("delivery_receipt_mismatch", "receipt does not belong to this original dispatch")
