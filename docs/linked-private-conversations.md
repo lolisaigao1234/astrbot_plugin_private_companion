@@ -87,7 +87,9 @@ quiescence as any link edit, so a turn in flight makes it busy; nothing is copie
   context the endpoint saved there carries that revision: its queued sends, tool calls,
   planned contacts and the reminders it set are refused with `role_binding_changed` from then
   on, also after it is linked again. It needs fresh work: a new turn, and a reminder set
-  again. Nothing of this touches the other members, and a `/new` does not advance it.
+  again. The endpoint a conversation started on is fenced in the same way when the link is
+  created without it. Nothing of this touches the other members, and a `/new` does not
+  advance it.
 - A removed endpoint is used on its own only after an administrator admits it: post the link
   with `"independent_target_ids": ["that-target"]` beside the unchanged member list. It is
   then no longer closed, answers with its own native identity and continues in the new, empty
