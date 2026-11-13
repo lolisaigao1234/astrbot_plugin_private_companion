@@ -8,7 +8,7 @@ import json
 import sqlite3
 
 from companion_v2.storage.runtime import StorageRuntime
-from companion_v2.conversation.linked_ownership import owner_scope, shared_scopes
+from companion_v2.conversation.linked_ownership import owner_scope, record_owner_scope, shared_scopes
 
 from .models import (AgendaError, AgendaTarget, Memo, Reminder, Schedule, encode, fingerprint,
                      open_item_expiry, restore_identity, stamp)
@@ -21,6 +21,10 @@ class AgendaRepository:
     def storage_key(self, target: AgendaTarget) -> str:
         """Only the partition key is shared; target_json keeps the physical endpoint."""
         return replace(target, scope=owner_scope(self.runtime, target.scope)).key
+
+    def record_key(self, target: AgendaTarget) -> str:
+        """The partition of an existing record, also after the endpoint it was made on left its link."""
+        return replace(target, scope=record_owner_scope(self.runtime, target.scope)).key
 
     def target_filter(self, target: AgendaTarget):
         """Read linked records in place, including ones written before sharing."""

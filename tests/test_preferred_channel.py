@@ -317,6 +317,18 @@ class PreferredOutcomeTests(PreferredChannelFixture, unittest.IsolatedAsyncioTes
         self.assertEqual((dispatch["state"], dispatch["reason"]), ("blocked", "scope_not_granted"))
         self.assertEqual((self.telegram_texts(), self.qq_texts()), ([], []))
 
+    async def test_a_reminder_of_a_removed_joined_endpoint_is_delivered_once_a_remaining_member_sets_it_again(self):
+        _, _, blocked = await self.linked_reminder(1, "from the removed endpoint")
+        self.assertEqual((await self.link(revision=1, members=["first"], preferred_target_id="first"))["status"], "ok")
+        context, occurrence = await self.reschedule(0, identifier="set-again", minutes=10)
+        self.assertNotEqual(occurrence, blocked)
+        self.sent.clear()
+        self.qq_calls().clear()
+        report = await self.settled(context, occurrence)
+        self.assertEqual(report["delivery"], "delivered", report)
+        await self.idle()
+        self.assertEqual((self.telegram_texts(), self.qq_texts()), ([], [("200", "from the removed endpoint")]))
+
     async def test_a_telegram_send_that_raises_is_unknown_and_is_never_sent_again_on_either_endpoint(self):
         from telegram.error import TimedOut
         _, context, occurrence = await self.linked_reminder(0, "take a break")

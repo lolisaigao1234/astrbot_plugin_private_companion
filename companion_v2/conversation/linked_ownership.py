@@ -156,6 +156,17 @@ def owner_scope(runtime, scope):
     return link.anchor if link else scope
 
 
+def record_owner_scope(runtime, scope):
+    """The owner of a stored record: the conversation its scope was written for.
+
+    Resolved from the link's persisted scopes, which keep an endpoint that has
+    left, so a record stays the conversation's whichever member is removed
+    afterwards. Who may act on it is decided on the acting endpoint.
+    """
+    link = conversation_link(runtime, scope)
+    return link.anchor if link else scope
+
+
 def joined_principal(principal):
     """Private link identities never inherit subject-level administrator tiers."""
     return principal.host_id == PRIVATE_HOST_ID
