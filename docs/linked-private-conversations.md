@@ -31,7 +31,10 @@ copied, merged or rekeyed.
 The returned document has `schema_version: 1` and an incremented `revision`. Account API GET
 includes `conversation_links`. To replace membership, POST the same link ID and conversation
 ID, the current `expected_revision`, the original `source_target_id`, and the complete desired
-member list. A stale revision is refused. The conversation ID in the document is the one
+member list. A stale revision is refused. An endpoint that is already in the link keeps the
+channel kind stored with it, so an edit does not need the channel of a member that is down;
+an endpoint that is new to the link must have its channel loaded (`host_platform_unavailable`
+otherwise). The conversation ID in the document is the one
 the members currently select: AstrBot's `/new` from a member replaces it and increments the
 revision (see "Shared controls"), so read the current document before editing.
 
@@ -337,7 +340,7 @@ What each state looks like:
 
 | State of the original endpoint | The remaining endpoint | Reminders and proactive text | What the administrator sees |
 | --- | --- | --- | --- |
-| Disconnected, still linked and configured | Replies, text tools and commands, controls and settings as before. When the client returns it continues the same conversation, including one started with `/new` meanwhile. | Go to the preferred endpoint. If the disconnected one is preferred: `background_destination: unavailable`, and a text that comes due is `cancelled / host_account_changed`; select another member and later texts go there. Reminders it had set are still delivered through the preferred endpoint. | Host status keeps `running` and accepting; its row under `accounts` has `available: false` with `host_account_unavailable` or `host_platform_unavailable`. |
+| Disconnected, still linked and configured | Replies, text tools and commands, controls and settings as before. When the client returns it continues the same conversation, including one started with `/new` meanwhile. | Go to the preferred endpoint. If the disconnected one is preferred: `background_destination: unavailable`, and a text that comes due is `cancelled / host_account_changed` (`host_platform_unavailable` when its channel is not loaded); select another member and later texts go there. That edit can keep the disconnected endpoint as a member. Reminders it had set are still delivered through the preferred endpoint. | Host status keeps `running` and accepting; its row under `accounts` has `available: false` with `host_account_unavailable` or `host_platform_unavailable`. |
 | Removed from the link | Keeps the conversation and every record. | Its reminders are blocked until set again (step 2). The proactive schedule is carried by a remaining member's window from the next pass. If it was preferred and no member was named: `background_destination: missing`, `cancelled / delivery_destination_missing`. | The link lists it under `detached`; its messages get the "shared conversation unavailable" notice and start no turn. |
 | Removed from configuration | Starts and runs with one identity, one set of owners and one schedule. | As above. If it is still a stored member and preferred: `background_destination: missing`, `cancelled / delivery_destination_missing`. | `accounts` lists only the configured accounts. A link edit can name only configured targets (`host_target_unavailable` otherwise), so the next edit leaves it out, which removes it from the link. |
 

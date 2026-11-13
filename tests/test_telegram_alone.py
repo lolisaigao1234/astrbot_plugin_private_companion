@@ -445,6 +445,18 @@ class PreferredQQUnavailableTests(TelegramAloneFixture, unittest.IsolatedAsyncio
         self.assertEqual(self.status(context, first)["delivery"], "cancelled")
         self.assertEqual(self.sent_to_qq(), [])
 
+    async def test_text_for_a_qq_whose_channel_is_no_longer_loaded_is_left_unsent_until_telegram_is_selected(self):
+        context, first, later = await self.two_reminders_for_qq()
+        self.native.platforms.pop("qq-main")
+        await self.new_process()
+        self.sent.clear()
+        self.assertEqual((await self.link_view())["background_destination"], "unavailable")
+        report = await self.settled(context, first)
+        self.assertEqual((report["delivery"], report["reason"]), ("cancelled", "host_platform_unavailable"))
+        # QQ stays a member: the edit that selects Telegram needs nothing from QQ's channel.
+        await self.select_telegram_and_wait_for(context, later)
+        self.assertEqual([row["origin"] for row in self.link_record()["members"]], [QQ, TELEGRAM])
+
     async def test_text_for_a_qq_removed_from_configuration_is_left_unsent_and_shown_until_telegram_is_selected(self):
         context, first, later = await self.two_reminders_for_qq()
         await self.remove_qq_from_configuration()

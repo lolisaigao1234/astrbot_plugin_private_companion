@@ -202,8 +202,19 @@ class LinkedConversations:
             if (session.settings.window_link_for_target(target.target_id) is not None
                     or session.settings.window_links_for_primary(target.target_id)):
                 raise TaskError("conversation_link_invalid", "remove the legacy window link first")
-        members = [{**asdict(target), "origin": origin(target),
-                    "platform_name": session.bridge.context.get_platform_inst(target.platform_id).meta().name}
+        known = {row["origin"]: row["platform_name"]
+                 for row in (old or {}).get("members", []) + (old or {}).get("detached", [])}
+
+        def platform_name(target):
+            # An endpoint of the link keeps the channel kind stored with it: an edit
+            # must not need the channel of a member that is down to be loaded.
+            platform = session.bridge.context.get_platform_inst(target.platform_id)
+            if platform is not None:
+                return platform.meta().name
+            if origin(target) not in known:
+                raise TaskError("host_platform_unavailable", "an endpoint's channel must be loaded when it is linked")
+            return known[origin(target)]
+        members = [{**asdict(target), "origin": origin(target), "platform_name": platform_name(target)}
                    for target in targets]
         for row in members:
             collision = self.for_origin(row["origin"])
