@@ -1069,6 +1069,34 @@ class LinkedMappingSaveTests(TelegramAloneFixture, unittest.IsolatedAsyncioTestC
         self.assertEqual([row["origin"] for row in self.link_record()["members"]], [TELEGRAM])
         await self.turn(1, "still the conversation", 3)
 
+    async def test_a_corrected_mapping_is_saved_and_started_after_a_stored_one_that_did_not_resolve(self):
+        self.assertEqual((await self.link())["status"], "ok")
+        await self.turn(0, "from QQ", "1")
+        corrected = deepcopy(self.controller.config)
+        await self.controller.terminate()
+        # The stored mapping names a persona of no registered bot: the host has no settings and does not run.
+        stored = deepcopy(corrected)
+        stored["multi_host"]["personas"].append(dict(bot_id="bot-gone", persona_id="original", role_id="role-a"))
+        self.manager = RecordedConversations(self.db)
+        self.native.conversation_manager = self.core_context.conversation_manager = self.manager
+        self.controller = MultiFixture.make_controller(self, stored)
+        self.plugin.staging = self.controller
+        self.assertIsNone(self.controller.settings)
+        written = []
+
+        def save(document):
+            written.append(deepcopy(document))
+            self.controller.config.clear()
+            self.controller.config.update(deepcopy(document))
+        self.controller.save_plugin_config = save
+        saved = await self.controller.apply_bindings(deepcopy(corrected))
+        self.assertEqual((saved["started"], saved.get("startup_error"), written), (True, None, [corrected]), saved)
+        self.assertEqual(self.health()[0], ("running", True, None))
+        self.app = self.controller.session.application
+        await self.turn(1, "still the conversation", 2)
+        self.assertEqual((await self.spoken_on(TELEGRAM))[-4:],
+                         ["from QQ", "reply-A", "still the conversation", "reply-B"])
+
     async def saved_with_a_removed_endpoint_still_configured(self, removed):
         remaining, names = 1 - removed, ("first", "second")
         self.assertEqual((await self.link())["status"], "ok")

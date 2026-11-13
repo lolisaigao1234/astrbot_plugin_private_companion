@@ -1036,10 +1036,12 @@ class AstrBotMultiController:
 
         The conversation is reached only through its endpoints; the link operation
         refuses to remove the last one for the same reason, with the same code.
+        A stored mapping that did not resolve configures no endpoint, so the
+        corrected one that replaces it takes nothing away.
         """
         def configured(mapping, link):
-            return any(mapping.private_target(row["platform_id"], row["account_id"], row["participant_id"])
-                       is not None for row in link["members"])
+            return mapping is not None and any(mapping.private_target(
+                row["platform_id"], row["account_id"], row["participant_id"]) is not None for row in link["members"])
         for link in (authority.read(LINKS_KEY) or {}).values():
             if configured(self.settings, link) and not configured(settings, link):
                 raise TaskError("conversation_link_last_endpoint", "a linked conversation keeps at least one "
