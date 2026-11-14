@@ -101,7 +101,7 @@ def _telegram_private_message_route(controller, event):
     bridge = controller.session.bridge
     account = bridge.accounts.get((meta.id, login))
     platform, _ = bridge._pinned(meta.id)
-    client = event_native_client(event)
+    client = event_native_client(platform, event)
     if (account is None or account.bot_id != target.bot_id or platform is None
             or controller.context.get_platform_inst(meta.id) is not platform
             or platform.meta().id != meta.id or platform.meta().name != "telegram"

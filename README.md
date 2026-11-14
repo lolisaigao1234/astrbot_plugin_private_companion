@@ -28,13 +28,15 @@
 | --- | --- |
 | 插件名 | `astrbot_plugin_private_companion` |
 | 显示名 | 我会永远陪着你 |
-| 当前版本 | `7.1.16`（7.x 架构线，内部领域标识 `private_companion.v2`） |
+| 当前版本 | `7.1.18`（7.x 架构线，内部领域标识 `private_companion.v2`） |
 | AstrBot 版本 | `>= 4.27.2` |
-| 声明支持平台 | `aiocqhttp`（OneBot v11）、`qq_official`、`qq_official_webhook`、`weixin_oc`（个人微信）、`telegram`（独立私聊文字） |
+| 声明支持平台 | `aiocqhttp`（OneBot v11）、`qq_official`、`qq_official_webhook`、`weixin_oc`（个人微信）、`wechat_native`（WeChat Native）、`telegram`（独立私聊文字） |
 | 管理入口 | AstrBot 插件扩展页「陪伴小屋」（支持低配设备开启「性能模式」切换为轻量状态页） |
 | 数据存储 | 独立 SQLite 运行库（覆盖升级自动隔离于 `companion-7` 子目录，支持备份快照与跨盘迁移） |
 | 内置原生扩展 | `Content`、`Image`、`Screen`、`Reality`、`Together`、`Game`、`Live` 七项能力随包内置 |
 | 开发者 | `menglimi` |
+
+WeChat Native 接入沿用 AstrBot 核心普通回复与适配器的原事件发送，后台投递使用 `send_by_session`。私聊、群聊及原生媒体／工具的配置与限制见 [WeChat Native 接入说明](docs/WECHAT_NATIVE_ADAPTATION.md)。首次主动发送前须接收并认证对应私聊会话；不支持时不会猜测联系人或改走独立通道。
 
 ### 文档与支持
 
@@ -177,6 +179,8 @@ Telegram 的访问控制沿用 AstrBot：在该 Bot 使用的配置中启用 `pl
 ### 3.3 从 6.7.0 升级与回退指南
 
 7.x 继续使用原仓库和插件名 `astrbot_plugin_private_companion`，通过现有安装原地更新即可，**不要并行安装第二份同名插件，也不要先删除原数据目录**。
+
+离线替换插件代码后须完整重启 AstrBot。仅重新启用已禁用的插件可能复用进程中已导入的旧模块，不能据此确认新版代码已加载。
 
 #### 升级六步流程
 
@@ -435,7 +439,7 @@ flowchart LR
 
 ### 5.5 识屏、现实触及、手机连接与智能家居（Screen & Reality）
 
-- **桌面识屏（Screen）**：按管理员授权读取桌面屏幕画面摘要，支持作为生活陪伴背景或主动关心线索，历史观察自动脱敏。
+- **桌面识屏（Screen）**：按管理员授权读取桌面屏幕画面摘要，支持作为生活陪伴背景或主动关心线索，历史观察自动脱敏。Docker、WSL 或服务器可选择远端 Windows / Linux 桌面，沿用现有授权与主动观察。配置方法见[远端桌面捕捉](docs/remote-screen-capture.md)。
 - **Android 手机连接**：
   - 在「专题配置 → 手机连接」提供清晰的三步配对卡片与健康检查地址；生成配对令牌时自动启用手机网关，支持同步手机位置、身体活动与终端状态。
 - **华为运动健康与智能睡眠叫醒**：

@@ -747,9 +747,16 @@ class ScheduleCarrierTests(ContactLedgerFixture, unittest.IsolatedAsyncioTestCas
 
     superseded = ProactiveAfterRetirementTests.superseded
 
-    def evaluated(self, *prepared):
-        """One pass of the host's schedule; what it decided about each window."""
+    async def evaluated(self, *prepared):
+        """A complete schedule pass after native observation and any current scan."""
         schedule = self.app.contact_schedule
+        observer = self.controller.session.core_reply_observations
+        async with asyncio.timeout(30):
+            while pending := observer._pending - observer._intervention_tasks:
+                await asyncio.gather(*tuple(pending))
+                await asyncio.sleep(0)
+            while schedule._advancing:
+                await asyncio.sleep(0.05)
         schedule.advance()
         return [schedule.diagnostic_for(item["context"])["evaluation"]["reason_code"] for item in prepared]
 
@@ -777,21 +784,21 @@ class ScheduleCarrierTests(ContactLedgerFixture, unittest.IsolatedAsyncioTestCas
         self.contact_settings(telegram["context"], automatic_enabled=True, idle_seconds=1, interval_seconds=600)
         self.clock.advance(timedelta(seconds=30))
         # QQ's window has the latest turn and cannot carry anything; Telegram's does, with its own consent.
-        self.assertEqual(self.evaluated(telegram), ["candidate_queued"])
+        self.assertEqual(await self.evaluated(telegram), ["candidate_queued"])
         async with asyncio.timeout(30):
             while not self.telegram_texts():
                 self.app.notify()
                 self.assertEqual(self.app.state, "running", self.app.failure_code)
                 await asyncio.sleep(0.05)
         await self.contact_recorded(telegram)
-        self.assertEqual(self.evaluated(qq, telegram), [self.superseded, "recent_attempt_cooldown"])
+        self.assertEqual(await self.evaluated(qq, telegram), [self.superseded, "recent_attempt_cooldown"])
         self.assertEqual((self.telegram_texts(), self.sent_to_qq()), ([(OWNER, "thinking of you")], []))
         self.assertEqual((self.link_record()["preferred_target_id"], (await self.link_view())["background_destination"]),
                          ("second", "selected"))
         # QQ returns. Its window carries the one schedule again and counts what was sent meanwhile.
         self.qq_connect()
         self.clock.advance(timedelta(seconds=30))
-        self.assertEqual(self.evaluated(qq, telegram), ["recent_attempt_cooldown", self.superseded])
+        self.assertEqual(await self.evaluated(qq, telegram), ["recent_attempt_cooldown", self.superseded])
         await self.idle()
         self.assertEqual((self.telegram_texts(), self.sent_to_qq()), ([(OWNER, "thinking of you")], []))
 
@@ -808,19 +815,19 @@ class ScheduleCarrierTests(ContactLedgerFixture, unittest.IsolatedAsyncioTestCas
         self.assertEqual((await self.link(revision=2, members=["second", "first"]))["status"], "ok")
         self.contact_settings(telegram["context"], automatic_enabled=True, idle_seconds=1, interval_seconds=600)
         self.clock.advance(timedelta(seconds=30))
-        self.assertEqual(self.evaluated(telegram), ["candidate_queued"])
+        self.assertEqual(await self.evaluated(telegram), ["candidate_queued"])
         async with asyncio.timeout(30):
             while not self.telegram_texts():
                 self.app.notify()
                 self.assertEqual(self.app.state, "running", self.app.failure_code)
                 await asyncio.sleep(0.05)
         await self.contact_recorded(telegram)
-        self.assertEqual(self.evaluated(qq, telegram), [self.superseded, "recent_attempt_cooldown"])
+        self.assertEqual(await self.evaluated(qq, telegram), [self.superseded, "recent_attempt_cooldown"])
         self.assertEqual((self.telegram_texts(), self.qq_texts()), ([(OWNER, "thinking of you")], []))
         # QQ speaks again: its new turn carries the one schedule and counts what was sent meanwhile.
         back = await self.turn(0, "back again", "3")
         self.clock.advance(timedelta(seconds=30))
-        self.assertEqual(self.evaluated(back, telegram), ["recent_attempt_cooldown", self.superseded])
+        self.assertEqual(await self.evaluated(back, telegram), ["recent_attempt_cooldown", self.superseded])
         await self.idle()
         self.assertEqual((self.telegram_texts(), self.qq_texts()), ([(OWNER, "thinking of you")], []))
 

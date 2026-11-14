@@ -14,7 +14,7 @@ from companion_v2.adapters.astrbot.memory_push import memory_push_provider
 from companion_v2.adapters.astrbot.native import (
     NativeConversationInput, NativePrivateBridge, NativeReplyEndpoint, NativeServedConversation,
     bounded_native_lookup, event_account_id, event_native_client,
-    event_peer_id, native_client_connected, native_id, native_user_subject_id,
+    event_peer_id, event_session_id, native_client_connected, native_id, native_user_subject_id,
     platform_client_matches, private_event_supported,
     supported_platform_name,
 )
@@ -34,6 +34,7 @@ from companion_v2.conversation.delivery import DeliveryReceipt, LocalSender
 from companion_v2.conversation.messages import REPLY_KIND
 from companion_v2.conversation.pokes import poke_reply_profile
 from companion_v2.conversation.participation import group_participation_settings
+from companion_v2.conversation.group_timing import strip_address_markers
 from companion_v2.conversation.reply_settings import (
     GROUP, expression_prompt_sections, private_debounce_settings,
 )
@@ -188,6 +189,7 @@ class MultiPrivateBridge(NativePrivateBridge):
                     or getattr(message, "group_id", None)):
                 raise TaskError("host_scene_unsupported", "core private reply requires a native private route")
             sender, login = event_peer_id(event), event_account_id(event)
+            session_id = event_session_id(event)
             account = self.accounts.get((platform_id, login))
             target = self.settings.private_target(platform_id, login, sender)
             if meta.name == "telegram":
@@ -195,11 +197,11 @@ class MultiPrivateBridge(NativePrivateBridge):
                 if not explicit_target(self.settings, target):
                     raise TaskError("host_route_mismatch", "Telegram needs an exact independent private target")
             if (not supported_platform_name(meta.name) or session.platform_id != platform_id
-                    or session.platform_name != platform_id or session.session_id != sender
-                    or event.unified_msg_origin != self._umo(platform_id, sender)
+                    or session.platform_name != platform_id or session.session_id != session_id
+                    or event.unified_msg_origin != self._umo(platform_id, session_id)
                     or account is None or target is None or target.bot_id != account.bot_id):
                 raise TaskError("host_route_mismatch", "event fields do not identify one registered private route")
-            event_client = event_native_client(event)
+            event_client = event_native_client(self.context.get_platform_inst(platform_id), event)
             platform = self.context.get_platform_inst(platform_id)
             if (platform is None or not platform_client_matches(platform, event_client)
                     or not native_client_connected(platform, login)):
@@ -207,6 +209,7 @@ class MultiPrivateBridge(NativePrivateBridge):
 
             event_id = native_id(message.message_id)
             at = datetime.fromtimestamp(event.created_at, timezone.utc)
+            self.remember_private_session(event)
             principal = self.authority.principal(target)
             owner = self.resolve_core_conversation_owner(target)
             linked_owner = owner if isinstance(owner, NativeServedConversation) else None
@@ -218,7 +221,7 @@ class MultiPrivateBridge(NativePrivateBridge):
             if linked_owner is not None:
                 conversation_id, role = linked_owner.scope.conversation_id, linked_owner.role
             scope = ScopeRef(self.installation_id, platform_id, ScopeKind.PRIVATE, sender,
-                             principal.bot_id, login, conversation_id, sender)
+                             principal.bot_id, login, conversation_id, session_id)
             if not platform_client_matches(self.platform(scope), event_client):
                 raise TaskError("host_client_mismatch", "private host account changed during persona lookup")
             self.client(scope)
@@ -226,11 +229,12 @@ class MultiPrivateBridge(NativePrivateBridge):
             actor = require(self.identities.resolve_authenticated(principal, observed_at=at))
             recipients = AudienceRef(scope, (actor.subject,))
             source_endpoint = NativeReplyEndpoint(
-                principal, scope, target.target_id, self._umo(platform_id, sender), event_id, event_client)
+                principal, scope, target.target_id, self._umo(platform_id, session_id), event_id, event_client)
+            owner_session_id = self.private_session_id(owner_account, owner_peer)
             owner_scope = ScopeRef(self.installation_id, owner_platform, ScopeKind.PRIVATE,
-                owner_peer, owner.bot_id, owner_login, conversation_id, owner_peer)
+                owner_peer, owner.bot_id, owner_login, conversation_id, owner_session_id)
             conversation = linked_owner or NativeServedConversation(
-                owner.target_id, self._umo(owner_platform, owner_peer), owner_scope, role)
+                owner.target_id, self._umo(owner_platform, owner_session_id), owner_scope, role)
             pieces = []
             for part in getattr(message, "message", ()):
                 kind = getattr(getattr(part, "type", None), "value", getattr(part, "type", None))
@@ -275,9 +279,10 @@ class MultiPrivateBridge(NativePrivateBridge):
             return await super().capture(event)
         try:
             sender, login = event_peer_id(event), event_account_id(event)
+            session_id = event_session_id(event)
             if (not supported_platform_name(meta.name) or session.platform_id != meta.id
-                    or session.platform_name != meta.id or session.session_id != sender
-                    or event.unified_msg_origin != f"{meta.id}:FriendMessage:{sender}"):
+                    or session.platform_name != meta.id or session.session_id != session_id
+                    or event.unified_msg_origin != f"{meta.id}:FriendMessage:{session_id}"):
                 return await super().capture(event)
             target = self.settings.private_target(meta.id, login, sender)
             if meta.name == "telegram":
@@ -289,7 +294,7 @@ class MultiPrivateBridge(NativePrivateBridge):
             account = self.accounts.get((meta.id, login))
             platform = self.context.get_platform_inst(meta.id)
             if (account is None or account.bot_id != target.bot_id or platform is None
-                    or not platform_client_matches(platform, event_native_client(event))
+                    or not platform_client_matches(platform, event_native_client(platform, event))
                     or not native_client_connected(platform, login)):
                 raise TaskError("host_client_mismatch", "private event did not originate from its registered Bot account")
             self.authority.ensure_actor(target)
@@ -526,7 +531,7 @@ class MultiHostSession:
     def __init__(self, runtime, native_context, *, settings, personas, authority, native_types,
                  provider_fingerprint, runtime_instance_id, now, native_tool_port=None, news_port=None,
                  solar_term_port=None, qzone_transport=None, balance_port=None, weather_ports=None,
-                 persona_window_snapshot_lookup=None, persona_window_snapshot_update=None,
+                 persona_window_snapshot_lookup=None, persona_window_snapshot_update=None, private_session_lookup=None,
                  search_port_factory=None):
         self.runtime, self.settings, self.authority, self.types, self.now = runtime, settings, authority, native_types, now
         self.native_tool_port = native_tool_port
@@ -554,6 +559,7 @@ class MultiHostSession:
             persona_selection_lookup=native_types.persona_selection_lookup,
             persona_window_snapshot_lookup=persona_window_snapshot_lookup,
             persona_window_snapshot_update=persona_window_snapshot_update,
+            private_session_lookup=private_session_lookup,
             file_settings=lambda scope, role: file_intake_settings(runtime, scope, role))
         from .linked_conversations import LinkedConversations
         self.linked_conversations = LinkedConversations(self)
@@ -619,11 +625,13 @@ class MultiHostSession:
         registry_ids = {item.field_id for item in registry_fields}
         registry_fields += tuple(field for field in relay_configuration_fields()
                                  if field.field_id not in registry_ids)
+        from .role_reference_owner import RoleReferenceOwnerResolver
         configuration_store = open_configuration_store(runtime)
         if configuration_store is not None:
             from companion_v2.conversation.linked_ownership import serve_link_records
             serve_link_records(configuration_store, runtime)
         self.host = AstrBotCompanionHost(runtime, event_port=self.bridge.ports, identity_port=self.bridge.ports,
+            reference_owner_resolver=RoleReferenceOwnerResolver(runtime, self.bridge),
             role_port=self.bridge.ports, runtime_identity=RuntimeIdentity("companion", runtime_instance_id, "astrbot", HOST_ID),
             registry=FieldRegistry(version="astrbot-multi.v1", fields=registry_fields),
             profiles=profiles, providers=tuple(model.local_provider() for model in self.models), budget=common.budget,
@@ -671,7 +679,8 @@ class MultiHostSession:
 
     def scope(self, target, conversation_id):
         return ScopeRef(self.runtime.installation_id, target.platform_id, ScopeKind.PRIVATE, target.participant_id,
-                        self.authority.bot_id(target), target.account_id, conversation_id, target.participant_id)
+                        self.authority.bot_id(target), target.account_id, conversation_id, self.bridge.private_session_id(
+                            self.bridge.accounts[(target.platform_id, target.account_id)], target.participant_id))
 
     def _wake_snapshot(self, context):
         """Read the Reality wake signals for this exact private target.
@@ -783,7 +792,7 @@ class MultiHostSession:
                     self.application.presence.bind(context)
             except Exception as error:
                 # An unmapped target stays unrouted until its V2 window persona is explicit.
-                if getattr(error, "code", None) not in ("host_persona_unmapped", "host_persona_window_unbound"):
+                if getattr(error, "code", None) not in ("host_persona_unmapped", "host_persona_window_unbound", "host_native_session_unavailable"):
                     if not late:
                         raise
                     logger.warning("[CompanionV2] 账号上线后的窗口准备未完成，稍后重试 target=%s code=%s error_type=%s",
@@ -1091,6 +1100,7 @@ class MultiHostSession:
                     wakeup = group_wakeup_settings(settings)
                     return Outcome.success({"admitted": bool(reason), "reason": reason,
                         "continuation": continuation,
+                        "trigger_facts": facts,
                         "mentioned": facts["mentioned"], "context_key": context.key, "event_id": captured.event_id,
                         "participation_policy": {
                             "question_enabled": wakeup["group_wakeup_enabled"] and wakeup["group_wakeup_question_enabled"],
@@ -1227,7 +1237,15 @@ class MultiHostSession:
                     typing_context, typing_turn = context, turn_id
                     presence.begin_native_reply(context, turn_id)
                 # The core request hook re-captures identity before provider dispatch.
+                group_trigger = None
                 if context.scope.kind is ScopeKind.GROUP:
+                    trigger = (group_admission or {}).get("trigger_facts")
+                    group_trigger = dict(trigger if trigger is not None else
+                                         group_trigger_facts(event, context.scope.account_id))
+                    # The captured skeleton retains mentions and media placeholders;
+                    # the memory text below intentionally contains only plain words.
+                    group_trigger["bare_mention"] = (group_trigger["mentioned"]
+                        and not strip_address_markers(captured.text).strip())
                     # Native media fallbacks carry placeholders; only original
                     # Plain components may become a member's memory evidence.
                     raw_text = "".join(part.text for part in getattr(event.message_obj, "message", ())
@@ -1319,6 +1337,7 @@ class MultiHostSession:
                             keyword_materials=keyword_entries,
                             health_material=health_material,
                             external_memory=external_memory,
+                            group_trigger=group_trigger,
                             private_group_context=private_group_context)
                         prompt_instruction = getattr(prompt, "context_instruction", prompt.instruction)
                         stable_prompt_instruction = getattr(prompt, "stable_instruction", "")
@@ -1415,6 +1434,7 @@ class MultiHostSession:
                     "expression_signal_ids": expression_signal_ids,
                     "turn_id": turn_id,
                     "native_input": captured,
+                    "group_trigger": group_trigger,
                     "native_source_future": source_future,
                     "segmentation_settings": segmentation_settings,
                     "presentation_settings": presentation_settings,

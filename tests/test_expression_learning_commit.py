@@ -383,7 +383,8 @@ class GroupLearningCommitPipelineTests(GroupFixture, unittest.IsolatedAsyncioTes
         while not worker.done():
             self.assertLess(asyncio.get_running_loop().time(), deadline)
             await asyncio.sleep(0.01)
-        return service.results[work_key]
+        # An automatic scan can replace the shared status after this worker ends.
+        return worker.result()
 
     def settings(self, changes):
         self.configure({"private_learning_enabled": False, "group_learning_enabled": True,

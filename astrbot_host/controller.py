@@ -871,7 +871,7 @@ class AstrBotStagingController:
         if (
             not isinstance(event, self.native_types.event)
             or getattr(event, "unified_msg_origin", None)
-            != f"{scope.platform}:FriendMessage:{scope.native_scope_id}"
+            != f"{scope.platform}:FriendMessage:{scope.session_id}"
             or session.application.state != "running"
         ):
             return False
@@ -882,7 +882,7 @@ class AstrBotStagingController:
                 and event_peer_id(event) == scope.native_scope_id
                 and event.platform_meta.id == scope.platform
                 and private_event_supported(event)
-                and event_native_client(event) is session.bridge.client(scope)
+                and event_native_client(session.bridge.platform(scope), event) is session.bridge.client(scope)
             )
         except Exception:
             return False

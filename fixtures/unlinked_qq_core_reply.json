@@ -60,6 +60,7 @@
     "event_ref",
     "expression_signal_ids",
     "group_tool_profile",
+    "group_trigger",
     "instruction",
     "laya_decision",
     "native_input",

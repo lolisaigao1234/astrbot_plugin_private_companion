@@ -108,7 +108,7 @@ def _mapping_controller(*, profile_root: Path, data_root: Path, settings) -> typ
 
     return types.SimpleNamespace(
         _lifecycle_lock=asyncio.Lock(), _control_lock=asyncio.Lock(),
-        _terminated=False, _accepting=False, config={}, runtime=None, session=None,
+        _terminated=False, _accepting=False, config={}, runtime=None, session=None, authority=None,
         last_session=None, restore_blocked=False, restore_state=None, last_restore=None,
         save_plugin_config=lambda candidate: None, _idle=lambda: None,
         _probe=probe, _resolve_settings=resolve, settings=settings,
@@ -283,7 +283,7 @@ class MultiControllerStartupGateTests(unittest.TestCase):
         self.profile_root = self.base / "profile"
         self.data_root = self.base / "plugin"
         self.data_root.mkdir()
-        self.settings = types.SimpleNamespace(installation_id=INSTALLATION)
+        self.settings = types.SimpleNamespace(installation_id=INSTALLATION, accounts=())
         self.controller = types.SimpleNamespace(
             _terminated=False, settings_error=None, settings=self.settings,
             context=None, native_types=None, authority=None, last_restore=None,
