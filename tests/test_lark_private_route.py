@@ -30,8 +30,9 @@ class LarkPrivateCaptureTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
         platform.lark_api = object()
         self.native.persona_manager.resolve_selected_persona = AsyncMock(
             return_value=("original", self.native.persona, None, False))
-        self.identity.bind(binding_id="native-lark", principal=AuthenticatedHostPrincipal(
-            INSTALLATION, "host", "qq-main", "ou_member", "bot-a", "qq-main"),
+        principal = AuthenticatedHostPrincipal(
+            INSTALLATION, "host", "qq-main", "ou_member", "bot-a", "qq-main")
+        self.identity.bind(binding_id="native-lark", principal=principal,
             subject=self.important.subject, valid_from=NOW, expected_revision=self.identity.revision)
         target = NS(target_id="private-lark", route_key=("qq-main", "qq-main", "ou_member"), bot_id="bot-a")
         settings = NS(targets=(target,), group_targets=(),
@@ -43,7 +44,8 @@ class LarkPrivateCaptureTests(NativeFixture, unittest.IsolatedAsyncioTestCase):
             accounts=(HostAccount("qq-main", "qq-main", "bot-a"),),
             personas=(HostPersona("bot-a", "original", ROLE,
                                   digest(persona_instruction(self.native.persona))),),
-            settings=settings, authority=NS(ensure_actor=Mock()))
+            settings=settings, authority=NS(ensure_actor=Mock(), runtime=self.runtime,
+                bot_id=lambda target: target.bot_id, principal=lambda target: principal))
         event = lark_event(platform, text="你好")
 
         captured = await bridge.capture(event)

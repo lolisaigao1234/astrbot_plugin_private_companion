@@ -33,10 +33,11 @@ SETTINGS_GRANT_FAMILIES = ("growth-grant:", "state-grant:", "life-grant-")
 
 
 class MultiAuthority:
-    def __init__(self, runtime, settings, *, now, platform_name=None):
+    def __init__(self, runtime, settings, *, now, platform_name=None, private_session_lookup=None):
         self.runtime, self.settings, self.now = runtime, settings, now
         link_records_changed(runtime)  # this host manages links on this store
         self.platform_name = platform_name
+        self.private_session_lookup = private_session_lookup
         self.identities, self.personas = PersistentIdentityDirectory(runtime), PersonaDirectory(runtime)
         self.core_target_id = None
         # 私聊权限默认值的读取器；由会话在应用装配好之后挂上。没挂上时保持旧行为
@@ -356,6 +357,12 @@ class MultiAuthority:
             raise TaskError("host_target_unavailable", "the native conversation route is unavailable")
 
     def _scope(self, target, scope, role):
+        session_id = target.participant_id
+        if callable(self.platform_name) and self.platform_name(target.platform_id) == "wechat_native":
+            session_id = (self.private_session_lookup(target.platform_id, target.account_id, target.participant_id)
+                          if callable(self.private_session_lookup) else None)
+            if not session_id:
+                raise TaskError("host_native_session_unavailable", "no authenticated private session is available")
         local_role = any(p.bot_id == self.bot_id(target) and p.role_id == role.subject_id
                          for p in self.settings.personas)
         conversation = self.conversation_link(target)
@@ -369,7 +376,7 @@ class MultiAuthority:
                                  for p in self.settings.personas)
         if (scope.installation_id != self.runtime.installation_id or scope.kind.value != "private"
                 or (scope.platform, scope.account_id, scope.bot_id, scope.native_scope_id, scope.session_id)
-                != (target.platform_id, target.account_id, self.bot_id(target), target.participant_id, target.participant_id)
+                != (target.platform_id, target.account_id, self.bot_id(target), target.participant_id, session_id)
                 or role.installation_id != self.runtime.installation_id
                 or not local_role):
             raise TaskError("host_target_mismatch", "scope and role must come from this configured private target")

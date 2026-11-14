@@ -1,11 +1,14 @@
 """Keep QQ voice and optional reaction attachments in supported messages."""
 
+import re
+
 from astrbot.core.message.components import (
     At,
     AtAll,
     BaseMessageComponent,
     ComponentType,
     Image,
+    Face,
     Plain,
     Record,
     Reply,
@@ -13,6 +16,19 @@ from astrbot.core.message.components import (
 from astrbot.core.message.message_event_result import MessageChain
 
 _DECORATION = (Reply, At, AtAll)
+# meme_manager and similar expression hooks decorate outgoing text with
+# ``&&angry&&``-style tokens.  They are internal markers, never user-facing.
+_EMOTION_MARKER = re.compile(r"&&[A-Za-z][A-Za-z0-9_:-]{0,32}&&")
+
+
+def _without_emotion_markers(chain):
+    cleaned = []
+    for part in chain:
+        if isinstance(part, Plain) and _EMOTION_MARKER.search(part.text or ""):
+            cleaned.append(Plain(text=_EMOTION_MARKER.sub("", part.text or "")))
+        else:
+            cleaned.append(part)
+    return cleaned
 
 
 class _OneBotEmojiImage(BaseMessageComponent):
@@ -42,6 +58,7 @@ def native_reply_messages(event, message):
     chain = getattr(message, "chain", None)
     if not isinstance(chain, (list, tuple)):
         return (message,)
+    chain = _without_emotion_markers(chain)
     getter = getattr(event, "get_platform_name", None)
     qq = callable(getter) and getter() == "aiocqhttp"
     groups, current = [], []
@@ -79,6 +96,12 @@ def native_reply_messages(event, message):
 async def native_wire_message(event, message):
     """The SDK's Image conversion drops sub_type; keep it for owned QQ stickers."""
     getter = getattr(event, "get_platform_name", None)
+    if callable(getter) and getter() == "wechat_native":
+        chain = getattr(message, "chain", ())
+        if any(isinstance(part, Face) for part in chain):
+            return _derive(message, [Plain(text=f"[QQ表情 {part.id}]") if isinstance(part, Face) else part
+                                     for part in chain])
+        return message
     if not callable(getter) or getter() != "aiocqhttp":
         return message
     chain = getattr(message, "chain", None)

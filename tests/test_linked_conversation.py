@@ -20,6 +20,18 @@ class LinkedConversationConcurrencyTests(LinkedReplyFixture, unittest.IsolatedAs
         self.assertEqual([write[0] for write in self.manager.writes], [ORIGINS[1], ORIGINS[0]])
         self.assertEqual(len(self.calls), 2)
 
+    async def test_wechat_native_chat_is_refused_as_member_or_source(self):
+        # Its private session id is not the participant id a link's origin is built from.
+        for platform_id in ("qq-second", "qq-main"):
+            metadata = self.native.platforms[platform_id].metadata
+            metadata.name = "wechat_native"
+            refused = await self.link()
+            metadata.name = "aiocqhttp"
+            self.assertEqual((refused["status"], refused["data"]["code"]), ("error", "conversation_link_invalid"))
+            self.assertIn("WeChat Native", refused["reason"])
+        self.assertIsNone(self.controller.session.linked_conversations.get("owner-dialogue"))
+        self.assertEqual((await self.link())["status"], "ok")
+
     async def test_explicit_versioned_link_selects_existing_history_and_survives_restart(self):
         from astrbot_host.account_session_api import AccountSessionWebAPI
         from unittest.mock import patch

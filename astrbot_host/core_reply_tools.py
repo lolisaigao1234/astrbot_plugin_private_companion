@@ -322,7 +322,8 @@ class CoreReplyToolSession:
         offered.append(_OfferedTool(EVIDENCE_SPEC, "evidence"))
         if self.text_only:
             return tuple(item for item in offered if item.spec.action in TELEGRAM_TEXT_ACTIONS)
-        if not self.text_only and context.scope.kind in (ScopeKind.GROUP, ScopeKind.PRIVATE):
+        if (context.scope.kind in (ScopeKind.GROUP, ScopeKind.PRIVATE)
+                and getattr(getattr(getattr(self, "event", None), "platform_meta", None), "name", "") != "wechat_native"):
             offered.append(_OfferedTool(POKE_SPEC, "interaction"))
         if self.context.scope.kind is ScopeKind.GROUP and self.group_tool_profile in ("lean", "standard"):
             allow_camera = is_core(self.application.runtime, self.context.actor)
@@ -344,13 +345,16 @@ class CoreReplyToolSession:
             if not self._skip_is_alone(wrapper):
                 raise TaskError("group_participation_skip_alone", "listening may accompany learning notes, but no business operation")
         admission = _field(self.prepared, "group_admission", {}) or {}
+        group_trigger = _field(self.prepared, "group_trigger")
+        mentioned = group_trigger["mentioned"] if group_trigger is not None else admission.get("mentioned")
         act, signature = "", ""
-        if arguments["mode"] == "reply" and not admission.get("mentioned") and admission.get("reason") in AUTONOMOUS_REASONS:
+        if arguments["mode"] == "reply" and not mentioned and admission.get("reason") in AUTONOMOUS_REASONS:
             try:
                 snapshot = self.application.reply_settings.snapshot(self.context.actor, self.context, self.application.tasks.now())
                 settings = {key.removeprefix(GROUP + "."): value for key, value in snapshot.values.items()}
                 turn = native_participation_turn(self.application.tools.group_participation, self.context,
-                                                _field(self.prepared, "native_input"), settings)
+                                                _field(self.prepared, "native_input"), settings,
+                                                group_trigger=group_trigger)
                 act, signature = turn["act"], turn["signature"]
             except Exception:
                 pass

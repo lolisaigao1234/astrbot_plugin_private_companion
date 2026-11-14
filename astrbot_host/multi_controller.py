@@ -11,8 +11,9 @@ import traceback
 from uuid import uuid4
 
 from companion_v2.adapters.astrbot.native import (
-    HostPersona, NativePrivateBridge, bounded_native_lookup, event_account_id, event_native_client, event_peer_id,
+    HostPersona, NativePrivateBridge, bounded_native_lookup, event_account_id, event_peer_id,
     native_client_connected, persona_instruction, platform_client_matches, private_event_supported, supported_platform_name,
+    event_session_id, event_native_client,
 )
 from companion_v2.adapters.astrbot.group import group_event_route
 from companion_v2.adapters.astrbot.provider import provider_fingerprint
@@ -681,7 +682,8 @@ class AstrBotMultiController:
             accounts=settings.accounts, personas=tuple(personas), now=self.now,
             session_persona_override_lookup=self.native_types.session_persona_override_lookup,
             persona_snapshot_lookup=self.native_types.persona_snapshot_lookup,
-            persona_selection_lookup=self.native_types.persona_selection_lookup)
+            persona_selection_lookup=self.native_types.persona_selection_lookup,
+            private_session_lookup=self.session_topology.private_session_id)
         conversations = {}
         states = self._account_states(settings)
         if states and all(states.values()):
@@ -699,7 +701,13 @@ class AstrBotMultiController:
             if peer == "*":
                 continue
             if target in settings.targets:
-                umo = bridge._umo(target.platform_id, target.participant_id)
+                try:
+                    session_id = bridge.private_session_id(account, target.participant_id)
+                except TaskError as error:
+                    if error.code == "host_native_session_unavailable":
+                        continue
+                    raise
+                umo = bridge._umo(target.platform_id, session_id)
                 # Global profile preparation provisions every configured role; the window
                 # persona is resolved later for live input admission.
                 conversation_manager = self.context.conversation_manager
@@ -711,6 +719,7 @@ class AstrBotMultiController:
                     raise TaskError("host_conversation_changed", "host conversation changed during startup probe")
                 conversations[target.target_id] = {
                     "target": target, "conversation_id": bridge._conversation_key(umo, conversation_id),
+                    "session_id": session_id,
                     "role_ids": tuple(sorted({item.role_id for item in settings.personas if item.bot_id == target.bot_id})),
                 }
             # Groups resolve the actual event's UMO, including member sessions,
@@ -737,6 +746,8 @@ class AstrBotMultiController:
                 conversations[target.target_id] = {
                     "target": target,
                     "conversation_id": bridge._conversation_key(window["unified_msg_origin"], window.get("conversation_id")),
+                    "session_id": bridge.private_session_id(bridge.accounts[(target.platform_id, target.account_id)],
+                                                            target.participant_id),
                     "role_ids": (mapping.role_id,),
                 }
         provider_id = settings.common.provider_id
@@ -820,11 +831,20 @@ class AstrBotMultiController:
             runtime.close()
             raise
         authority = MultiAuthority(runtime, settings, now=self.now,
-            platform_name=self._configured_platform_name)
+            platform_name=self._configured_platform_name,
+            private_session_lookup=self._configured_private_session)
         parked = self._parked_binding()
         core_target = self._core_target(parked) if parked is not None else None
         authority.core_target_id = core_target.target_id if core_target is not None else None
         return runtime, authority, last_restore
+
+    def _configured_private_session(self, platform_id, account_id, participant_id):
+        session = self.session
+        if session is not None:
+            cached = session.bridge._private_sessions.get((platform_id, account_id, participant_id))
+            if cached is not None:
+                return cached
+        return self.session_topology.private_session_id(platform_id, account_id, participant_id)
 
     def _configured_platform_name(self, platform_id):
         platform = self.context.get_platform_inst(platform_id)
@@ -862,6 +882,7 @@ class AstrBotMultiController:
             runtime_instance_id="astrbot-multi-" + uuid4().hex, native_tool_port=self.native_extensions, now=self.now,
             persona_window_snapshot_lookup=self.session_topology.persona_selection_snapshot,
             persona_window_snapshot_update=self.session_topology.update_persona_selection_snapshot,
+            private_session_lookup=self.session_topology.private_session_id,
             news_port=configured_news_port(self.config, context=self.context,
                 deepseek_provider_resolver=search_provider_resolver,
                 search_priority_resolver=search_settings.source_priority),
@@ -1009,7 +1030,7 @@ class AstrBotMultiController:
                     from companion_v2.foundation.refs import ScopeKind, ScopeRef
                     scope = ScopeRef(self.settings.installation_id, target.platform_id, ScopeKind.PRIVATE,
                         target.participant_id, target.bot_id, target.account_id,
-                        persona_conversation(conversation["conversation_id"], role), target.participant_id)
+                        persona_conversation(conversation["conversation_id"], role), conversation["session_id"])
                     self.authority.provision_scope(target, scope, role,
                         core_admin=core_target_id == target.target_id)
         return receipt
@@ -1066,6 +1087,16 @@ class AstrBotMultiController:
                     raise TaskError("account_config_persistence_unavailable", "the host has no plugin configuration writer")
                 if self.authority is not None:
                     self._keep_links_reachable(self.authority, settings)
+                # Refuse a selected adapter without a client before stopping the
+                # current host; disconnected or absent channels still start independently.
+                for account in settings.accounts:
+                    platform = self.context.get_platform_inst(account.platform_id)
+                    if platform is not None and platform.get_client() is None:
+                        logger.warning("[CompanionV2] 账号校验未通过 platform=%r account=%r client_present=False",
+                                       account.platform_id, account.self_id)
+                        raise TaskError("host_account_unavailable",
+                            f"配置的 Bot 账号 {account.platform_id}:{account.self_id} 当前未连接 AstrBot；"
+                            "请确认这个账号已登录，再重试初始化。")
             manifest, _ = await self._probe(settings, include_conversations=False,
                                             allow_unavailable_model=True)
             model_issue = manifest.pop("_model_issue", None)
@@ -1126,7 +1157,8 @@ class AstrBotMultiController:
                 try:
                     if self.runtime is not None:
                         authority = MultiAuthority(self.runtime, settings, now=self.now,
-                            platform_name=self._configured_platform_name)
+                            platform_name=self._configured_platform_name,
+                            private_session_lookup=self._configured_private_session)
                         if opened_here:
                             self._keep_links_reachable(authority, settings)
                         with self.runtime.transaction():
@@ -1342,17 +1374,18 @@ class AstrBotMultiController:
                 route = group_event_route(event)
                 target = self.settings.group_target(route.platform_id, route.account_id, route.group_id)
                 platform = self.context.get_platform_inst(meta.id)
-                if (target is None or platform is None or platform.get_client() is not event.bot
+                if (target is None or platform is None or platform.get_client() is not event_native_client(platform, event)
                         or (connected and not native_client_connected(
-                            platform, route.account_id, event.bot))):
+                            platform, route.account_id, event_native_client(platform, event)))):
                     return None
                 return target
             sender, login = event_peer_id(event), event_account_id(event)
+            session_id = event_session_id(event)
             if (message.group_id or getattr(message.type, "value", None) != "FriendMessage"
                     or getattr(session.message_type, "value", None) != "FriendMessage"
                     or not supported_platform_name(meta.name) or session.platform_id != meta.id
-                    or session.platform_name != meta.id or session.session_id != sender
-                    or event.unified_msg_origin != f"{meta.id}:FriendMessage:{sender}"):
+                    or session.platform_name != meta.id or session.session_id != session_id
+                    or event.unified_msg_origin != f"{meta.id}:FriendMessage:{session_id}"):
                 return None
             target = self.settings.private_target(meta.id, login, sender)
             if meta.name == "telegram":
@@ -1365,7 +1398,7 @@ class AstrBotMultiController:
             if (meta.name == "telegram" and (platform.meta().name != "telegram"
                     or platform.meta().id != meta.id or not native_client_connected(platform, login))):
                 return None
-            if not platform_client_matches(platform, event_native_client(event)):
+            if not platform_client_matches(platform, event_native_client(platform, event)):
                 return None
             return self.settings.effective_private_target(target)
         except (ValueError, AttributeError, TypeError):
@@ -1383,7 +1416,7 @@ class AstrBotMultiController:
             native_scope_id = route.session_id
         else:
             bridge = session.bridge
-            native_scope_id = target.participant_id
+            native_scope_id = event_session_id(event)
         account = bridge.accounts.get((target.platform_id, target.account_id))
         if account is None or account.bot_id != target.bot_id:
             return None
