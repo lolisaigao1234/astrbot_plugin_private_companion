@@ -216,6 +216,13 @@ class LinkedConversations:
             return known[origin(target)]
         members = [{**asdict(target), "origin": origin(target), "platform_name": platform_name(target)}
                    for target in targets]
+        # A link addresses each endpoint by origin(), built from the participant id.
+        # WeChat Native routes a private chat by a separate session id: its events would
+        # never match the stored origin and would run outside the conversation permit.
+        anchor_platform = session.bridge.context.get_platform_inst(source.platform_id) if source is not None else None
+        if (any(row["platform_name"] == "wechat_native" for row in members)
+                or (anchor_platform is not None and anchor_platform.meta().name == "wechat_native")):
+            raise TaskError("conversation_link_invalid", "WeChat Native private chats cannot be linked")
         for row in members:
             collision = self.for_origin(row["origin"])
             if collision is not None and collision["link_id"] != body["link_id"]:

@@ -1092,8 +1092,7 @@ class AstrBotMultiController:
                 for account in settings.accounts:
                     platform = self.context.get_platform_inst(account.platform_id)
                     if platform is not None and platform.get_client() is None:
-                        logger.warning("[CompanionV2] 账号校验未通过 platform=%r account=%r "
-                                       "client_present=False client_current=True",
+                        logger.warning("[CompanionV2] 账号校验未通过 platform=%r account=%r client_present=False",
                                        account.platform_id, account.self_id)
                         raise TaskError("host_account_unavailable",
                             f"配置的 Bot 账号 {account.platform_id}:{account.self_id} 当前未连接 AstrBot；"
