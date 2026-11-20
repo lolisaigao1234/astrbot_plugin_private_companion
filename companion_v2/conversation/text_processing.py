@@ -64,16 +64,20 @@ _TOOL_CALL_PROTOCOL_START = re.compile(
 _TOOL_CALL_PROTOCOL_BLANKS = re.compile(r"\n{3,}")
 # Some providers expose free-form reasoning as plain text with no XML wrapper.
 # DeepSeek V4-style drafts have the shape "th...end<visible text>" after the
-# first visible paragraph.  Anchor on the draft start (`th` + CJK) and on
-# `end` (at the start of a line or right after 。！？) followed by
-# CJK/newline, so ordinary English prose is untouched and words like
-# friend/send/Legend never close a draft.  The body never crosses into a
-# later line that is itself a `th`/用户说/用户问 opener or a ``` fence, so a
-# visible 「 line before a draft or a code block is not swallowed with it.
+# first visible paragraph.  Anchor on the draft start and on `end` (at the
+# start of a line or right after 。！？) followed by CJK/newline, so ordinary
+# English prose is untouched and words like friend/send/Legend never close a
+# draft.  No draft body crosses a ``` fence line, so a code block's `end` is
+# never taken for the close.  An explicit `th` + CJK opener runs through
+# 用户说/用户问 and 「 lines to its own `end`.  A 「/用户说/用户问 opener
+# stops at a later th/用户说/用户问 opener line, so a visible 「 line before a
+# draft is not swallowed with it.
 _BARE_DRAFT_BLOCK = re.compile(
-    r"(?ms)^[ \t]*(?:th(?=[\u4e00-\u9fff])|(?=用户(?:说|问)|「))"
+    r"(?ms)^[ \t]*(?:"
+    r"th(?=[\u4e00-\u9fff])(?:[^\n]|\n(?![ \t]*```))*?"
+    r"|(?=用户(?:说|问)|「)"
     r"(?:[^\n]|\n(?![ \t]*(?:th(?=[\u4e00-\u9fff])|用户(?:说|问)|```)))*?"
-    r"(?:^[ \t]*|(?<=[。！？]))end(?![A-Za-z])(?=[ \t]*(?:[\u4e00-\u9fff]|\n|$))"
+    r")(?:^[ \t]*|(?<=[。！？]))end(?![A-Za-z])(?=[ \t]*(?:[\u4e00-\u9fff]|\n|$))"
 )
 _PAIRS = {"(": ")", "[": "]", "{": "}", "（": "）", "【": "】", "《": "》",
           "〈": "〉", "「": "」", "『": "』", "“": "”", "‘": "’", '"': '"'}
