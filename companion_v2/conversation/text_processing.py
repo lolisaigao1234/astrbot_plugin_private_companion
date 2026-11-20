@@ -67,15 +67,19 @@ _TOOL_CALL_PROTOCOL_BLANKS = re.compile(r"\n{3,}")
 # first visible paragraph.  The closing `end` must be followed by CJK/newline
 # and never follow a letter, so ordinary English prose is untouched and words
 # like friend/send/Legend never close a draft.  Each opener has its own guards:
-# - `th` + CJK is an explicit draft: its body crosses anything, fences
-#   included, and closes at a line-start `end` or an `end` right after 。！？.
+# - `th` + CJK is an explicit draft: its body crosses anything and closes at
+#   a line-start `end` or an `end` right after 。！？.  A ``` fenced block
+#   is skipped as one unit, so a code `end` inside it never closes the
+#   draft; an unclosed fence cannot be crossed, so that draft is kept.
 # - 用户说/用户问: the body stops only at a ``` fence line, so a code block's
 #   `end` is never the close.  It closes like `th`.
 # - 「 may be a visible reply: the body stops at a later th/用户说/用户问 opener
 #   line or a fence line, and it closes only at a line-start `end`.
 _BARE_DRAFT_BLOCK = re.compile(
     r"(?ms)^[ \t]*(?:"
-    r"th(?=[\u4e00-\u9fff])[\s\S]*?(?:^[ \t]*|(?<=[。！？]))"
+    r"th(?=[\u4e00-\u9fff])(?:"
+    r"^[ \t]*```[^\n]*\n(?:(?!^[ \t]*```)[\s\S])*^[ \t]*```[^\n]*"
+    r"|(?!^[ \t]*```)[\s\S])*?(?:^[ \t]*|(?<=[。！？]))"
     r"|(?=用户(?:说|问))(?:[^\n]|\n(?![ \t]*```))*?(?:^[ \t]*|(?<=[。！？]))"
     r"|(?=「)(?:[^\n]|\n(?![ \t]*(?:th(?=[\u4e00-\u9fff])|用户(?:说|问)|```)))*?"
     r"^[ \t]*"

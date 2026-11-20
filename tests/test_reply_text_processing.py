@@ -214,6 +214,17 @@ class ReplyTextProcessingTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(strip_internal_expression_protocol(text), text)
 
+    def test_th_draft_skips_a_fenced_code_block_to_its_real_end(self):
+        # 草稿里代码块中的 end 不是结束标记，要跳过整个代码块找真正的 end。
+        self.assertEqual(strip_internal_expression_protocol(
+            "th先写个示例。\n```ruby\ndef hi\nend\n```\n再想想。\nend回答"), "回答")
+        # 代码块没闭合时分不清哪个 end 才是真的，宁可不删也不吞掉正文。
+        text = "th先写个示例。\n```ruby\ndef hi\nend\n再想想。\nend回答"
+        self.assertEqual(strip_internal_expression_protocol(text), text)
+        # 没有自己结尾的 th 行不能一路吞到后面代码块里的 end。
+        text = "回复\nth思考没有结尾\n正文\n```ruby\nif x\nend\n```"
+        self.assertEqual(strip_internal_expression_protocol(text), text)
+
     def test_control_block_cleanup_handles_escaping_fullwidth_orphans_and_unknown_names(self):
         self.assertEqual(strip_internal_expression_protocol(
             "正文。&lt;pc_reaction_expression&gt;{}&lt;/pc_reaction_expression&gt;"), "正文。")
