@@ -73,6 +73,14 @@ class _Index:
                 if self.version != version:  # a write landed between the check and the store
                     self.current = False
 
+    def private_copy(self):
+        """This index's last known tables in an index no other reader sees."""
+        copy = _Index()
+        with self.lock:
+            copy.raw, copy.rejected, copy.members, copy.scopes, copy.removed = (
+                self.raw, self.rejected, self.members, self.scopes, self.removed)
+        return copy
+
     def _load(self, runtime):
         row = runtime.read_one("SELECT value FROM runtime_metadata WHERE key = ?", (LINKS_KEY,))
         raw = row["value"] if row else None
@@ -110,16 +118,27 @@ def link_records_changed(runtime):
     index.current = False
 
 
-def _lookup(runtime, table, key):
+def _resolved_index(runtime):
     runtime = _records_runtime(runtime)
     index = _INDEXES.get(runtime)
+    if index is None or index.current:
+        return index
+    in_snapshot = getattr(runtime, "in_read_snapshot", None)
+    if in_snapshot is not None and in_snapshot():
+        # A pinned read snapshot can predate the last announced write: what it holds
+        # answers this read only and is never published as the current membership.
+        index = index.private_copy()
+    try:
+        index.load(runtime)
+    except Exception:  # noqa: BLE001 - any unreadable record keeps only its last known members closed
+        pass
+    return index
+
+
+def _lookup(runtime, table, key, index=None):
+    index = _resolved_index(runtime) if index is None else index
     if index is None:
         return None
-    if not index.current:
-        try:
-            index.load(runtime)
-        except Exception:  # noqa: BLE001 - any unreadable record keeps only its last known members closed
-            pass
     link = getattr(index, table).get(key)
     if link is not None and not index.current:
         from companion_v2.execution.models import TaskError
@@ -152,10 +171,10 @@ def endpoint_removed(runtime, platform, account, participant):
     Its native keys can be the shared owner's (the endpoint the conversation
     started on), so membership, never the key, decides what it may read.
     """
-    index = _INDEXES.get(_records_runtime(runtime))
+    index = _resolved_index(runtime)
     if index is None:
         return False
-    link_for_endpoint(runtime, platform, account, participant)
+    _lookup(runtime, "members", (platform, account, participant), index)
     return (platform, account, participant) in index.removed
 
 
