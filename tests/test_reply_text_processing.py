@@ -198,6 +198,22 @@ class ReplyTextProcessingTests(unittest.TestCase):
         self.assertEqual(strip_internal_expression_protocol(
             "th先核对聊天记录。\n用户问还记得吗。\nend记得。"), "记得。")
 
+    def test_each_draft_opener_keeps_its_own_guards(self):
+        # th 草稿可以跨过任何行；用户说/用户问 草稿只在代码围栏处停下。
+        for text, expected in (
+                ("th先想。\nth再想。\nend好的", "好的"),
+                ("用户说累了。\n用户问能不能休息。\nend好的", "好的"),
+                ("th用户说今天很累。\n用户问明天见吗。\n候选：好。\nend明天见。", "明天见。")):
+            with self.subTest(text=text):
+                self.assertEqual(strip_internal_expression_protocol(text), expected)
+
+    def test_inline_end_never_closes_a_quoted_reply(self):
+        # 「开头的是可见回复，。！？后面的 end 不能把它当草稿删掉。
+        for text in ("「早」今天学了个新单词。end 是结束的意思哦",
+                     "「早」\n今天学了个新单词！end\n就是结束"):
+            with self.subTest(text=text):
+                self.assertEqual(strip_internal_expression_protocol(text), text)
+
     def test_control_block_cleanup_handles_escaping_fullwidth_orphans_and_unknown_names(self):
         self.assertEqual(strip_internal_expression_protocol(
             "正文。&lt;pc_reaction_expression&gt;{}&lt;/pc_reaction_expression&gt;"), "正文。")
