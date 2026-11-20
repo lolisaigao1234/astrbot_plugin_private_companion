@@ -1598,10 +1598,3 @@ window.CompanionReplyPage = (() => {
     get state() { return {instance, example: state.example, imageCount: state.imageCount,
       status: state.status, preview: state.preview, notice: state.notice, bad: state.bad}; }};
 })();
-
-
-
-
-
-
-

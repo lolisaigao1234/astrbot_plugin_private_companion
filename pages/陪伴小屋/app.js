@@ -6166,5 +6166,3 @@ armHomeAgendaClock();
 window.addEventListener("companion:modules-ready", () => {
   try { render(); } catch (error) { console.warn("[CompanionV2] 页面模块补载后重绘失败", error); }
 }, {once: true});
-
-

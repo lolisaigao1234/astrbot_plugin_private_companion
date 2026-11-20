@@ -2096,5 +2096,3 @@ window.CompanionConfigEditors = (() => {
 
   return {create, spec, searchEntries, errors, endpointFor};
 })();
-
-
