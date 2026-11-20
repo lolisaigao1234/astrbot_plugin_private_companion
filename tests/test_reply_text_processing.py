@@ -193,6 +193,11 @@ class ReplyTextProcessingTests(unittest.TestCase):
         self.assertEqual(strip_internal_expression_protocol(
             "第一行\nth用户说累。\n候选。1-2句。end实际正文"), "第一行\n实际正文")
 
+    def test_th_draft_runs_through_a_later_user_said_line_to_its_own_end(self):
+        # th 开头的草稿里出现“用户问”行，草稿第一行也不能漏出来。
+        self.assertEqual(strip_internal_expression_protocol(
+            "th先核对聊天记录。\n用户问还记得吗。\nend记得。"), "记得。")
+
     def test_control_block_cleanup_handles_escaping_fullwidth_orphans_and_unknown_names(self):
         self.assertEqual(strip_internal_expression_protocol(
             "正文。&lt;pc_reaction_expression&gt;{}&lt;/pc_reaction_expression&gt;"), "正文。")
