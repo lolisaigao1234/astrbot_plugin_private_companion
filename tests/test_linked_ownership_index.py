@@ -119,7 +119,11 @@ class LinkIndexTests(unittest.TestCase):
 
 
 class PinnedSnapshotTests(unittest.TestCase):
-    """A worker reading on a snapshot pinned before a link edit must not publish what it saw."""
+    """Only a read of the latest committed state decides the membership every other reader sees.
+
+    A pinned snapshot can be older than the last commit and a thread's own write
+    transaction can hold what never commits: lookups there answer from that view only.
+    """
 
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
@@ -146,3 +150,36 @@ class PinnedSnapshotTests(unittest.TestCase):
             self.assertIsNotNone(link_for_endpoint(self.runtime, "qq-second", "101", "200"))
         self.assertIsNone(link_for_endpoint(self.runtime, "qq-second", "101", "200"))
         self.assertIsNotNone(link_for_endpoint(self.runtime, "qq-main", "100", "200"))
+
+    def in_thread(self, call):
+        result = {}
+        worker = threading.Thread(target=lambda: result.setdefault("value", call()))
+        worker.start()
+        worker.join()
+        return result["value"]
+
+    def test_a_link_addition_rolled_back_by_its_writer_is_never_seen_by_another_thread(self):
+        self.write(record(("qq-main", "100", "200")))
+        self.assertIsNone(link_for_endpoint(self.runtime, "qq-second", "101", "200"))
+        with contextlib.suppress(RuntimeError):
+            with self.runtime.transaction() as connection:
+                connection.execute("UPDATE runtime_metadata SET value = ? WHERE key = ?",
+                                   (record(("qq-main", "100", "200"), ("qq-second", "101", "200")), LINKS_KEY))
+                link_records_changed(self.runtime)  # announced inside the open transaction, as authority.write does
+                # The writer sees its own addition while its transaction is open.
+                self.assertIsNotNone(link_for_endpoint(self.runtime, "qq-second", "101", "200"))
+                raise RuntimeError("the edit fails after the write")
+        self.assertIsNone(self.in_thread(lambda: link_for_endpoint(self.runtime, "qq-second", "101", "200")))
+
+    def test_a_reader_pinned_before_a_link_existed_sees_no_link_after_another_thread_warmed_the_index(self):
+        link_records_changed(self.runtime)  # the host announced the store; no link exists yet
+        self.assertIsNone(link_for_endpoint(self.runtime, "qq-second", "101", "200"))
+        with self.runtime.read_snapshot():
+            self.runtime.read_one("SELECT value FROM runtime_metadata WHERE key = ?", (LINKS_KEY,))  # pins it
+
+            def create_and_warm():
+                self.write(record(("qq-main", "100", "200"), ("qq-second", "101", "200")))
+                return link_for_endpoint(self.runtime, "qq-second", "101", "200")
+            self.assertIsNotNone(self.in_thread(create_and_warm))
+            self.assertIsNone(link_for_endpoint(self.runtime, "qq-second", "101", "200"))
+        self.assertIsNotNone(link_for_endpoint(self.runtime, "qq-second", "101", "200"))

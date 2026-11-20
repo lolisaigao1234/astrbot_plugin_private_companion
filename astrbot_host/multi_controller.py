@@ -376,6 +376,7 @@ class AstrBotMultiController:
                             "the shared identity store is not available to verify a core administrator")
 
         from companion_v2.identity_policy.models import AuthorizationTier
+        from companion_v2.identity_policy.object_access import access_tier
 
         core_subjects = {row["subject_id"] for row in self.runtime.read_all(
             "SELECT subject_id FROM subject_access_tiers WHERE subject_kind = 'human' AND tier = ?",
@@ -392,7 +393,8 @@ class AstrBotMultiController:
                 actor = self.authority.actor(target)
             except TaskError:
                 continue
-            if actor.subject == subject:
+            # A linked endpoint shares the core human's subject, never its authority.
+            if actor.subject == subject and access_tier(self.runtime, actor) is AuthorizationTier.CORE:
                 candidates.append(target)
         return candidates
 

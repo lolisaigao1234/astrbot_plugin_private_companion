@@ -121,13 +121,16 @@ def link_records_changed(runtime):
 def _resolved_index(runtime):
     runtime = _records_runtime(runtime)
     index = _INDEXES.get(runtime)
-    if index is None or index.current:
-        return index
-    in_snapshot = getattr(runtime, "in_read_snapshot", None)
-    if in_snapshot is not None and in_snapshot():
-        # A pinned read snapshot can predate the last announced write: what it holds
-        # answers this read only and is never published as the current membership.
+    if index is None:
+        return None
+    private_view = getattr(runtime, "reads_private_view", None)
+    if private_view is not None and private_view():
+        # A pinned snapshot can predate the last commit and an open write can still roll
+        # back: such a read resolves membership from its own view, whatever the shared
+        # index holds, and what it loads is never published to other readers.
         index = index.private_copy()
+    elif index.current:
+        return index
     try:
         index.load(runtime)
     except Exception:  # noqa: BLE001 - any unreadable record keeps only its last known members closed
