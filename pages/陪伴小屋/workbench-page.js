@@ -1,4 +1,4 @@
-/* 统一配置工作台 · 内核
+﻿/* 统一配置工作台 · 内核
    取代此前 reply / expression / semantic / config-editor 各自实现的保存生命周期。
    各页只声明「字段 + 作用范围 + 接口」，草稿、脏状态、幂等重试、版本冲突、
    层轨与范围来源提示由本文件统一负责。
@@ -1013,10 +1013,13 @@ window.CompanionWorkbench = (() => {
       return `<div class="wb-textarea-wrap">${textarea}<span class="wb-text-length${count > item.maximumChars ? " is-over-limit" : ""}" data-wb-counter="${e(item.name)}">${count} / ${e(item.maximumChars)} 字</span></div>`;
     }
     const shown = e(toDisplay(item, value));
-    const step = item.kind === "int" ? "1" : String(1 / Math.pow(10, item.decimals));
+    /* 0–1 的概率在界面上按百分数编辑：步长与上下界也必须换算，
+       否则输入框写着 100%，下面却提示 0–1、每次只能加减 0.01。 */
+    const percent = item.kind === "float" && item.maximum === 1 && item.minimum === 0;
+    const step = percent ? "1" : item.kind === "int" ? "1" : String(1 / Math.pow(10, item.decimals));
     const bounds = item.hasBounds
-      ? `<span class="wb-range">${e(item.minimum)} – ${e(item.maximum)}</span>` : "";
-    const unit = item.kind === "float" && item.maximum === 1 && item.minimum === 0 ? " %" : "";
+      ? `<span class="wb-range">${e(toDisplay(item, item.minimum))} – ${e(toDisplay(item, item.maximum))}${percent ? "%" : ""}</span>` : "";
+    const unit = percent ? " %" : "";
     return `<span class="wb-number"><input type="number" data-wb-field="${e(item.name)}"`
       + ` min="${e(toDisplay(item, item.minimum))}" max="${e(toDisplay(item, item.maximum))}"`
       + ` step="${e(step)}" value="${shown}"${dis}>${unit ? `<span class="wb-unit">${unit.trim()}</span>` : ""}${bounds}</span>`;
@@ -1044,7 +1047,7 @@ window.CompanionWorkbench = (() => {
     return `<div class="wb-field${dirty}${inheritClass}${layerEditable ? "" : " is-layer-locked"}" data-wb-row="${e(name)}"${visible ? "" : " hidden"}>`
       + (container.presentation === "journal" ? "" : railMarkup(state, name, item, state.status?.provenance, container))
       + `<div class="wb-field-main"><span class="wb-label">${label}${fieldScopeMarkup(state, name, item, state.status?.provenance, container)}</span>`
-      + (item.help && container.presentation !== "journal" ? `<p class="wb-help" id="${e(helpId)}">${e(item.help)}</p>` : "")
+      + (item.help && container.presentation !== "journal" ? `<p class="wb-help" id="${e(helpId)}" title="${e(item.help)}">${e(item.help)}</p>` : "")
       + `<div class="wb-control">${controlMarkup(item, value, locked, state)}</div>`
       + `<p class="wb-field-error" id="${e(errorId)}" data-wb-field-error></p></div>`
       + `<div class="wb-field-side">${reset}</div></div>`;
@@ -1067,7 +1070,7 @@ window.CompanionWorkbench = (() => {
         /* 原来这里左侧还有一块 3:4 的虚线「像位」，只画姓名首字：
            它不读头像、不可点击、对屏幕阅读器隐藏，纯粹占掉 96px 宽。
            删掉这一格，六项基础身份按同一套紧凑两列排下去。 */
-        const identityFields = ["name", "gender", "birthday", "age", "species", "occupation"];
+        const identityFields = ["name", "gender", "birthday", "age", "occupation", "species"];
         rows = `<div class="wb-identity-card"><div class="wb-identity-rows">${identityFields.filter(name => names.includes(name))
             .map(name => fieldMarkup(s, container, name)).join("")}</div></div>`
           + names.filter(name => !identityFields.includes(name)).map(name => fieldMarkup(s, container, name)).join("");
@@ -2994,3 +2997,4 @@ window.CompanionWorkbench = (() => {
       } catch { return []; }
     })};
 })();
+
