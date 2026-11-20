@@ -719,10 +719,16 @@ class StorageRuntime:
                 finally:
                     del self._read_snapshot_diagnostics.current
 
-    def in_read_snapshot(self) -> bool:
-        """Whether this thread reads inside ``read_snapshot``, whose reads may predate committed writes."""
+    def reads_private_view(self) -> bool:
+        """Whether this thread's reads may differ from the latest committed state.
 
-        return getattr(self._read_snapshot_diagnostics, "current", None) is not None
+        Inside ``read_snapshot`` they come from a pinned snapshot that can predate
+        later commits; inside a write transaction this thread owns they include
+        changes that may still roll back.
+        """
+
+        return (getattr(self._read_snapshot_diagnostics, "current", None) is not None
+                or self._write_owner_thread_id == get_ident())
 
     @contextmanager
     def _reader_connection(self) -> Iterator[sqlite3.Connection]:
