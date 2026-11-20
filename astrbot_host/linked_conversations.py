@@ -332,6 +332,8 @@ class LinkedConversations:
                             directory.bind(binding_id="linked-person:" + digest([record["link_id"], principal,
                                 record["revision"]]), principal=principal, subject=subject,
                                 valid_from=session.now(), expected_revision=directory.revision)
+                # Committed: owners resolve from it now, not after the selection awaits below.
+                link_records_changed(session.runtime)
                 self.gate.linked_cids.add(cid)
                 self.gate.linked_origins = linked_origins(records)
                 for row in members:
