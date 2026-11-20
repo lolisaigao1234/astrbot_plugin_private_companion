@@ -1,12 +1,16 @@
 """The membership index behind every linked-owner lookup."""
 import contextlib
 import json
+from pathlib import Path
+import tempfile
+import threading
 import unittest
 
 from companion_v2.conversation.linked_ownership import (LINKS_KEY, link_records_changed, link_for_endpoint,
                                                          link_for_scope)
 from companion_v2.execution.models import TaskError
 from companion_v2.foundation.refs import ScopeKind, ScopeRef
+from companion_v2.storage.runtime import StorageRuntime
 
 ANCHOR = ScopeRef("synthetic", "qq-main", ScopeKind.PRIVATE, "200", "bot-a", "100", "conversation-a", "200")
 
@@ -112,3 +116,33 @@ class LinkIndexTests(unittest.TestCase):
         runtime = Runtime("{not json")
         self.assertIsNone(link_for_endpoint(runtime, "qq-main", "100", "200"))
         self.assertIsNone(link_for_endpoint(runtime, "qq-main", "100", "200"))
+
+
+class PinnedSnapshotTests(unittest.TestCase):
+    """A worker reading on a snapshot pinned before a link edit must not publish what it saw."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.runtime = StorageRuntime.open_configuration(data_root=Path(directory.name), installation_id="synthetic")
+        self.addCleanup(self.runtime.close)
+
+    def write(self, value):
+        with self.runtime.transaction() as connection:
+            connection.execute("INSERT INTO runtime_metadata(key, value) VALUES (?, ?) "
+                               "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (LINKS_KEY, value))
+        link_records_changed(self.runtime)
+
+    def test_a_member_detached_while_a_snapshot_was_pinned_is_gone_once_the_reader_exits(self):
+        self.write(record(("qq-main", "100", "200"), ("qq-second", "101", "200")))
+        self.assertIsNotNone(link_for_endpoint(self.runtime, "qq-second", "101", "200"))
+        with self.runtime.read_snapshot():
+            self.runtime.read_one("SELECT value FROM runtime_metadata WHERE key = ?", (LINKS_KEY,))  # pins it
+            # The administrator detaches the member on another thread; the write commits and is announced.
+            editor = threading.Thread(target=self.write, args=(record(("qq-main", "100", "200")),))
+            editor.start()
+            editor.join()
+            # Inside the snapshot the reader still sees the membership its snapshot holds.
+            self.assertIsNotNone(link_for_endpoint(self.runtime, "qq-second", "101", "200"))
+        self.assertIsNone(link_for_endpoint(self.runtime, "qq-second", "101", "200"))
+        self.assertIsNotNone(link_for_endpoint(self.runtime, "qq-main", "100", "200"))

@@ -719,6 +719,11 @@ class StorageRuntime:
                 finally:
                     del self._read_snapshot_diagnostics.current
 
+    def in_read_snapshot(self) -> bool:
+        """Whether this thread reads inside ``read_snapshot``, whose reads may predate committed writes."""
+
+        return getattr(self._read_snapshot_diagnostics, "current", None) is not None
+
     @contextmanager
     def _reader_connection(self) -> Iterator[sqlite3.Connection]:
         with self._reader_condition:
