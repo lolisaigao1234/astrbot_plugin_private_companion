@@ -67,9 +67,12 @@ _TOOL_CALL_PROTOCOL_BLANKS = re.compile(r"\n{3,}")
 # first visible paragraph.  Anchor on the draft start (`th` + CJK) and on
 # `end` at the start of a line followed by CJK/newline, so ordinary English
 # prose is untouched and words like friend/send/Legend never close a draft.
+# The body never crosses into a later line that is itself a `th`/用户说/用户问
+# opener, so a visible 「 line before a draft is not swallowed with it.
 _BARE_DRAFT_BLOCK = re.compile(
     r"(?ms)^[ \t]*(?:th(?=[\u4e00-\u9fff])|(?=用户(?:说|问)|「))"
-    r"[\s\S]*?^[ \t]*end(?![A-Za-z])(?=[ \t]*(?:[\u4e00-\u9fff]|\n|$))"
+    r"(?:[^\n]|\n(?![ \t]*(?:th(?=[\u4e00-\u9fff])|用户(?:说|问))))*?"
+    r"^[ \t]*end(?![A-Za-z])(?=[ \t]*(?:[\u4e00-\u9fff]|\n|$))"
 )
 _PAIRS = {"(": ")", "[": "]", "{": "}", "（": "）", "【": "】", "《": "》",
           "〈": "〉", "「": "」", "『": "』", "“": "”", "‘": "’", '"': '"'}
