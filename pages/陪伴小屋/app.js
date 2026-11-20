@@ -3928,6 +3928,7 @@ function syncExpressionReplyWorkspace(id=expressionModule){
   reply.hidden=!liveModule;
   reply.dataset.expressionModule=id;
   reply.classList.toggle('expression-voice-focus',id==='expression-voice');
+  reply.classList.toggle('expression-text-focus',id==='expression-text');
   reply.classList.toggle('expression-platform-focus',id==='expression-platform');
   window.CompanionReplyPage?.setExpressionModule?.(id);
   if(id==='expression-voice')window.CompanionReplyPage?.selectSection?.('voice',{scroll:false});
@@ -3999,9 +4000,26 @@ const SELF_PROFILE_SECTIONS=[
   ['world','globe-2','世界',['world_name','era','tone','rules','scenes','network','world_extra','world']],
   ['expression_learning','message-square-more','表达学习范围',['main_companion_subject','expression_private_source_mode','expression_private_source_subject_ids','expression_private_application_mode','expression_private_application_subject_ids']],
 ];
+/* 档案章节的页眉说明：章节切换时由 selectSelfProfileSection 就地更新。 */
+const SELF_CHAPTER_COPY={
+  identity:['01 / IDENTITY','身份','姓名、种族、生日、年龄感、职业与关键经历。写在这里的设定会进入新对话，并在同角色的窗口共享。'],
+  appearance:['02 / APPEARANCE','外貌','发型、瞳色、服饰与能稳定辨认角色的识别点；图像识别线索用于头像、截图和水印。'],
+  personality:['03 / PERSONALITY','性格','性格描述、日常习惯与稳定反应；写得越具体，角色在陌生场景里越不容易走样。'],
+  voice:['04 / VOICE','口吻','自称、说话方式、情绪表达与口吻示例；这些是表达参考，不会覆盖原人格和边界。'],
+  motivations:['05 / MOTIVATION','动机','重视的事、核心欲望、长期目标与爱好；用来解释角色为什么做选择。'],
+  boundaries:['06 / BOUNDARY','边界','互动边界与禁忌。它们优先于习惯和表达偏好，不被群聊里的临时要求覆盖。'],
+  world:['07 / WORLD','世界','角色所在的世界、时代、基调与场景；世界知识用于理解设定，不替代现实事实。'],
+  expression_learning:['08 / EXPRESSION','表达学习范围','限定从哪些私聊/群聊与对象学习表达；只影响表达样本，不改变身份、关系和授权。'],
+};
+function selfChapterIntroMarkup(section){
+  const [kicker,title,detail]=SELF_CHAPTER_COPY[section]||SELF_CHAPTER_COPY.identity;
+  return `<p class="self-chapter-kicker">${kicker}</p><div class="self-chapter-copy"><h3>${title}</h3><p>${detail}</p></div>`;
+}
 function selectSelfProfileSection(section){
   selfProfileSection=section;
   roleProfileConfigMount?.selectSection?.(section);
+  const intro=document.getElementById('selfChapterIntro');
+  if(intro)intro.innerHTML=selfChapterIntroMarkup(section);
   document.querySelectorAll('.section-chips [data-self-focus]').forEach(button=>{
     const active=button.dataset.selfFocus===section;
     button.classList.toggle('is-active',active);
@@ -4063,6 +4081,7 @@ function renderGovernanceOriginal(){
     <div class="deck-panels">
       <section class="deck-panel self-workspace-panel" id="self-panel-profile" role="tabpanel" aria-labelledby="self-tab-profile"${selfPane==='profile'?'':' hidden'}>
         <nav class="section-chips" aria-label="档案章节">${canonNav}<button type="button" class="section-chip" data-role-profile-organize-jump><span class="section-chip-no">✦</span>通过已有人格整理</button></nav>
+        <section class="self-chapter-intro" id="selfChapterIntro" aria-live="polite">${selfChapterIntroMarkup(selfProfileSection)}</section>
         ${configEditors('roleProfileConfigWorkspace',['role_profile'],'角色稳定档案')}
         <section class="self-organizer" id="selfProfileOrganizer" aria-label="通过已有人格整理">
           <div class="self-organizer-head"><h3>通过已有人格整理</h3></div>

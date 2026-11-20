@@ -176,6 +176,23 @@ class ReplyTextProcessingTests(unittest.TestCase):
                      "Sure!\n「Weekend」 plans: this weekend\nok?"):
             self.assertEqual(strip_internal_expression_protocol(text), text)
 
+    def test_visible_quoted_line_before_a_draft_is_kept(self):
+        # 草稿从后面真正的 th 行开始，不能从前面可见的「行开始一路吞掉。
+        self.assertEqual(strip_internal_expression_protocol(
+            "「晚安。」\nth用户说今天很累。\nend明天见。"), "「晚安。」\n明天见。")
+
+    def test_code_fence_after_quoted_line_is_kept(self):
+        # 代码块里的 end 不是草稿结束标记，围栏不能被吞成半截。
+        text = "「Ruby 示例」\n```ruby\ndef hi\n  puts 1\nend\n```\n好了"
+        self.assertEqual(strip_internal_expression_protocol(text), text)
+
+    def test_draft_closed_by_end_after_cjk_sentence_punctuation_is_removed(self):
+        # end 紧跟在。！？后面也是草稿结束标记。
+        self.assertEqual(strip_internal_expression_protocol(
+            "th用户问「在吗」。end我在。"), "我在。")
+        self.assertEqual(strip_internal_expression_protocol(
+            "第一行\nth用户说累。\n候选。1-2句。end实际正文"), "第一行\n实际正文")
+
     def test_control_block_cleanup_handles_escaping_fullwidth_orphans_and_unknown_names(self):
         self.assertEqual(strip_internal_expression_protocol(
             "正文。&lt;pc_reaction_expression&gt;{}&lt;/pc_reaction_expression&gt;"), "正文。")

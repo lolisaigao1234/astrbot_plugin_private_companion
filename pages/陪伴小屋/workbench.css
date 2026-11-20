@@ -637,8 +637,10 @@
   .wb-tag-form input[type=text]{min-width:0}
 }
 
-/* 配置项标题在左、控件在右；范围提示附在标题旁。 */
-.wb-field{grid-template-columns:12px minmax(0,1fr) auto;align-items:center;
+/* 配置项标题在左、控件在右；范围提示附在标题旁。
+   右侧固定留出「恢复继承」槽位：只有被覆盖的行有按钮，按 auto 排会让同一列
+   的控件右边缘相差一个按钮宽，看上去一左一右。空槽也保留，所有控件共用一条右边缘。 */
+.wb-field{grid-template-columns:12px minmax(0,1fr) 64px;align-items:center;
   gap:var(--sp-2) var(--sp-4);padding:14px var(--sp-2) 14px 0}
 /* 层轨占据首列，主体与恢复继承动作分别排列。 */
 .wb-field>.wb-field-main{grid-column:2}

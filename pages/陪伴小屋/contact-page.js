@@ -1,4 +1,4 @@
-﻿/* 陪伴小屋 · 主动与联系（节律盘）
+/* 陪伴小屋 · 主动与联系（节律盘）
  *
  * 这一页管的是「她此刻会不会开口、按什么节律开口」。
  *
@@ -188,6 +188,13 @@ window.CompanionContactPage = (() => {
     authorization_denied:"当前账号没有安装级联系配置权限。",
     binding_revoked:"管理账号的授权已撤销。", binding_rebound:"管理账号的绑定已变化，请重新进入。",
     proactive_contact_scope_invalid:"全局联系配置接口不可用，请重新读取安装配置。",
+    proactive_recipients_unavailable:"当前宿主没有可用的测试收件人列表：请在 AstrBot 里重载陪伴插件后再读取。",
+    proactive_recipient_unavailable:"已保存的测试收件人读取失败，请重新选择并保存。",
+    proactive_recipient_required:"请先选择并保存一个核心管理员私聊目标。",
+    proactive_recipient_invalid:"这个目标不是当前可用的核心管理员私聊，请重新选择。",
+    proactive_recipient_changed:"测试收件人已变化，请重新读取收件人后再测试。",
+    setup_binding_confirmation_required:"还没有确认核心管理员私聊窗口：请先在「开始使用」或「关系与权限」里确认身份与具体私聊账号。",
+    setup_core_window_ambiguous:"有多个核心管理员私聊目标，请在上方选择并保存测试收件人。",
     proactive_contact_target_changed:"全局联系配置目标已变化，请重新读取。",
     proactive_contact_configuration_invalid:"请核对设置：数值需在各自范围内，枚举项需在下拉选项内。",
     proactive_contact_clock_invalid:"请填写二十四小时制的时刻，形如 23:00 或 07:45。",
@@ -638,7 +645,15 @@ window.CompanionContactPage = (() => {
       const payload = await api("GET", "setup/proactive-recipients");
       if (live(ticket)) applyRecipients(payload);
     } catch (error) {
-      if (live(ticket)) { data.recipients = null; data.recipientError = "收件人读取失败，请重新读取后再测试。"; }
+      if (live(ticket)) {
+        data.recipients = null;
+        /* 别把真实原因吞成一句「读取失败」：带出错误码，重载插件/未确认窗口
+           这类可操作的原因才能被看见。 */
+        const code = typeof error?.code === "string" ? error.code : "";
+        data.recipientError = code
+          ? `${reason(code)}（${code}）`
+          : "收件人读取失败，请重新读取后再测试。";
+      }
     } finally {
       if (live(ticket)) { data.recipientsLoading = false; render(); }
     }

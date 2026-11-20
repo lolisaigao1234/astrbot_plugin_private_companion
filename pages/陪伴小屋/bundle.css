@@ -4334,10 +4334,12 @@ button.summary-record:hover strong,.summary-memory:hover>strong,.summary-note:ho
    适用条件、依据和底部裁决。页面自己的标题与刷新放在这一块，学习总览的
    通用标题在审阅页隐藏，避免两行标题打架。 */
 .learning-hub.is-review .learning-hub-head{display:none}
-/* 审阅中心有自己的一套标题与类型筛选；学习总览的二排导航、外壳标题在
-   这一页只会把真正要批阅的列表往下推，尤其手机上要滚过四行导航才看到第一条。
-   面包屑「学习与反思」仍可回到总览。 */
-.learning-hub.is-review .learning-hub-nav{display:none}
+/* 审阅中心有自己的一套标题与类型筛选，但学习导航仍要保留——它是这个分区
+   唯一的入口，收起后只能靠浏览器回退或面包屑。只在窄屏（导航折成两排、
+   会把待批阅列表推出首屏）收起。 */
+@media(max-width:760px){
+  .learning-hub.is-review .learning-hub-nav{display:none}
+}
 .shell-panel:has(.learning-hub.is-review) .shell-panel-head{display:none}
 /* 审阅中心的详情卡会一直铺到内容区右下角；小屋的浮动缩略场景会压住裁决按钮。
    这一页以逐条批阅为主，先把缩略场景让开，顶部仍有「回到小屋」。 */
@@ -4348,8 +4350,8 @@ body:has(.learning-hub.is-review) #homeShell[data-away="true"] .stage-region{vis
 .lh-review-breadcrumb a{color:inherit;text-decoration:none}
 .lh-review-breadcrumb a:hover{color:var(--t-accent-ink)}
 .lh-review-breadcrumb span{margin:0 6px;color:var(--t-line-firm)}
-.lh-review-page-title h1{margin:0;color:var(--t-text-strong);font-size:clamp(26px,2vw,32px);font-weight:700;line-height:1.3}
-.lh-review-subtitle{margin:0;color:var(--t-text-soft);font-size:var(--fs-tiny);line-height:1.6}
+.lh-review-page-title h1{margin:0;color:var(--t-text-strong);font-size:clamp(22px,1.5vw,26px);font-weight:650;line-height:1.3}
+.lh-review-subtitle{margin:0;color:var(--t-text-soft);font-size:var(--fs-body);line-height:1.6}
 .lh-review-refresh{display:inline-flex;align-items:center;gap:var(--sp-2);min-height:36px;padding:var(--sp-1) var(--sp-3);border:1px solid var(--t-line);border-radius:var(--r-sm);background:var(--t-surface);color:var(--t-text-soft);font:inherit;font-size:var(--fs-tiny);cursor:pointer}
 .lh-review-refresh:hover:not(:disabled){border-color:var(--t-line-firm);color:var(--t-text-strong)}
 .lh-review-refresh svg{width:15px;height:15px}
@@ -4375,9 +4377,13 @@ body:has(.learning-hub.is-review) #homeShell[data-away="true"] .stage-region{vis
 .lh-review-bulk>button{margin-inline-start:auto}
 .lh-review-bulk button{min-height:31px;padding:var(--sp-1) var(--sp-3);border:1px solid var(--t-line);border-radius:var(--r-sm);background:var(--t-surface);color:var(--t-text-soft);font:inherit;font-size:var(--fs-tiny);cursor:pointer}
 .lh-review-bulk button:disabled{opacity:.45;cursor:default}
-.lh-review-layout{display:grid;grid-template-columns:minmax(320px,.74fr) minmax(0,1.55fr);gap:var(--sp-4);align-items:start;min-width:0}
+/* 审阅页要把剩余视口高度用满：队列在卡片内滚动，详情卡的裁决栏钉在底部，
+   卡片下方不再留一大片空背景。352px = 导航 + 页面标题 + 筛选条 + 内外边距；
+   导航在中窄屏折成两排时由下面的断点补上。 */
+.lh-review-layout{display:grid;grid-template-columns:minmax(320px,.74fr) minmax(0,1.55fr);gap:var(--sp-4);
+  align-items:stretch;min-width:0;height:calc(100vh - 352px);min-height:560px}
 .lh-review-queue,.lh-review-detail{min-width:0;border:1px solid var(--t-line);border-radius:var(--r-md);background:var(--t-surface);box-shadow:0 1px 2px color-mix(in srgb,var(--t-text) 4%,transparent)}
-.lh-review-queue{display:flex;flex-direction:column;min-height:min(720px,calc(100vh - 300px));max-height:min(780px,calc(100vh - 230px));overflow:hidden;padding:var(--sp-4) 0 0}
+.lh-review-queue{display:flex;flex-direction:column;height:100%;min-height:0;max-height:none;overflow:hidden;padding:var(--sp-4) 0 0}
 .lh-review-queue-head{display:flex;align-items:flex-start;justify-content:space-between;gap:var(--sp-3);padding:0 var(--sp-4) var(--sp-3);border-bottom:1px solid var(--t-line)}
 .lh-review-queue>.lh-review-queue-head{position:static;top:auto;z-index:auto;background:transparent}
 .lh-review-queue-head h3{margin:0;color:var(--t-text-strong);font-size:var(--fs-lead);font-weight:650}
@@ -4395,12 +4401,12 @@ body:has(.learning-hub.is-review) #homeShell[data-away="true"] .stage-region{vis
 .lh-review-type.is-self{background:var(--t-ok-quiet);color:var(--t-ok-ink)}
 .lh-review-type.is-style{background:var(--t-accent-quiet);color:var(--t-accent-ink)}
 .lh-review-row-copy{display:flex;flex-direction:column;gap:4px;min-width:0}
-.lh-review-row-copy strong{color:var(--t-text-strong);font-size:var(--fs-tiny);font-weight:600;line-height:1.5;overflow:hidden;text-overflow:ellipsis;white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.lh-review-row-copy strong{color:var(--t-text-strong);font-size:var(--fs-body);font-weight:600;line-height:1.5;overflow:hidden;text-overflow:ellipsis;white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
 .lh-review-row-copy small{color:var(--t-text-faint);font-size:var(--fs-micro);line-height:1.5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .lh-review-check{justify-self:center;width:14px;height:14px;margin-top:11px}
 .lh-review-queue-foot{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-2);flex-wrap:wrap;padding:var(--sp-3) var(--sp-4);border-top:1px solid var(--t-line);color:var(--t-text-faint);font-size:var(--fs-micro)}
 .lh-review-queue-foot .lh-command{min-height:29px;padding:2px var(--sp-2);font-size:var(--fs-micro)}
-.lh-review-detail{display:flex;flex-direction:column;padding:var(--sp-5);min-height:min(720px,calc(100vh - 300px))}
+.lh-review-detail{display:flex;flex-direction:column;padding:var(--sp-5);height:100%;min-height:0}
 .lh-review-detail-head{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-3);flex-wrap:wrap}
 .lh-review-detail>.lh-review-detail-head{display:flex;grid-template-columns:none;align-items:center}
 .lh-review-detail-chips{display:flex;align-items:center;gap:var(--sp-1);flex-wrap:wrap}
@@ -4414,13 +4420,13 @@ body:has(.learning-hub.is-review) #homeShell[data-away="true"] .stage-region{vis
 .lh-review-meta-grid dt{color:var(--t-text-faint);font-size:var(--fs-micro)}
 .lh-review-meta-grid dd{margin:0;color:var(--t-text-soft);font-size:var(--fs-tiny);line-height:1.5;overflow-wrap:anywhere}
 .lh-review-detail-title{margin:var(--sp-4) 0 0}
-.lh-review-detail-title h2{margin:0;color:var(--t-text-strong);font-size:clamp(24px,1.8vw,30px);font-weight:650;line-height:1.45;overflow-wrap:anywhere}
-.lh-review-detail-title p{margin:var(--sp-2) 0 0;color:var(--t-text-faint);font-size:var(--fs-tiny);line-height:1.6}
+.lh-review-detail-title h2{margin:0;color:var(--t-text-strong);font-size:clamp(20px,1.35vw,24px);font-weight:650;line-height:1.45;overflow-wrap:anywhere}
+.lh-review-detail-title p{margin:var(--sp-2) 0 0;color:var(--t-text-faint);font-size:var(--fs-body);line-height:1.65}
 .lh-review-quote{margin:var(--sp-4) 0 0;padding:2px 0 2px var(--sp-4);border-inline-start:3px solid var(--t-accent);background:transparent}
-.lh-review-quote p{margin:0;color:var(--t-text-strong);font-size:var(--fs-lead);line-height:1.85;overflow-wrap:anywhere}
+.lh-review-quote p{margin:0;color:var(--t-text-strong);font-size:var(--fs-title);line-height:1.9;overflow-wrap:anywhere}
 .lh-review-avoid{display:grid;grid-template-columns:auto minmax(0,1fr);gap:var(--sp-3);align-items:baseline;margin-top:var(--sp-4)}
 .lh-review-avoid span{color:var(--t-text-faint);font-size:var(--fs-micro);white-space:nowrap}
-.lh-review-avoid p{margin:0;color:var(--t-text-soft);font-size:var(--fs-tiny);line-height:1.7}
+.lh-review-avoid p{margin:0;color:var(--t-text-soft);font-size:var(--fs-body);line-height:1.8}
 .lh-review-conditions{display:grid;grid-template-columns:auto minmax(0,1fr);gap:var(--sp-3);align-items:start;margin-top:var(--sp-4)}
 .lh-review-conditions>span{color:var(--t-text-faint);font-size:var(--fs-micro);white-space:nowrap;padding-top:3px}
 .lh-review-conditions>div{display:flex;flex-wrap:wrap;gap:var(--sp-1)}
@@ -4449,11 +4455,15 @@ body:has(.learning-hub.is-review) #homeShell[data-away="true"] .stage-region{vis
   .lh-review-layout{grid-template-columns:minmax(280px,.7fr) minmax(0,1.3fr)}
   .lh-review-detail{padding:var(--sp-4)}
 }
+@media(max-width:1080px){
+  /* 学习导航折成两排，视口里要多扣一行；卡片仍填满剩余高度。 */
+  .lh-review-layout{height:calc(100vh - 400px)}
+}
 @media(max-width:900px){
-  .lh-review-layout{grid-template-columns:minmax(0,1fr)}
-  .lh-review-queue{min-height:0;max-height:none;overflow:visible}
+  .lh-review-layout{grid-template-columns:minmax(0,1fr);height:auto;min-height:0;align-items:start}
+  .lh-review-queue{height:auto;min-height:0;max-height:none;overflow:visible}
   .lh-review-queue-list{overflow:visible}
-  .lh-review-detail{min-height:0}
+  .lh-review-detail{height:auto;min-height:0}
   .lh-review-detail-foot{margin-top:var(--sp-4)}
 }
 @media(max-width:560px){
@@ -5465,6 +5475,12 @@ body.state-connected{min-width:320px}
 @media(max-width:420px){.reply-preview-head>.button{width:100%}.reply-preview-summary{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.reply-preview .reply-image-count{grid-template-columns:minmax(0,1fr) 80px}}
 @media(prefers-reduced-motion:reduce){.reply-preview-result{transition:none}}
 
+/* 分段效果预览里的 QQ 消息效果（数据来自当前预览草稿） */
+.reply-preview-chat{display:grid;gap:var(--sp-2);min-width:0;margin-bottom:var(--sp-3)}
+.reply-preview-chat>header{display:flex;align-items:center;justify-content:space-between;gap:var(--sp-2);
+  color:var(--t-text-faint);font-size:var(--fs-micro)}
+.reply-preview-chat>header strong{color:var(--t-text-strong);font-size:var(--fs-tiny);font-weight:600}
+
 /* expression-config.css */
 .expression-page{display:grid;gap:var(--sp-4);min-width:0}
 .expression-module-nav{position:sticky;top:var(--sp-2);z-index:6;display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:2px;min-width:0;padding:2px 2px 0;border-bottom:1px solid var(--t-line);background:color-mix(in srgb,var(--t-surface) 96%,transparent);backdrop-filter:blur(12px)}
@@ -5509,8 +5525,13 @@ body.state-connected{min-width:320px}
 .expression-module-panels{min-width:0;background:transparent;container-name:expression-modules;container-type:inline-size}.expression-module-panel>.console-section{margin:0;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none}.expression-module-panel>.console-section>.console-section-head{padding:0 0 var(--sp-4);border-bottom:1px solid var(--t-line)}.expression-module-panel>.console-section>.console-section-head h2{font-size:var(--fs-head);letter-spacing:-.01em}.expression-module-panel>.console-section>.console-section-body{padding:var(--sp-4) 0 0}.expression-module-panel[hidden]{display:none}
 .expression-text-workspace,.expression-voice-workspace,.expression-platform-workspace,.expression-reaction-workspace,.expression-group-workspace{min-width:0}.expression-text-workspace>[data-go],.expression-platform-workspace>[data-go],.expression-text-workspace>.expression-route-button,.expression-platform-workspace>.expression-route-button{margin-top:var(--sp-4)}
 
-/* 文字 / 语音页：左侧工作台与右侧预览保持同一滚动上下文。 */
-#replyWorkspace{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(440px,100%),1fr));align-items:start;gap:var(--sp-5);min-width:0}#replyWorkspace>[data-reply-part="settings"],#replyWorkspace>[data-reply-part="preview"]{min-width:0}.reply-preview{position:sticky;top:var(--sp-3);align-self:start;display:grid;gap:var(--sp-3);max-height:calc(100vh - var(--sp-3) - var(--sp-3));overflow:auto;margin:0;padding:var(--sp-4);border:1px solid var(--t-line-firm);border-radius:var(--r-md);background:var(--expression-panel-soft);box-shadow:0 3px 14px color-mix(in srgb,var(--t-accent) 6%,transparent)}.reply-preview-head{align-items:flex-start;margin:0}.reply-preview-head h3{display:flex;align-items:center;gap:var(--sp-2);font-size:var(--fs-title)}.reply-preview-head p{margin-top:var(--sp-1);font-size:var(--fs-micro)}.reply-preview-live{display:inline-flex;align-items:center;padding:2px var(--sp-2);border-radius:var(--r-pill);background:var(--t-ok-quiet);color:var(--t-ok-ink);font-size:var(--fs-micro);font-weight:600}.reply-preview-live::before{content:"";width:5px;height:5px;margin-right:calc(var(--sp-1) * 1.25);border-radius:50%;background:currentColor}.reply-preview-head-actions{display:flex;gap:var(--sp-1);flex-wrap:wrap}.reply-preview-head-actions .button{display:inline-flex;align-items:center;gap:var(--sp-1)}.reply-preview-head-actions svg{width:14px;height:14px}.reply-preview-state-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--sp-2)}.reply-preview-state{min-width:0;padding:var(--sp-2);border:1px solid var(--t-line);border-radius:var(--r-sm);background:var(--t-surface);color:var(--t-text-faint)}.reply-preview-state strong{display:flex;align-items:center;gap:var(--sp-1);color:var(--t-text-soft);font-size:var(--fs-tiny)}.reply-preview-state strong svg{width:14px;height:14px}.reply-preview-state p{margin:var(--sp-1) 0 0;font-size:var(--fs-micro);line-height:1.5}.reply-preview-state.is-active{border-color:color-mix(in srgb,var(--t-accent) 40%,var(--t-line));background:var(--t-accent-quiet);color:var(--t-accent-ink)}.reply-preview-state.is-active strong{color:var(--t-accent-ink)}.reply-preview-state.is-ok.is-active{border-color:color-mix(in srgb,var(--t-ok) 35%,var(--t-line));background:var(--t-ok-quiet)}.reply-preview-state.is-ok.is-active strong{color:var(--t-ok-ink)}.reply-preview-state.is-error.is-active{border-color:color-mix(in srgb,var(--t-warn) 42%,var(--t-line));background:var(--t-warn-quiet)}.reply-preview-state.is-error.is-active strong{color:var(--t-warn-ink)}.reply-preview-grid{grid-template-columns:minmax(0,1fr);gap:var(--sp-3)}.reply-preview-inputs{padding:var(--sp-3);border:1px solid var(--t-line);border-radius:var(--r-sm);background:var(--t-surface)}.reply-preview-output-wrap{gap:var(--sp-2)}.reply-preview-label textarea{min-height:150px;background:var(--t-surface-soft)}.reply-preview-result{min-height:8rem}.reply-preview-summary{grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--sp-1) var(--sp-3);padding:var(--sp-2) var(--sp-3);border-radius:var(--r-sm);background:var(--t-surface)}.reply-preview-summary>div{padding:var(--sp-1) 0;border-top:0}.reply-preview-summary dd{font-size:var(--fs-micro)}.reply-preview-part{padding:var(--sp-3);border-color:var(--t-line-firm);background:var(--t-surface)}.reply-preview-part>header strong{color:var(--t-accent-ink)}.reply-preview-protection{display:grid;gap:var(--sp-1);padding:var(--sp-3);border:1px solid color-mix(in srgb,var(--t-ok) 30%,var(--t-line));border-radius:var(--r-sm);background:var(--t-ok-quiet);color:var(--t-ok-ink);font-size:var(--fs-micro);line-height:1.6}.reply-preview-protection strong{display:flex;align-items:center;gap:var(--sp-1);font-size:var(--fs-tiny)}.reply-preview-protection svg{width:15px;height:15px}.reply-preview-error{border-color:color-mix(in srgb,var(--t-warn) 38%,var(--t-line));background:var(--t-warn-quiet)}
+/* 文字 / 语音页：左侧工作台与右侧预览保持同一滚动上下文。
+   默认单列；只有宽屏且预览真的渲染出来时才并排，并且给配置列更大的份额、
+   把预览列收窄。预览列拉满行高，卡片的 sticky 才真的跟随滚动，不会在
+   配置列还很长时先在右侧留一大片空白。1450px 及以下由 ui-field-align.css
+   把预览折到编辑区下方，这里只在更宽的窗口接管，避免两套规则互相压。 */
+#replyWorkspace{display:grid;grid-template-columns:minmax(0,1fr);align-items:start;gap:var(--sp-5);min-width:0}#replyWorkspace>[data-reply-part="settings"],#replyWorkspace>[data-reply-part="preview"]{min-width:0}#replyWorkspace>[data-reply-part="preview"]{align-self:stretch}
+@media(min-width:1451px){#replyWorkspace:has(> [data-reply-part="preview"]:not([hidden])){grid-template-columns:minmax(0,1.7fr) minmax(340px,.75fr)}#replyWorkspace:has(> [data-reply-part="preview"]:not([hidden]))>[data-reply-part="preview"]>.reply-preview{position:sticky;top:var(--sp-3);max-height:calc(100vh - var(--sp-3) - var(--sp-3));overflow:auto}}.reply-preview{position:sticky;top:var(--sp-3);align-self:start;display:grid;gap:var(--sp-3);max-height:calc(100vh - var(--sp-3) - var(--sp-3));overflow:auto;margin:0;padding:var(--sp-4);border:1px solid var(--t-line-firm);border-radius:var(--r-md);background:var(--expression-panel-soft);box-shadow:0 3px 14px color-mix(in srgb,var(--t-accent) 6%,transparent)}.reply-preview-head{align-items:flex-start;margin:0}.reply-preview-head h3{display:flex;align-items:center;gap:var(--sp-2);font-size:var(--fs-title)}.reply-preview-head p{margin-top:var(--sp-1);font-size:var(--fs-micro)}.reply-preview-live{display:inline-flex;align-items:center;padding:2px var(--sp-2);border-radius:var(--r-pill);background:var(--t-ok-quiet);color:var(--t-ok-ink);font-size:var(--fs-micro);font-weight:600}.reply-preview-live::before{content:"";width:5px;height:5px;margin-right:calc(var(--sp-1) * 1.25);border-radius:50%;background:currentColor}.reply-preview-head-actions{display:flex;gap:var(--sp-1);flex-wrap:wrap}.reply-preview-head-actions .button{display:inline-flex;align-items:center;gap:var(--sp-1)}.reply-preview-head-actions svg{width:14px;height:14px}.reply-preview-state-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--sp-2)}.reply-preview-state{min-width:0;padding:var(--sp-2);border:1px solid var(--t-line);border-radius:var(--r-sm);background:var(--t-surface);color:var(--t-text-faint)}.reply-preview-state strong{display:flex;align-items:center;gap:var(--sp-1);color:var(--t-text-soft);font-size:var(--fs-tiny)}.reply-preview-state strong svg{width:14px;height:14px}.reply-preview-state p{margin:var(--sp-1) 0 0;font-size:var(--fs-micro);line-height:1.5}.reply-preview-state.is-active{border-color:color-mix(in srgb,var(--t-accent) 40%,var(--t-line));background:var(--t-accent-quiet);color:var(--t-accent-ink)}.reply-preview-state.is-active strong{color:var(--t-accent-ink)}.reply-preview-state.is-ok.is-active{border-color:color-mix(in srgb,var(--t-ok) 35%,var(--t-line));background:var(--t-ok-quiet)}.reply-preview-state.is-ok.is-active strong{color:var(--t-ok-ink)}.reply-preview-state.is-error.is-active{border-color:color-mix(in srgb,var(--t-warn) 42%,var(--t-line));background:var(--t-warn-quiet)}.reply-preview-state.is-error.is-active strong{color:var(--t-warn-ink)}.reply-preview-grid{grid-template-columns:minmax(0,1fr);gap:var(--sp-3)}.reply-preview-inputs{padding:var(--sp-3);border:1px solid var(--t-line);border-radius:var(--r-sm);background:var(--t-surface)}.reply-preview-output-wrap{gap:var(--sp-2)}.reply-preview-label textarea{min-height:150px;background:var(--t-surface-soft)}.reply-preview-result{min-height:8rem}.reply-preview-summary{grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--sp-1) var(--sp-3);padding:var(--sp-2) var(--sp-3);border-radius:var(--r-sm);background:var(--t-surface)}.reply-preview-summary>div{padding:var(--sp-1) 0;border-top:0}.reply-preview-summary dd{font-size:var(--fs-micro)}.reply-preview-part{padding:var(--sp-3);border-color:var(--t-line-firm);background:var(--t-surface)}.reply-preview-part>header strong{color:var(--t-accent-ink)}.reply-preview-protection{display:grid;gap:var(--sp-1);padding:var(--sp-3);border:1px solid color-mix(in srgb,var(--t-ok) 30%,var(--t-line));border-radius:var(--r-sm);background:var(--t-ok-quiet);color:var(--t-ok-ink);font-size:var(--fs-micro);line-height:1.6}.reply-preview-protection strong{display:flex;align-items:center;gap:var(--sp-1);font-size:var(--fs-tiny)}.reply-preview-protection svg{width:15px;height:15px}.reply-preview-error{border-color:color-mix(in srgb,var(--t-warn) 38%,var(--t-line));background:var(--t-warn-quiet)}
 #replyWorkspace>.reply-scope-note{grid-column:1 / -1}
 
 /* 预览弹窗 */
@@ -5519,10 +5540,38 @@ body.state-connected{min-width:320px}
 /* 工作台调整：设计稿用温和的输入卡片和少量分隔线，层轨继续保留以说明继承来源。 */
 .expression-page .wb-card-head{margin-bottom:var(--sp-4)}.expression-page .wb-card-copy h3{font-size:var(--fs-title)}.expression-page .wb-card-copy p{font-size:var(--fs-tiny)}.expression-page .wb-section-layout{grid-template-columns:minmax(185px,230px) minmax(0,1fr);gap:var(--sp-5)}.expression-page .wb-section-sidebar{top:var(--sp-3);padding:var(--sp-3);border-color:var(--t-line);border-radius:var(--r-md);background:var(--expression-panel-soft)}.expression-page .wb-section-nav-head{padding:var(--sp-1) var(--sp-1) var(--sp-3)}.expression-page .wb-section-nav-note{font-size:var(--fs-micro)}.expression-page .wb-section-tab{min-height:58px;border-radius:var(--r-sm)}.expression-page .wb-section-tab[aria-selected="true"]{border-color:color-mix(in srgb,var(--t-accent) 30%,var(--t-line));background:var(--t-accent-quiet)}.expression-page .wb-fields{gap:var(--sp-3)}.expression-page .wb-field{padding:var(--sp-3) var(--sp-2) var(--sp-3) 0;border:1px solid var(--t-line);border-radius:var(--r-sm);background:var(--t-surface-soft)}.expression-page .wb-field+.wb-field{margin-top:var(--sp-2)}.expression-page .wb-field-main{padding-right:var(--sp-2)}.expression-page .wb-group+.wb-group{margin-top:var(--sp-5);padding-top:var(--sp-5)}.expression-page .wb-group-head{margin-left:0;font-size:var(--fs-lead)}.expression-page .wb-control input[type=number],.expression-page .wb-control input[type=text],.expression-page .wb-control input[type=time],.expression-page .wb-control select,.expression-page .wb-control textarea{background:var(--t-surface);border-color:var(--t-line-firm)}.expression-page .wb-segmented{background:var(--t-surface-sunken);border-radius:var(--r-sm)}.expression-page .wb-actions{margin-top:var(--sp-5);padding-top:var(--sp-4);border-top:1px solid var(--t-line)}.expression-page .wb-save{min-width:118px;border-radius:var(--r-sm)}
 
-/* 语音页：把对象设置与全局默认值叠成工作区，预览始终可见。 */
-#replyWorkspace.expression-voice-focus{grid-template-columns:minmax(0,1.15fr) minmax(300px,.85fr)}#replyWorkspace.expression-voice-focus .wb-section-layout{grid-template-columns:minmax(0,1fr);gap:0}#replyWorkspace.expression-voice-focus .wb-section-sidebar{display:none}#replyWorkspace.expression-voice-focus [data-wb-section-panel]:not([data-wb-section-panel="voice"]){display:none}#replyWorkspace.expression-voice-focus>[data-reply-part="preview"]{display:block}.expression-voice-workspace{display:grid;gap:var(--sp-5)}.expression-voice-workspace .host-options-panel{margin-top:0;padding:var(--sp-4);border:1px solid var(--t-line);border-radius:var(--r-md);background:var(--expression-panel-soft)}.expression-voice-workspace .host-options-heading h3{font-size:var(--fs-title)}
-/* 未渲染预览的视图折叠为空设置列，避免空预览列挤窄内容。 */
-#replyWorkspace:not(:has(> [data-reply-part="preview"])){grid-template-columns:minmax(0,1fr)}
+/* 语音页：把对象设置与全局默认值叠成工作区，使用完整工作区宽度。
+   分段预览在语音页不渲染（reply-page.js 的 previewEnabled 对语音返回 false），
+   所以模板必须是单列，预览槽位也要真正隐藏，否则右侧会留一条空列。 */
+#replyWorkspace.expression-voice-focus{grid-template-columns:minmax(0,1fr)}#replyWorkspace.expression-voice-focus .wb-section-layout{grid-template-columns:minmax(0,1fr);gap:0}#replyWorkspace.expression-voice-focus .wb-section-sidebar{display:none}#replyWorkspace.expression-voice-focus [data-wb-section-panel]:not([data-wb-section-panel="voice"]){display:none}#replyWorkspace.expression-voice-focus>[data-reply-part="preview"]{display:none}.expression-voice-workspace{display:grid;gap:var(--sp-5)}.expression-voice-workspace .host-options-panel{margin-top:0;padding:var(--sp-4);border:1px solid var(--t-line);border-radius:var(--r-md);background:var(--expression-panel-soft)}.expression-voice-workspace .host-options-heading h3{font-size:var(--fs-title)}
+/* 回复工作台默认把字段锁在 1040px 单列（workbench.css 在本文件之后加载）。
+   文字页整宽时这会把卡片右侧空出一大块、每行控件也缩在左边；改成随宽度
+   自动分栏。语音页有自己的紧凑多栏版式（见 55 行附近的 voice 段），这里不接管。 */
+#replyWorkspace:not(.expression-voice-focus) .wb-fields.wb-fields{max-width:none;grid-template-columns:repeat(auto-fit,minmax(min(700px,100%),1fr))}
+/* 文字页字段回到「标签在左、控件在行尾、长控件整行」的版式。
+   ui-field-align.css 把控件统一压成 320px 并左对齐（justify-content:start），
+   开关于是挤在标签旁边、分段标记词这类长控件只剩半截；这里用提高一级的优先级
+   还原 workbench.css 的原意。重复类名只为压过那张后加载的表。 */
+#replyWorkspace:not(.expression-voice-focus) .wb-fields>.wb-field>.wb-field-main.wb-field-main{grid-template-columns:minmax(12em,1fr) minmax(180px,360px);justify-content:normal}
+#replyWorkspace:not(.expression-voice-focus) .wb-fields>.wb-field>.wb-field-main.wb-field-main>.wb-control.wb-control{justify-self:stretch;justify-content:flex-end;max-width:420px;width:100%}
+#replyWorkspace:not(.expression-voice-focus) .wb-fields>.wb-field:has(textarea)>.wb-field-main.wb-field-main,
+#replyWorkspace:not(.expression-voice-focus) .wb-fields>.wb-field:has(.wb-word-editor)>.wb-field-main.wb-field-main,
+#replyWorkspace:not(.expression-voice-focus) .wb-fields>.wb-field:has(.wb-keywords)>.wb-field-main.wb-field-main,
+#replyWorkspace:not(.expression-voice-focus) .wb-fields>.wb-field:has(.wb-source-picker)>.wb-field-main.wb-field-main,
+#replyWorkspace:not(.expression-voice-focus) .wb-fields>.wb-field:has(.wb-order-editor)>.wb-field-main.wb-field-main,
+#replyWorkspace:not(.expression-voice-focus) .wb-fields>.wb-field:has(.wb-date)>.wb-field-main.wb-field-main{grid-template-columns:minmax(0,1fr)}
+#replyWorkspace:not(.expression-voice-focus) .wb-fields>.wb-field:has(textarea)>.wb-field-main.wb-field-main>.wb-control.wb-control,
+#replyWorkspace:not(.expression-voice-focus) .wb-fields>.wb-field:has(.wb-word-editor)>.wb-field-main.wb-field-main>.wb-control.wb-control,
+#replyWorkspace:not(.expression-voice-focus) .wb-fields>.wb-field:has(.wb-keywords)>.wb-field-main.wb-field-main>.wb-control.wb-control,
+#replyWorkspace:not(.expression-voice-focus) .wb-fields>.wb-field:has(.wb-source-picker)>.wb-field-main.wb-field-main>.wb-control.wb-control,
+#replyWorkspace:not(.expression-voice-focus) .wb-fields>.wb-field:has(.wb-order-editor)>.wb-field-main.wb-field-main>.wb-control.wb-control,
+#replyWorkspace:not(.expression-voice-focus) .wb-fields>.wb-field:has(.wb-date)>.wb-field-main.wb-field-main>.wb-control.wb-control{grid-column:1;grid-row:auto;justify-self:stretch;justify-content:flex-start;max-width:none}
+/* 卡片内垂直居中：两列网格会把同一行的卡片拉成等高，内容顶对齐时矮卡片上方
+   会空一截、开关看着像浮在角上。字段主体、标签与控件都回到行内居中。 */
+#replyWorkspace .wb-fields>.wb-field.wb-field{align-items:center}
+#replyWorkspace .wb-fields>.wb-field>.wb-field-main.wb-field-main{align-items:center;align-content:center}
+#replyWorkspace .wb-fields>.wb-field>.wb-field-main.wb-field-main>.wb-label.wb-label{align-self:center}
+#replyWorkspace .wb-fields>.wb-field>.wb-field-main.wb-field-main>.wb-control.wb-control{align-self:center}
 /* 平台页：主配置与右侧跨页入口并排；实际交互仍走原来的真实端点。 */
 #replyWorkspace.expression-platform-focus{display:block}#replyWorkspace.expression-platform-focus>[data-reply-part="preview"]{display:none}#replyWorkspace.expression-platform-focus .wb-section-layout{grid-template-columns:minmax(0,1fr);gap:0}#replyWorkspace.expression-platform-focus .wb-section-sidebar{display:none}.expression-platform-workspace{display:grid;grid-template-columns:minmax(0,1fr) minmax(250px,.36fr);gap:var(--sp-5);align-items:start}.expression-platform-workspace>#expressionPlatformReplyHost{grid-column:1;min-width:0}.expression-platform-workspace>#replyWorkspace{grid-column:1}.expression-platform-workspace>#pokePolicyWorkspace{grid-column:2;grid-row:1}.expression-platform-workspace>.expression-route-button,.expression-platform-workspace>[data-go]{grid-column:2}.expression-platform-workspace>.expression-route-button{width:100%;margin:0}.expression-platform-workspace .host-options-panel{padding:var(--sp-4);border:1px solid var(--t-line);border-radius:var(--r-md);background:var(--expression-panel-soft)}
 
@@ -5618,7 +5667,7 @@ body.state-connected{min-width:320px}
 .wb-field:not(:has(.wb-rail)){grid-template-columns:minmax(0,1fr) auto}
 .wb-field:not(:has(.wb-rail))>.wb-field-main{grid-column:1;min-width:0}
 .wb-field-main>.wb-label{min-width:0;overflow-wrap:break-word}
-#replyWorkspace .wb-field{display:grid;grid-template-columns:12px minmax(0,1fr) auto}
+#replyWorkspace .wb-field{display:grid;grid-template-columns:12px minmax(0,1fr) 64px}
 #replyWorkspace .wb-field:not(:has(.wb-rail)){grid-template-columns:minmax(0,1fr) auto}
 #replyWorkspace .wb-field>.wb-field-main{grid-column:2;min-width:0}
 #replyWorkspace .wb-field:not(:has(.wb-rail))>.wb-field-main{grid-column:1}
@@ -6392,8 +6441,10 @@ body.state-connected{min-width:320px}
   .wb-tag-form input[type=text]{min-width:0}
 }
 
-/* 配置项标题在左、控件在右；范围提示附在标题旁。 */
-.wb-field{grid-template-columns:12px minmax(0,1fr) auto;align-items:center;
+/* 配置项标题在左、控件在右；范围提示附在标题旁。
+   右侧固定留出「恢复继承」槽位：只有被覆盖的行有按钮，按 auto 排会让同一列
+   的控件右边缘相差一个按钮宽，看上去一左一右。空槽也保留，所有控件共用一条右边缘。 */
+.wb-field{grid-template-columns:12px minmax(0,1fr) 64px;align-items:center;
   gap:var(--sp-2) var(--sp-4);padding:14px var(--sp-2) 14px 0}
 /* 层轨占据首列，主体与恢复继承动作分别排列。 */
 .wb-field>.wb-field-main{grid-column:2}
@@ -6616,6 +6667,356 @@ body.state-connected{min-width:320px}
   .console-row{align-items:flex-start;flex-wrap:wrap}
   .console-row .button{margin-left:auto}
 }
+
+/* voice-page.css */
+/* 语音朗读页 2026-11-21：状态头 + 朗读预览 + 分组卡片。
+   独立成文件，避免和 expression-config.css 里其他表达页的规则互相覆盖；
+   bundle 顺序在 workbench.css / console.css 之后。 */
+
+#replyWorkspace.expression-voice-focus{display:block;min-width:0}
+#replyWorkspace.expression-voice-focus>[data-reply-part="scope"]{
+  margin:0 0 var(--sp-3);padding:0;border:0;background:transparent;
+  font-size:inherit;line-height:inherit;color:inherit}
+
+/* 页面 h1 已经写着「语音朗读」，不再重复控制台分区标题。 */
+#expression-panel-expression-voice .console-section-head{display:none}
+#expression-panel-expression-voice .console-section-body{padding-top:0}
+#expression-panel-expression-voice .console-section{padding-top:0;border-top:0}
+
+/* ---------- 状态头 ---------- */
+.voice-hero{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(280px,.65fr);
+  gap:var(--sp-4);padding:var(--sp-4) var(--sp-5);min-width:0;
+  border:1px solid var(--t-line);border-radius:var(--r-md);
+  background:radial-gradient(130% 150% at 0% 0%,
+    color-mix(in srgb,var(--t-accent-quiet) 62%,transparent),transparent 58%),
+    var(--t-surface-raised)}
+.voice-hero-copy{display:grid;align-content:start;gap:var(--sp-2);min-width:0}
+.voice-hero-kicker{margin:0;color:var(--t-accent-ink);font:650 var(--fs-micro)/1.4 var(--numeric-font);
+  letter-spacing:.14em;text-transform:uppercase}
+.voice-hero h2{margin:0;color:var(--t-text-strong);font-size:var(--fs-head);line-height:1.3}
+.voice-hero-lede{margin:0;max-width:58ch;color:var(--t-text-soft);font-size:var(--fs-tiny);line-height:1.75}
+.voice-hero-alert{display:flex;align-items:flex-start;gap:var(--sp-1);margin:0;
+  padding:var(--sp-2) var(--sp-3);border-radius:var(--r-xs);
+  background:var(--t-warn-quiet);color:var(--t-warn-ink);
+  font-size:var(--fs-tiny);line-height:1.6}
+.voice-hero-alert svg{flex:none;width:14px;height:14px;margin-top:2px}
+.voice-hero-chips{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));
+  gap:var(--sp-2);margin-top:var(--sp-1)}
+.voice-chip{display:grid;gap:2px;min-width:0;padding:var(--sp-2);
+  border:1px solid var(--t-line);border-radius:var(--r-xs);
+  background:color-mix(in srgb,var(--t-surface) 78%,transparent)}
+.voice-chip small{color:var(--t-text-faint);font-size:var(--fs-micro);line-height:1.5}
+.voice-chip strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  color:var(--t-text-strong);font-size:var(--fs-tiny);font-weight:600;line-height:1.5}
+.voice-hero-actions{display:flex;flex-wrap:wrap;gap:var(--sp-2);margin-top:var(--sp-1)}
+.voice-hero-actions .button{display:inline-flex;align-items:center;gap:var(--sp-1)}
+.voice-hero-actions svg{width:14px;height:14px}
+
+.voice-hero-preview{display:grid;align-content:start;gap:var(--sp-2);min-width:0;
+  padding:var(--sp-3);border:1px solid var(--t-line);border-radius:var(--r-sm);
+  background:var(--t-surface);box-shadow:var(--t-shadow)}
+.voice-hero-preview>header{display:flex;align-items:center;gap:var(--sp-2);min-width:0}
+.voice-hero-preview>header strong{color:var(--t-text-strong);font-size:var(--fs-tiny);font-weight:600}
+.voice-preview-dot{flex:none;width:8px;height:8px;border-radius:50%;background:var(--t-ok);
+  box-shadow:0 0 0 3px var(--t-ok-quiet)}
+.voice-hero.is-off .voice-preview-dot{background:var(--t-text-faint);box-shadow:none}
+.voice-preview-badge{margin-left:auto;color:var(--t-text-faint);font-size:var(--fs-micro);white-space:nowrap}
+.voice-preview-text{margin:0;padding:var(--sp-2) 0;color:var(--t-text);font-size:var(--fs-body);line-height:1.8}
+.voice-wave{display:flex;align-items:flex-end;gap:3px;height:34px;padding:0 2px}
+.voice-wave i{flex:1;min-height:6px;height:calc(var(--h) * 1%);border-radius:3px;
+  background:linear-gradient(180deg,var(--t-accent),
+    color-mix(in srgb,var(--t-accent) 42%,transparent));transition:height .2s ease}
+.voice-hero.is-off .voice-wave i{background:var(--t-line-firm)}
+.voice-hero-preview>footer{display:flex;justify-content:space-between;gap:var(--sp-2);
+  color:var(--t-text-faint);font-size:var(--fs-micro);line-height:1.5}
+.voice-hero-preview>footer span:last-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.voice-hero.is-off .voice-hero-preview{opacity:.72}
+
+/* ---------- 设置卡片 ---------- */
+#replyWorkspace.expression-voice-focus .wb-card{border:0;background:transparent;overflow:visible}
+#replyWorkspace.expression-voice-focus .wb-card-head{display:none}
+#replyWorkspace.expression-voice-focus .wb-rail-legend{display:none}
+#replyWorkspace.expression-voice-focus .wb-card-body{display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));align-items:start;
+  gap:var(--sp-3);padding:0}
+#replyWorkspace.expression-voice-focus .wb-group[data-wb-group="voice"]{grid-column:1;grid-row:1}
+#replyWorkspace.expression-voice-focus .wb-group[data-wb-group="voice_engine"]{grid-column:2;grid-row:1}
+#replyWorkspace.expression-voice-focus .wb-group[data-wb-group="voice_render"]{grid-column:1;grid-row:2}
+#replyWorkspace.expression-voice-focus .wb-group[data-wb-group="voice_primary"]{grid-column:2;grid-row:2}
+#replyWorkspace.expression-voice-focus .wb-group[data-wb-group="voice_limits"]{grid-column:1;grid-row:3}
+#replyWorkspace.expression-voice-focus .wb-group[data-wb-group="voice_extra"]{grid-column:2;grid-row:3}
+#replyWorkspace.expression-voice-focus .wb-group[data-wb-group="voice_channels"]{grid-column:1/-1;grid-row:4}
+#replyWorkspace.expression-voice-focus .wb-group{display:grid;align-content:start;gap:var(--sp-1);
+  min-width:0;margin:0!important;padding:var(--sp-3) var(--sp-4)!important;
+  border:1px solid var(--t-line)!important;border-radius:var(--r-md);
+  background:var(--t-surface)}
+#replyWorkspace.expression-voice-focus .wb-group-head{margin:0 0 var(--sp-1);
+  color:var(--t-text-strong);font-size:var(--fs-body);font-weight:650}
+#replyWorkspace.expression-voice-focus .wb-group>.wb-help{margin:0 0 var(--sp-1);max-width:64ch;
+  color:var(--t-text-faint);font-size:var(--fs-micro);line-height:1.6}
+#replyWorkspace.expression-voice-focus .wb-fields{display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(240px,1fr));
+  gap:0 var(--sp-5);max-width:none}
+#replyWorkspace.expression-voice-focus .wb-field{grid-template-columns:10px minmax(0,1fr);
+  gap:var(--sp-1) var(--sp-2);padding:var(--sp-2) 0;
+  border-top:1px solid color-mix(in srgb,var(--t-line) 62%,transparent)}
+#replyWorkspace.expression-voice-focus .wb-field:first-child{border-top:0;padding-top:2px}
+#replyWorkspace.expression-voice-focus .wb-field>.wb-field-main{grid-column:2}
+#replyWorkspace.expression-voice-focus .wb-field-main{grid-template-columns:minmax(0,1fr);gap:0}
+#replyWorkspace.expression-voice-focus .wb-field-main>.wb-label{font-size:var(--fs-tiny);
+  font-weight:600;line-height:1.5}
+#replyWorkspace.expression-voice-focus .wb-field-main>.wb-help{
+  display:-webkit-box;overflow:hidden;-webkit-box-orient:vertical;-webkit-line-clamp:1;
+  font-size:var(--fs-micro);line-height:1.55}
+#replyWorkspace.expression-voice-focus .wb-field-main>.wb-control{grid-column:1;grid-row:auto;
+  justify-self:stretch;width:100%;max-width:none;margin-top:var(--sp-1);justify-content:flex-start}
+#replyWorkspace.expression-voice-focus .wb-control input,
+#replyWorkspace.expression-voice-focus .wb-control select,
+#replyWorkspace.expression-voice-focus .wb-control textarea{width:100%;max-width:none;
+  min-height:34px;font-size:var(--fs-tiny)}
+#replyWorkspace.expression-voice-focus .wb-control textarea{min-height:64px;line-height:1.7}
+#replyWorkspace.expression-voice-focus .wb-field:hover,
+#replyWorkspace.expression-voice-focus .wb-field.is-inherited{background:transparent}
+#replyWorkspace.expression-voice-focus .wb-field:has(textarea),
+#replyWorkspace.expression-voice-focus .wb-field:has(.wb-word-editor),
+#replyWorkspace.expression-voice-focus .wb-field:has(.wb-keywords){grid-column:1/-1}
+#replyWorkspace.expression-voice-focus .wb-group[data-wb-group="voice_channels"] .wb-fields{
+  grid-template-columns:repeat(3,minmax(0,1fr))}
+#replyWorkspace.expression-voice-focus .wb-actions{position:sticky;bottom:var(--sp-2);z-index:4;
+  margin:var(--sp-1) 0 0;padding:var(--sp-2) var(--sp-3);
+  border:1px solid var(--t-line);border-radius:var(--r-sm);
+  background:color-mix(in srgb,var(--t-surface-raised) 92%,transparent);
+  backdrop-filter:blur(8px);box-shadow:var(--t-shadow)}
+
+@media(max-width:1080px){
+  .voice-hero{grid-template-columns:minmax(0,1fr)}
+  .voice-hero-chips{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media(max-width:900px){
+  #replyWorkspace.expression-voice-focus .wb-card-body{grid-template-columns:minmax(0,1fr)}
+  #replyWorkspace.expression-voice-focus .wb-group[data-wb-group]{grid-column:1;grid-row:auto}
+}
+@media(max-width:560px){
+  #replyWorkspace.expression-voice-focus .wb-fields,
+  #replyWorkspace.expression-voice-focus .wb-group[data-wb-group="voice_channels"] .wb-fields{
+    grid-template-columns:minmax(0,1fr)}
+}
+@media(max-width:560px){
+  .voice-hero{padding:var(--sp-3)}
+  .voice-hero-actions .button{flex:1 1 100%;justify-content:center}
+}
+@media(prefers-reduced-motion:reduce){
+  .voice-wave i{transition:none}
+}
+
+@media(max-width:900px){
+  #replyWorkspace.expression-voice-focus .wb-field-main>.wb-help{-webkit-line-clamp:2}
+}
+
+
+
+
+
+
+@media(max-width:760px){
+  /* 手机上常驻底部保存条会遮住字段，改成随内容排在最后。 */
+  #replyWorkspace.expression-voice-focus .wb-actions{position:static;bottom:auto}
+}
+@media(max-width:560px){
+  #replyWorkspace.expression-voice-focus .wb-group{padding:var(--sp-2) var(--sp-3)!important}
+  #replyWorkspace.expression-voice-focus .wb-control textarea{min-height:48px}
+  .voice-hero{padding:var(--sp-3)}
+}
+
+
+
+/* 全局语音默认值：折叠成一条状态摘要，避免和窗口设置混在一起。 */
+.expression-voice-workspace .voice-global{margin-top:var(--sp-3);padding:0!important;
+  border:1px solid var(--t-line);border-radius:var(--r-md);background:var(--t-surface);overflow:clip}
+.voice-global-summary{display:flex;align-items:center;justify-content:space-between;
+  gap:var(--sp-3);padding:var(--sp-3) var(--sp-4);cursor:pointer;list-style:none}
+.voice-global-summary::-webkit-details-marker{display:none}
+.voice-global-summary::after{content:"›";flex:none;color:var(--t-text-faint);
+  font-size:var(--fs-title);line-height:1;transform:rotate(90deg);transition:transform .16s ease}
+.voice-global[open]>.voice-global-summary::after{transform:rotate(-90deg)}
+.voice-global-title{display:grid;gap:2px;min-width:0}
+.voice-global-title strong{color:var(--t-text-strong);font-size:var(--fs-body);font-weight:650}
+.voice-global-title small{color:var(--t-text-faint);font-size:var(--fs-micro);line-height:1.6}
+.voice-global-state{flex:none;padding:var(--sp-1) var(--sp-2);border-radius:var(--r-pill);
+  font-size:var(--fs-micro);font-weight:600;white-space:nowrap}
+.voice-global-state.is-on{color:var(--t-ok-ink);background:var(--t-ok-quiet)}
+.voice-global-state.is-off{color:var(--t-warn-ink);background:var(--t-warn-quiet)}
+.voice-global-body{padding:var(--sp-3) var(--sp-4) var(--sp-4);border-top:1px solid var(--t-line)}
+.voice-global-body .host-options-jumps{margin:0 0 var(--sp-3)}
+@media(max-width:560px){
+  .voice-global-summary{align-items:flex-start;flex-direction:column;gap:var(--sp-1)}
+  .voice-global-body{padding:var(--sp-3)}
+}
+
+.voice-hero-hint{margin:0;color:var(--t-text-faint);font-size:var(--fs-micro);line-height:1.6}
+
+/* text-page.css */
+/* 分段回复页 2026-11-21：状态头 + 分段示意 + 紧凑字段网格。
+   与语音页同一套阅读节奏，但保留左侧分区导航和下方分段预览。 */
+
+#replyWorkspace.expression-text-focus{display:block;min-width:0}
+#replyWorkspace.expression-text-focus>[data-reply-part="scope"]{
+  margin:0 0 var(--sp-3);padding:0;border:0;background:transparent;
+  font-size:inherit;line-height:inherit;color:inherit}
+
+/* 页面 h1 已经写着「文字风格与分段」，分区标题不再重复。 */
+#expression-panel-expression-text .console-section-head{display:none}
+#expression-panel-expression-text .console-section-body{padding-top:0}
+#expression-panel-expression-text .console-section{padding-top:0;border-top:0}
+
+.text-hero{display:block;
+  gap:var(--sp-4);padding:var(--sp-4) var(--sp-5);min-width:0;
+  border:1px solid var(--t-line);border-radius:var(--r-md);
+  background:radial-gradient(130% 150% at 0% 0%,
+    color-mix(in srgb,var(--t-accent-quiet) 60%,transparent),transparent 58%),
+    var(--t-surface-raised)}
+.text-hero.is-off .text-hero-preview{opacity:.7}
+.text-hero-copy{display:grid;align-content:start;gap:var(--sp-2);min-width:0}
+.text-hero-kicker{margin:0;color:var(--t-accent-ink);font:650 var(--fs-micro)/1.4 var(--numeric-font);
+  letter-spacing:.14em;text-transform:uppercase}
+.text-hero h2{margin:0;color:var(--t-text-strong);font-size:var(--fs-head);line-height:1.3}
+.text-hero-lede{margin:0;max-width:60ch;color:var(--t-text-soft);font-size:var(--fs-tiny);line-height:1.75}
+.text-hero-chips{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:var(--sp-2);margin-top:var(--sp-1)}
+.text-chip{display:grid;gap:2px;min-width:0;padding:var(--sp-2);
+  border:1px solid var(--t-line);border-radius:var(--r-xs);
+  background:color-mix(in srgb,var(--t-surface) 78%,transparent)}
+.text-chip small{color:var(--t-text-faint);font-size:var(--fs-micro);line-height:1.5}
+.text-chip strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  color:var(--t-text-strong);font-size:var(--fs-tiny);font-weight:600;line-height:1.5}
+.text-hero-actions{display:flex;flex-wrap:wrap;gap:var(--sp-2);margin-top:var(--sp-1)}
+.text-hero-actions .button{display:inline-flex;align-items:center;gap:var(--sp-1)}
+.text-hero-actions svg{width:14px;height:14px}
+.text-hero-hint{margin:0;color:var(--t-text-faint);font-size:var(--fs-micro);line-height:1.6}
+
+.text-hero-preview{display:grid;align-content:start;gap:var(--sp-2);min-width:0;
+  padding:var(--sp-3);border:1px solid var(--t-line);border-radius:var(--r-sm);
+  background:var(--t-surface);box-shadow:var(--t-shadow)}
+.text-hero-preview>header{display:flex;align-items:center;justify-content:space-between;
+  gap:var(--sp-2);color:var(--t-text-faint);font-size:var(--fs-micro)}
+.text-hero-preview>header strong{color:var(--t-text-strong);font-size:var(--fs-tiny);font-weight:600}
+.text-hero-preview p{display:grid;grid-template-columns:22px minmax(0,1fr);gap:var(--sp-2);
+  align-items:start;margin:0;padding:var(--sp-2) var(--sp-3);border-radius:var(--r-sm);
+  background:var(--t-surface-soft);color:var(--t-text);font-size:var(--fs-tiny);line-height:1.65}
+.text-hero-preview p.is-muted{opacity:.62}
+.text-hero-preview p i{display:grid;place-items:center;width:22px;height:22px;border-radius:50%;
+  background:var(--t-accent-quiet);color:var(--t-accent-ink);font:650 var(--fs-micro)/1 var(--numeric-font);
+  font-style:normal}
+
+/* 字段：一列说明 + 一列控件改成紧凑的上下结构，文字类字段整行。 */
+#replyWorkspace.expression-text-focus .wb-card{border:0;background:transparent;overflow:visible}
+#replyWorkspace.expression-text-focus .wb-card-head{display:none}
+#replyWorkspace.expression-text-focus .wb-section-layout{grid-template-columns:minmax(160px,200px) minmax(0,1fr);
+  gap:var(--sp-4)}
+#replyWorkspace.expression-text-focus .wb-section-sidebar{position:sticky;top:var(--sp-4);align-self:start}
+#replyWorkspace.expression-text-focus .wb-section-panel{min-width:0}
+#replyWorkspace.expression-text-focus .wb-group{padding:var(--sp-3) var(--sp-4)!important;
+  border:1px solid var(--t-line)!important;border-radius:var(--r-md);background:var(--t-surface)}
+#replyWorkspace.expression-text-focus .wb-group-head{margin:0 0 var(--sp-1);color:var(--t-text-strong);
+  font-size:var(--fs-body);font-weight:650}
+#replyWorkspace.expression-text-focus .wb-group>.wb-help{margin:0 0 var(--sp-2);color:var(--t-text-faint);
+  font-size:var(--fs-micro);line-height:1.6}
+#replyWorkspace.expression-text-focus .wb-fields{display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:0 var(--sp-5);max-width:none}
+#replyWorkspace.expression-text-focus .wb-field{grid-template-columns:10px minmax(0,1fr);
+  gap:var(--sp-1) var(--sp-2);padding:var(--sp-2) 0;
+  border-top:1px solid color-mix(in srgb,var(--t-line) 62%,transparent)}
+#replyWorkspace.expression-text-focus .wb-field:first-child{border-top:0;padding-top:2px}
+#replyWorkspace.expression-text-focus .wb-field>.wb-field-main{grid-column:2}
+#replyWorkspace.expression-text-focus .wb-field-main{grid-template-columns:minmax(0,1fr);gap:0}
+#replyWorkspace.expression-text-focus .wb-field-main>.wb-label{font-size:var(--fs-tiny);font-weight:600;line-height:1.5}
+#replyWorkspace.expression-text-focus .wb-field-main>.wb-help{font-size:var(--fs-micro);line-height:1.55}
+#replyWorkspace.expression-text-focus .wb-field-main>.wb-control{grid-column:1;grid-row:auto;
+  justify-self:stretch;width:100%;max-width:none;margin-top:var(--sp-1);justify-content:flex-start}
+#replyWorkspace.expression-text-focus .wb-control input,
+#replyWorkspace.expression-text-focus .wb-control select,
+#replyWorkspace.expression-text-focus .wb-control textarea{width:100%;max-width:none;min-height:34px;font-size:var(--fs-tiny)}
+#replyWorkspace.expression-text-focus .wb-control textarea{min-height:72px;line-height:1.7}
+#replyWorkspace.expression-text-focus .wb-field:hover,
+#replyWorkspace.expression-text-focus .wb-field.is-inherited{background:transparent}
+#replyWorkspace.expression-text-focus .wb-field:has(textarea),
+#replyWorkspace.expression-text-focus .wb-field:has(.wb-word-editor),
+#replyWorkspace.expression-text-focus .wb-field:has(.wb-keywords),
+#replyWorkspace.expression-text-focus .wb-field:has(.wb-chipset){grid-column:1/-1}
+#replyWorkspace.expression-text-focus .wb-actions{position:sticky;bottom:var(--sp-2);z-index:4;
+  margin:var(--sp-2) 0 0;padding:var(--sp-2) var(--sp-3);
+  border:1px solid var(--t-line);border-radius:var(--r-sm);
+  background:color-mix(in srgb,var(--t-surface-raised) 92%,transparent);
+  backdrop-filter:blur(8px);box-shadow:var(--t-shadow)}
+
+@media(max-width:1080px){
+  .text-hero{grid-template-columns:minmax(0,1fr)}
+  .text-hero-chips{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media(max-width:900px){
+  #replyWorkspace.expression-text-focus .wb-section-layout{grid-template-columns:minmax(0,1fr)}
+  #replyWorkspace.expression-text-focus .wb-section-sidebar{position:static;max-height:none}
+  #replyWorkspace.expression-text-focus .wb-fields{grid-template-columns:minmax(0,1fr)}
+}
+@media(max-width:760px){
+  #replyWorkspace.expression-text-focus .wb-actions{position:static;bottom:auto}
+}
+@media(max-width:560px){
+  .text-hero{padding:var(--sp-3)}
+  .text-hero-actions .button{flex:1 1 100%;justify-content:center}
+  #replyWorkspace.expression-text-focus .wb-group{padding:var(--sp-2) var(--sp-3)!important}
+}
+
+/* 2026-11-20 的回复页布局修复用更高优先级把字段锁成「标签 + 控件」两栏；
+   分段页要上下结构，必须在同一优先级上覆盖回来。 */
+#replyWorkspace:not(.expression-voice-focus).expression-text-focus .wb-fields > .wb-field > .wb-field-main.wb-field-main{
+  grid-template-columns:minmax(0,1fr);justify-content:normal;align-items:start}
+
+#replyWorkspace:not(.expression-voice-focus).expression-text-focus .wb-fields{
+  grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
+#replyWorkspace:not(.expression-voice-focus).expression-text-focus .wb-fields > .wb-field > .wb-field-main.wb-field-main > .wb-control.wb-control{
+  justify-content:flex-start;justify-self:stretch;max-width:none;width:100%}
+
+
+/* QQ 气泡式分段示意：文段、引用、@、语音、表情包的位置都画出来。 */
+.text-hero-preview.is-chat{padding:var(--sp-2)}
+.qq-chat{display:grid;gap:var(--sp-2);min-width:0;padding:var(--sp-2);
+  border-radius:var(--r-sm);background:var(--t-surface-soft)}
+.qq-quote{width:88%;margin-left:auto;padding:var(--sp-2) var(--sp-3);
+  border-left:3px solid var(--t-accent);border-radius:var(--r-xs);
+  background:var(--t-surface);color:var(--t-text-soft);font-size:var(--fs-micro);line-height:1.55}
+.qq-quote p{display:block;margin:0;padding:0;background:none;grid-column:auto;color:var(--t-text-soft);font-size:var(--fs-micro);line-height:1.55}\n.qq-quote-tag{display:inline-block;margin-bottom:2px;color:var(--t-accent-ink);
+  font:650 var(--fs-micro)/1.4 var(--numeric-font);letter-spacing:.08em}
+.qq-row{display:flex;align-items:flex-start;justify-content:flex-end;gap:var(--sp-1);min-width:0}
+.qq-avatar{flex:none;display:grid;place-items:center;width:22px;height:22px;border-radius:50%;
+  background:var(--t-accent-quiet);color:var(--t-accent-ink);
+  font:650 var(--fs-micro)/1 var(--numeric-font)}
+.qq-bubble{position:relative;max-width:calc(100% - 30px);padding:var(--sp-2) var(--sp-3);
+  border-radius:var(--r-md) var(--r-2xs) var(--r-md) var(--r-md);
+  background:var(--t-surface);box-shadow:0 2px 8px -6px color-mix(in srgb,var(--t-text-strong) 40%,transparent)}
+.qq-bubble::after{content:"";position:absolute;top:9px;right:-4px;width:8px;height:8px;
+  background:var(--t-surface);transform:rotate(45deg);border-radius:1px}
+.qq-bubble p{display:block;margin:0;padding:0;background:none;color:var(--t-text);
+  font-size:var(--fs-tiny);line-height:1.6}
+.qq-at{color:var(--t-accent-ink);font-weight:650;white-space:nowrap}
+.qq-media{display:flex;align-items:center;gap:var(--sp-2);max-width:calc(100% - 30px)}
+.qq-voice{display:inline-flex;align-items:center;gap:var(--sp-2);padding:var(--sp-2) var(--sp-3);
+  border-radius:var(--r-pill);background:var(--t-surface);
+  color:var(--t-accent-ink);font-size:var(--fs-micro);font-weight:600;
+  box-shadow:0 2px 8px -6px color-mix(in srgb,var(--t-text-strong) 40%,transparent)}
+.qq-wave{width:26px;height:12px;
+  background:repeating-linear-gradient(90deg,var(--t-accent) 0 2px,transparent 2px 5px);
+  border-radius:2px}
+.qq-sticker{display:grid;place-items:center;width:54px;height:54px;border-radius:var(--r-sm);
+  background:var(--t-surface);font-size:var(--fs-head);line-height:1;
+  box-shadow:0 2px 8px -6px color-mix(in srgb,var(--t-text-strong) 40%,transparent)}
+.qq-legend{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--sp-1) var(--sp-3);
+  margin-top:var(--sp-1);padding-top:var(--sp-2);border-top:1px dashed var(--t-line-firm)}
+.qq-legend span{display:flex;align-items:center;gap:var(--sp-1);min-width:0;
+  color:var(--t-text-faint);font-size:var(--fs-micro);line-height:1.5}
+.qq-legend b{color:var(--t-text-soft);font-weight:650}
+
+/* 分段页的预览按原顺序放在配置下方，不沿用回复页「有预览就两栏」的布局。 */
+#replyWorkspace.expression-text-focus:has(> [data-reply-part="preview"]:not([hidden])){display:block}
 
 /* output-page.css */
 /* Output design: overview 41/59; independent material, creation and backend pages. */
@@ -19335,6 +19736,64 @@ body.reduce-motion .role-profile-draft-dialog *::after{transition:none}
   .self-page .wb-journal .wb-identity-rows .wb-field-main{grid-template-columns:minmax(0,1fr);row-gap:var(--sp-1)}
   .self-page .wb-journal .wb-identity-rows .wb-control{width:100%}
 }
+
+/* ===== 自我页 · 身份章节 2026-11-21 ===== */
+.self-chapter-intro{display:grid;grid-template-columns:minmax(120px,160px) minmax(0,1fr);align-items:start;
+  gap:var(--sp-4);margin-bottom:var(--sp-3);padding:var(--sp-3) var(--sp-4);
+  border:1px solid var(--t-line);border-radius:var(--r-sm);
+  background:linear-gradient(120deg,color-mix(in srgb,var(--t-accent-quiet) 46%,transparent),transparent 62%),
+    var(--t-surface-soft);min-width:0}
+.self-chapter-kicker{flex:none;margin:0;color:var(--t-accent-ink);
+  font:650 var(--fs-micro)/1.4 var(--numeric-font);letter-spacing:.12em}
+.self-chapter-copy{display:grid;gap:var(--sp-1);min-width:0}
+.self-chapter-copy h3{margin:0;color:var(--t-text-strong);font-size:var(--fs-title);line-height:1.3}
+.self-chapter-copy p{margin:0;max-width:72ch;color:var(--t-text-soft);font-size:var(--fs-tiny);line-height:1.7}
+
+/* 基础资料卡：姓名/性别并排，生日与种族整行，日期控件不再挤成多行。 */
+.self-page .wb-journal .wb-identity-card{padding:var(--sp-3) var(--sp-4);
+  border-color:var(--t-line);background:var(--t-surface-soft)}
+.self-page .wb-journal .wb-identity-card::before{content:"基础资料";
+  color:var(--t-text-faint);font:650 var(--fs-micro)/1.4 var(--numeric-font);
+  letter-spacing:.12em}
+.self-page .wb-journal .wb-identity-rows{gap:var(--sp-2) var(--sp-5)}
+.self-page .wb-journal .wb-identity-rows [data-wb-row="birthday"],
+.self-page .wb-journal .wb-identity-rows [data-wb-row="species"]{grid-column:1/-1}
+.self-page .wb-journal .wb-identity-rows [data-wb-row="birthday"] .wb-date{flex-wrap:wrap}
+.self-page .wb-journal .wb-identity-rows [data-wb-row="birthday"] .wb-date-text{flex:1 1 240px}
+
+/* 经历类文字单独成段。 */
+.self-page .wb-journal .wb-group[data-wb-group="identity"] .wb-field[data-wb-row="key_lore"]{
+  margin-top:var(--sp-3);padding-top:var(--sp-4);border-top:1px dashed var(--t-line-firm)}
+.self-page .wb-journal .wb-group[data-wb-group="identity"] .wb-field[data-wb-row="key_lore"]::before{
+  content:"设定与经历";grid-column:1/-1;margin-bottom:var(--sp-1);
+  color:var(--t-text-faint);font:650 var(--fs-micro)/1.4 var(--numeric-font);
+  letter-spacing:.12em}
+.self-page .wb-journal .wb-group[data-wb-group="identity"] :is(
+  [data-wb-row="key_lore"],[data-wb-row="identity"],[data-wb-row="character_extra"]) textarea{
+  min-height:112px}
+.self-page .wb-journal .wb-actions{position:static;bottom:auto}
+
+@media(max-width:760px){
+  .self-chapter-intro{grid-template-columns:minmax(0,1fr);gap:var(--sp-1)}
+  .self-page .wb-journal .wb-identity-card{padding:var(--sp-2)}
+  .self-page .wb-journal .wb-identity-rows{gap:var(--sp-2)}
+}
+
+/* 生日是 .wb-date，工作台为日期控件统一把控件放到标签列；在身份行里要放回第二列。 */
+.self-page .wb-journal .wb-identity-rows .wb-field:has(.wb-date) .wb-field-main > .wb-control{
+  grid-column:2;grid-row:1 / span 2;width:100%;max-width:none;justify-content:flex-start}
+@media(max-width:720px){
+  .self-page .wb-journal .wb-identity-rows .wb-field:has(.wb-date) .wb-field-main > .wb-control{
+    grid-column:1;grid-row:auto}
+}
+
+/* 设定与经历的分段标题：复用 wb-field 的 ::before 前必须完整复位，
+   否则会继承「改动竖线」的绝对定位和 2px 宽度。 */
+.self-page .wb-journal .wb-group[data-wb-group="identity"] .wb-field[data-wb-row="key_lore"]::before{
+  content:"设定与经历";position:static;display:block;width:auto;height:auto;
+  top:auto;bottom:auto;left:auto;margin:0 0 var(--sp-1);padding:0;
+  background:none;opacity:1;transform:none;grid-column:1/-1;
+  color:var(--t-text-faint);font:650 var(--fs-micro)/1.4 var(--numeric-font);letter-spacing:.12em}
 
 /* theme-skins.css */
 /* 主题的结构语言：页面基底、标题、导航、面板边界和常用控件共用一组皮肤令牌。 */
