@@ -48,7 +48,8 @@ class TelegramLinkedConversationTests(LinkedTelegramFixture, unittest.IsolatedAs
         self.assertIs(session.bridge.client(scope), self.telegram.client)
 
     async def test_a_joined_telegram_endpoint_is_never_offered_as_the_diagnostic_recipient(self):
-        """It shares the core human's subject, never the core authority: only the anchor qualifies."""
+        """It shares the core human's subject, never the core authority: only the anchor qualifies,
+        and only while it is a member."""
         from companion_v2.identity_policy.models import AuthorizationTier
         from companion_v2.identity_policy.object_access import ObjectAccessPolicy
         self.assertEqual((await self.link())["status"], "ok")
@@ -58,6 +59,9 @@ class TelegramLinkedConversationTests(LinkedTelegramFixture, unittest.IsolatedAs
                         observed_at=self.clock.now())
         targets = await self.controller.proactive_diagnostic_targets()
         self.assertEqual([target.target_id for target in targets], ["first"])
+        # Detached from its own link, the anchor is closed: no diagnostic may be sent through it.
+        self.assertEqual((await self.link(revision=1, members=["second"]))["status"], "ok")
+        self.assertEqual(await self.controller.proactive_diagnostic_targets(), [])
 
     async def stored(self, origin, conversation_id):
         conversation = await self.manager.get_conversation(origin, conversation_id)

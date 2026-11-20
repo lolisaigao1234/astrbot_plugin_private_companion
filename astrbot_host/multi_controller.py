@@ -382,9 +382,14 @@ class AstrBotMultiController:
             "SELECT subject_id FROM subject_access_tiers WHERE subject_kind = 'human' AND tier = ?",
             (AuthorizationTier.CORE.value,),
         )}
+        links = getattr(self.session, "linked_conversations", None)
         candidates = []
         for target in settings.primary_targets:
             if target.participant_id == "*":
+                continue
+            # Taken out of a link and not admitted on its own since: closed, as account recovery treats it.
+            if (links.removed(target) if links is not None else endpoint_removed(
+                    self.runtime, target.platform_id, target.account_id, target.participant_id)):
                 continue
             subject = self.authority.subject(target)
             if subject.subject_id not in core_subjects:
