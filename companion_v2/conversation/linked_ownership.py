@@ -5,6 +5,7 @@ physical scopes remain the authority, delivery and source-provenance addresses.
 """
 from dataclasses import replace
 import json
+import threading
 from weakref import WeakKeyDictionary, ref
 
 from companion_v2.foundation.refs import ScopeKind, ScopeRef
@@ -60,8 +61,19 @@ def preferred_target_id(record):
 class _Index:
     def __init__(self):
         self.raw, self.rejected, self.members, self.scopes, self.removed, self.current = None, None, {}, {}, set(), False
+        # Bumped by every announced write: a load that overlapped one indexed a record that may be stale.
+        self.version, self.lock = 0, threading.Lock()
 
     def load(self, runtime):
+        with self.lock:
+            version = self.version
+            self._load(runtime)
+            if self.version == version:
+                self.current = True
+                if self.version != version:  # a write landed between the check and the store
+                    self.current = False
+
+    def _load(self, runtime):
         row = runtime.read_one("SELECT value FROM runtime_metadata WHERE key = ?", (LINKS_KEY,))
         raw = row["value"] if row else None
         if raw != self.raw:
@@ -76,7 +88,6 @@ class _Index:
                 removed.update((row["platform_id"], row["account_id"], row["participant_id"])
                                for row in record.get("detached", []))
             self.raw, self.members, self.scopes, self.removed = raw, members, scopes, removed - set(members)
-        self.current = True
 
 
 def _records_runtime(runtime):
@@ -94,7 +105,9 @@ def link_records_changed(runtime):
 
     A store no host has announced has no links and is never queried for them.
     """
-    _INDEXES.setdefault(_records_runtime(runtime), _Index()).current = False
+    index = _INDEXES.setdefault(_records_runtime(runtime), _Index())
+    index.version += 1
+    index.current = False
 
 
 def _lookup(runtime, table, key):

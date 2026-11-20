@@ -1,4 +1,5 @@
 """The membership index behind every linked-owner lookup."""
+import contextlib
 import json
 import unittest
 
@@ -34,7 +35,31 @@ class Runtime:
         return None if self.value is None else {"value": self.value}
 
 
+class RacingRuntime(Runtime):
+    """The host commits a link write while a worker thread is between reading and indexing the record."""
+
+    def __init__(self, value, written):
+        super().__init__(value)
+        self.written = written
+
+    def read_one(self, sql, parameters):
+        row = super().read_one(sql, parameters)
+        if self.written is not None:
+            self.value, self.written = self.written, None
+            link_records_changed(self)
+        return row
+
+
 class LinkIndexTests(unittest.TestCase):
+    def test_a_write_committed_during_a_load_is_read_by_the_next_lookup(self):
+        runtime = RacingRuntime(record(("qq-main", "100", "200"), ("qq-second", "101", "200")),
+                                record(("qq-main", "100", "200")))
+        with contextlib.suppress(TaskError):
+            link_for_endpoint(runtime, "qq-second", "101", "200")
+        self.assertIsNone(link_for_endpoint(runtime, "qq-second", "101", "200"))
+        self.assertIsNotNone(link_for_endpoint(runtime, "qq-main", "100", "200"))
+        self.assertEqual(runtime.reads, 2)
+
     def test_the_record_is_read_once_and_again_only_after_the_host_wrote_it(self):
         runtime = Runtime(record(("qq-main", "100", "200"), ("qq-second", "101", "200")))
         first = link_for_endpoint(runtime, "qq-second", "101", "200")
