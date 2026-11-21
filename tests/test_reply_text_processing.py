@@ -328,7 +328,8 @@ class ReplyTextProcessingTests(unittest.TestCase):
         # 以 end 结尾的单词（weekend）也分不清是不是结束标记，同样是边界：整段保留。
         for text in ("th用户说weekend要出去。\nend好的",
                      "用户问我什么是 weekend\n它指周末。\nend 表示结束。",
-                     "th先确认缩写是APIend这里是正文。\nend 是结束标记。"):
+                     "th先确认缩写是APIend这里是正文。\nend 是结束标记。",
+                     "th用户想学friend这个词\n好呀！friend 是朋友的意思。\nend呢，是结束的意思。"):
             with self.subTest(text=text):
                 self.assertEqual(strip_internal_expression_protocol(text), text)
         # end 后面紧跟字母（endpoint、ended）只是普通文字，草稿照常在自己的 end 处结束。
