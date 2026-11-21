@@ -210,8 +210,10 @@ class ReplyTextProcessingTests(unittest.TestCase):
 
     def test_inline_end_never_closes_a_quoted_reply(self):
         # 「开头的是可见回复，。！？后面的 end 不能把它当草稿删掉。
+        # 「 正文里。！？后面的 end 也不能被跨过，否则会一路读到后面的行首 end，删掉中间的正文。
         for text in ("「早」今天学了个新单词。end 是结束的意思哦",
-                     "「早」\n今天学了个新单词！end\n就是结束"):
+                     "「早」\n今天学了个新单词！end\n就是结束",
+                     "「早」今天学了个新单词。end 是结束的意思哦\n再见\nend 也可以当动词"):
             with self.subTest(text=text):
                 self.assertEqual(strip_internal_expression_protocol(text), text)
 
@@ -256,7 +258,9 @@ class ReplyTextProcessingTests(unittest.TestCase):
         for text in ("th先想。\nend of story\n「候选」\n想好了。end请保留这句。\nend 是结束标记。",
                      "th先想。\n```text\nfoo\n```\n「候选」\n想好了。end请保留这句。\nend 是结束标记。",
                      "th先想。\nend of story\n「候选」\n试试。end正文第一段。\n正文第二段。\nend 表示结束。",
-                     "th先想。\nend of story\n用户说累了。\nend请保留这句。"):
+                     "th先想。\nend of story\n用户说累了。\nend请保留这句。",
+                     "th想想。\n```x```\n「安装」说完了。end好的，装好了！\n今天学了个单词：\nend 是结束的意思",
+                     "th想。\nend of story\n「好」我想。end正文。\nend回答"):
             with self.subTest(text=text):
                 self.assertEqual(strip_internal_expression_protocol(text), text)
 
