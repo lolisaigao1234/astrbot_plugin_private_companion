@@ -1,5 +1,6 @@
 """Presentation transforms with cleanup enabled by default; literals and facts stay intact."""
 
+from bisect import bisect_left
 from dataclasses import asdict, dataclass
 from functools import lru_cache
 import json
@@ -65,19 +66,24 @@ _TOOL_CALL_PROTOCOL_BLANKS = re.compile(r"\n{3,}")
 # Some providers expose free-form reasoning as plain text with no XML wrapper:
 # "th...end<visible text>".  Strip a draft only when it is unambiguous: a
 # leaked draft is the status quo before 7.2.7, deleted visible text is a new
-# harm.  Only `th` + CJK or 用户说/用户问 (not 用户说明) opens a draft; 「 is
-# ordinary role-play text.  A draft closes at a word-bounded `end` that starts
-# a line, follows 。！？ (blanks allowed) or follows CJK, and is itself followed
-# by CJK, a (CR)LF or the end of the text.  Its body crosses no line starting
-# with ``` and no other word-bounded `end`, so such a draft stays visible.
+# harm.  Only `th` + CJK or 用户说/用户问 opens a draft (not 用户说明, 用户问题
+# or 用户问卷, and not inside a ``` fence); 「 is ordinary role-play text.  A
+# draft closes at `end` that starts a line, follows 。！？ (blanks allowed) or
+# follows CJK, and is itself followed by CJK, a (CR)LF or the end of the text.
+# Its body crosses no line starting with ``` and no other `end` not followed
+# by a letter (so weekend and APIend are boundaries, endpoint is text); such a
+# draft stays visible.
 _BARE_DRAFT_BLOCK = re.compile(
-    r"(?ms)^[ \t]*(?:th(?=[\u4e00-\u9fff])|(?=用户(?:说(?!明)|问)))"
-    r"(?:(?!^[ \t]*```|(?<![A-Za-z])end(?![A-Za-z]))[\s\S])*?"
+    r"(?ms)^[ \t]*(?:th(?=[\u4e00-\u9fff])|(?=用户(?:说(?!明)|问(?![题卷]))))"
+    r"(?:(?!^[ \t]*```|end(?![A-Za-z]))[\s\S])*?"
     r"(?:^[ \t]*|(?<=[。！？])[ \t]*|(?<=[\u4e00-\u9fff]))"
     r"end(?![A-Za-z])(?=[ \t]*(?:[\u4e00-\u9fff]|\r?\n|$))"
 )
 # Where a draft match may start: the same line starts the regex accepts.
-_BARE_DRAFT_OPENER = re.compile(r"(?m)^[ \t]*(?:th(?=[\u4e00-\u9fff])|用户(?:说(?!明)|问))")
+_BARE_DRAFT_OPENER = re.compile(
+    r"(?m)^[ \t]*(?:th(?=[\u4e00-\u9fff])|用户(?:说(?!明)|问(?![题卷])))")
+# A line starting with ``` toggles in or out of a code fence.
+_FENCE_LINE = re.compile(r"(?m)^[ \t]*```")
 _PAIRS = {"(": ")", "[": "]", "{": "}", "（": "）", "【": "】", "《": "》",
           "〈": "〉", "「": "」", "『": "』", "“": "”", "‘": "’", '"': '"'}
 
@@ -576,11 +582,18 @@ def unwrap_text_emit_calls(text):
 def _strip_bare_drafts(text):
     """Remove unambiguous bare drafts, scanning openers left to right.
 
-    An opener that does not match is an explicit draft the regex rejected,
-    so nothing inside or after it is stripped.
+    An opener inside a ``` fence (an odd number of fence lines before it,
+    so everything after an unclosed fence) is code and is skipped.  Any other
+    opener that does not match is an explicit draft the regex rejected, so
+    nothing inside or after it is stripped.  A draft body never crosses a
+    fence line, so removed drafts leave the fence count intact.
     """
+    fences = [line.start() for line in _FENCE_LINE.finditer(text)]
     kept, copied, pos = [], 0, 0
     while (opener := _BARE_DRAFT_OPENER.search(text, pos)) is not None:
+        if bisect_left(fences, opener.start()) % 2:
+            pos = opener.end()
+            continue
         draft = _BARE_DRAFT_BLOCK.match(text, opener.start())
         if draft is None:
             break
