@@ -62,6 +62,38 @@ _TOOL_CALL_PROTOCOL_START = re.compile(
     r"(?:<|＜|&lt;)\s*(?:/\s*)?(?:[|｜]\s*){1,4}DSML", re.IGNORECASE,
 )
 _TOOL_CALL_PROTOCOL_BLANKS = re.compile(r"\n{3,}")
+# Some providers expose free-form reasoning as plain text with no XML wrapper:
+# "th...end<visible text>".  This is upstream 7.2.7's rule minus the cases
+# that delete visible text, and it never deletes anything upstream keeps: a
+# draft left visible where upstream strips it can make a later cleanup pair a
+# tag or backtick in the draft with the answer and truncate it, so leak only
+# where upstream's behaviour was the harm.
+# - Open: a line starting, after at most three spaces, with `th` + CJK or
+#   用户说/用户问; not the headings 用户说明/用户说法/用户问题/用户问卷/用户问答,
+#   not inside a ``` fence.  A line indented four or more columns is indented
+#   or list-nested code (CommonMark), and 「 is ordinary role-play text.
+# - Close: an `end` with no ASCII letter on either side, followed by
+#   upstream's tail: CJK, or blanks and then LF or the end of the text (never
+#   \r).  The blanks are only looked at, so they stay in the reply.
+# - Body: crosses no line starting with ``` and no `end` that does not close
+#   it, so friend/weekend/APIend or an `end` before CRLF, a letter or a digit
+#   leaves the draft visible.  The body's ``` boundary allows any indent and is
+#   deliberately stricter than the 0-3 space _FENCE_OPENER/_FENCE_CLOSER; do
+#   not unify them.
+_BARE_DRAFT_BLOCK = re.compile(
+    r"(?ms)^ {0,3}(?:th(?=[\u4e00-\u9fff])|(?=用户(?:说(?![明法])|问(?![题卷答]))))"
+    r"(?:(?!^[ \t]*```|end(?![A-Za-z]))[\s\S])*?"
+    r"(?<![A-Za-z])end(?![A-Za-z])(?=[ \t]*(?:[\u4e00-\u9fff]|\n|$))"
+)
+# Where a draft match may start: the same line starts the regex accepts.
+_BARE_DRAFT_OPENER = re.compile(
+    r"(?m)^ {0,3}(?:th(?=[\u4e00-\u9fff])|用户(?:说(?![明法])|问(?![题卷答])))")
+# A CommonMark fence line: at most three spaces, a run of three or more
+# backticks, then an info string without backticks (opener) or only blanks
+# (closer).
+_FENCE_LINE = re.compile(r"(?m)^ {0,3}`{3,}.*$")
+_FENCE_OPENER = re.compile(r" {0,3}(`{3,})[^`]*")
+_FENCE_CLOSER = re.compile(r" {0,3}(`{3,})[ \t]*\r?")
 _PAIRS = {"(": ")", "[": "]", "{": "}", "（": "）", "【": "】", "《": "》",
           "〈": "〉", "「": "」", "『": "』", "“": "”", "‘": "’", '"': '"'}
 
@@ -557,8 +589,60 @@ def unwrap_text_emit_calls(text):
     return visible
 
 
+def _fenced_regions(text):
+    """(start, end) spans of ``` fences, CommonMark style, in one pass.
+
+    A fence opener or closer is indented by at most three spaces.  Outside a
+    fence, a run of n >= 3 backticks opens one when the rest of the line has
+    no backtick (so ```code``` on one line is not an opener); inside, only a
+    bare run of at least n backticks closes it, and any other line is
+    content.  An unclosed fence runs to the end of the text.
+    """
+    regions, start, length = [], None, 0
+    for line in _FENCE_LINE.finditer(text):
+        content = line.group()
+        if start is None:
+            opener = _FENCE_OPENER.fullmatch(content)
+            if opener is not None:
+                start, length = line.start(), len(opener.group(1))
+        else:
+            closer = _FENCE_CLOSER.fullmatch(content)
+            if closer is not None and len(closer.group(1)) >= length:
+                regions.append((start, line.end()))
+                start = None
+    if start is not None:
+        regions.append((start, len(text)))
+    return regions
+
+
+def _strip_bare_drafts(text):
+    """Remove unambiguous bare drafts, scanning openers left to right.
+
+    An opener inside a ``` fence is code and is skipped.  Any other opener
+    that does not match is an explicit draft the regex rejected, so nothing
+    inside or after it is stripped.
+    """
+    regions, region = _fenced_regions(text), 0
+    kept, copied, pos = [], 0, 0
+    while (opener := _BARE_DRAFT_OPENER.search(text, pos)) is not None:
+        while region < len(regions) and regions[region][1] <= opener.start():
+            region += 1
+        if region < len(regions) and regions[region][0] < opener.start():
+            pos = opener.end()
+            continue
+        draft = _BARE_DRAFT_BLOCK.match(text, opener.start())
+        if draft is None:
+            break
+        kept.append(text[copied:draft.start()])
+        copied = pos = draft.end()
+    kept.append(text[copied:])
+    return "".join(kept)
+
+
 def strip_internal_expression_protocol(text):
     """Remove internal control blocks and unparsed tool-call syntax."""
+    if type(text) is str and "end" in text:
+        text = _strip_bare_drafts(text)
     return strip_tool_call_protocol(strip_paired_control_blocks(unwrap_text_emit_calls(text)))
 
 

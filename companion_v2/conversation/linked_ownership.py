@@ -5,6 +5,7 @@ physical scopes remain the authority, delivery and source-provenance addresses.
 """
 from dataclasses import replace
 import json
+import threading
 from weakref import WeakKeyDictionary, ref
 
 from companion_v2.foundation.refs import ScopeKind, ScopeRef
@@ -60,8 +61,27 @@ def preferred_target_id(record):
 class _Index:
     def __init__(self):
         self.raw, self.rejected, self.members, self.scopes, self.removed, self.current = None, None, {}, {}, set(), False
+        # Bumped by every announced write: a load that overlapped one indexed a record that may be stale.
+        self.version, self.lock = 0, threading.Lock()
 
     def load(self, runtime):
+        with self.lock:
+            version = self.version
+            self._load(runtime)
+            if self.version == version:
+                self.current = True
+                if self.version != version:  # a write landed between the check and the store
+                    self.current = False
+
+    def private_copy(self):
+        """This index's last known tables in an index no other reader sees."""
+        copy = _Index()
+        with self.lock:
+            copy.raw, copy.rejected, copy.members, copy.scopes, copy.removed = (
+                self.raw, self.rejected, self.members, self.scopes, self.removed)
+        return copy
+
+    def _load(self, runtime):
         row = runtime.read_one("SELECT value FROM runtime_metadata WHERE key = ?", (LINKS_KEY,))
         raw = row["value"] if row else None
         if raw != self.raw:
@@ -76,7 +96,6 @@ class _Index:
                 removed.update((row["platform_id"], row["account_id"], row["participant_id"])
                                for row in record.get("detached", []))
             self.raw, self.members, self.scopes, self.removed = raw, members, scopes, removed - set(members)
-        self.current = True
 
 
 def _records_runtime(runtime):
@@ -94,19 +113,35 @@ def link_records_changed(runtime):
 
     A store no host has announced has no links and is never queried for them.
     """
-    _INDEXES.setdefault(_records_runtime(runtime), _Index()).current = False
+    index = _INDEXES.setdefault(_records_runtime(runtime), _Index())
+    index.version += 1
+    index.current = False
 
 
-def _lookup(runtime, table, key):
+def _resolved_index(runtime):
     runtime = _records_runtime(runtime)
     index = _INDEXES.get(runtime)
     if index is None:
         return None
-    if not index.current:
-        try:
-            index.load(runtime)
-        except Exception:  # noqa: BLE001 - any unreadable record keeps only its last known members closed
-            pass
+    private_view = getattr(runtime, "reads_private_view", None)
+    if private_view is not None and private_view():
+        # A pinned snapshot can predate the last commit and an open write can still roll
+        # back: such a read resolves membership from its own view, whatever the shared
+        # index holds, and what it loads is never published to other readers.
+        index = index.private_copy()
+    elif index.current:
+        return index
+    try:
+        index.load(runtime)
+    except Exception:  # noqa: BLE001 - any unreadable record keeps only its last known members closed
+        pass
+    return index
+
+
+def _lookup(runtime, table, key, index=None):
+    index = _resolved_index(runtime) if index is None else index
+    if index is None:
+        return None
     link = getattr(index, table).get(key)
     if link is not None and not index.current:
         from companion_v2.execution.models import TaskError
@@ -139,10 +174,10 @@ def endpoint_removed(runtime, platform, account, participant):
     Its native keys can be the shared owner's (the endpoint the conversation
     started on), so membership, never the key, decides what it may read.
     """
-    index = _INDEXES.get(_records_runtime(runtime))
+    index = _resolved_index(runtime)
     if index is None:
         return False
-    link_for_endpoint(runtime, platform, account, participant)
+    _lookup(runtime, "members", (platform, account, participant), index)
     return (platform, account, participant) in index.removed
 
 

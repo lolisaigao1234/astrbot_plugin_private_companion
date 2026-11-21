@@ -1,5 +1,6 @@
 from dataclasses import asdict, replace
 import json
+import time
 import unittest
 
 from companion_v2.configuration.models import ConfigurationError
@@ -148,6 +149,310 @@ class ReplyTextProcessingTests(unittest.TestCase):
                 '好的<pc_reaction_expression>{"purpose":"用`表情`回应",'
                 '"emotion":"开心","intensity":2}</pc_reaction_expression>'),
             "好的")
+
+    def test_bare_reasoning_draft_is_removed_without_eating_visible_reply(self):
+        draft = ("第一行正文\n"
+                 "th用户说「今天好累」。\n"
+                 "承认。\n"
+                 "「候选一」\n"
+                 "「候选二」\n"
+                 "1-2句。\n"
+                 "end实际正文\n"
+                 "第二行正文")
+        self.assertEqual(strip_internal_expression_protocol(draft),
+                         "第一行正文\n实际正文\n第二行正文")
+        # 无 th 前缀、但以“用户说/用户问”开头的草稿也要清理。
+        self.assertEqual(strip_internal_expression_protocol(
+            "回答。\n用户问「在吗」。\nend真正的回答"), "回答。\n真正的回答")
+        # 普通英文、代码与 ended/endpoint 不得误删。
+        for text in ("The end of the story", "end of story", "print('end')", "ended here",
+                     "endpoint ready"):
+            self.assertEqual(strip_internal_expression_protocol(text), text)
+
+    def test_word_ending_in_end_never_closes_a_bare_draft(self):
+        # 以「开头的正文里，friend/Legend/send/weekend 中的 end 不是草稿结束标记。
+        for text in ("「晚安」我先睡啦\n明天和friend\n一起去玩",
+                     "「嗯」我在呢~ 刚刚看完一集\n下周末要不要一起去Legend展？",
+                     "「早」\nsend",
+                     "Sure!\n「Weekend」 plans: this weekend\nok?"):
+            self.assertEqual(strip_internal_expression_protocol(text), text)
+
+    def test_visible_quoted_line_before_a_draft_is_kept(self):
+        # 草稿从后面真正的 th 行开始，不能从前面可见的「行开始一路吞掉。
+        self.assertEqual(strip_internal_expression_protocol(
+            "「晚安。」\nth用户说今天很累。\nend明天见。"), "「晚安。」\n明天见。")
+
+    def test_code_fence_after_quoted_line_is_kept(self):
+        # 代码块里的 end 不是草稿结束标记，围栏不能被吞成半截。
+        text = "「Ruby 示例」\n```ruby\ndef hi\n  puts 1\nend\n```\n好了"
+        self.assertEqual(strip_internal_expression_protocol(text), text)
+
+    def test_draft_closed_by_end_after_cjk_sentence_punctuation_is_removed(self):
+        # end 紧跟在。！？后面也是草稿结束标记。
+        self.assertEqual(strip_internal_expression_protocol(
+            "th用户问「在吗」。end我在。"), "我在。")
+        self.assertEqual(strip_internal_expression_protocol(
+            "第一行\nth用户说累。\n候选。1-2句。end实际正文"), "第一行\n实际正文")
+        # 。和 end 之间有空格也一样，在第一个 end 处结束，不能跨过它删到后面的 end。
+        self.assertEqual(strip_internal_expression_protocol(
+            "th先想。 end请保留这句。end 是结束的意思。"), "请保留这句。end 是结束的意思。")
+
+    def test_th_draft_runs_through_a_later_user_said_line_to_its_own_end(self):
+        # th 开头的草稿里出现“用户问”行，草稿第一行也不能漏出来。
+        self.assertEqual(strip_internal_expression_protocol(
+            "th先核对聊天记录。\n用户问还记得吗。\nend记得。"), "记得。")
+
+    def test_each_draft_opener_keeps_its_own_guards(self):
+        # th 草稿可以跨过 th/用户/「 行；用户说/用户问 草稿可以跨过其他 用户 行。
+        # 两者都在 ``` 行和不能收尾的行首 end 处停下。
+        for text, expected in (
+                ("th先想。\nth再想。\nend好的", "好的"),
+                ("用户说累了。\n用户问能不能休息。\nend好的", "好的"),
+                ("th用户说今天很累。\n用户问明天见吗。\n候选：好。\nend明天见。", "明天见。")):
+            with self.subTest(text=text):
+                self.assertEqual(strip_internal_expression_protocol(text), expected)
+
+    def test_inline_end_never_closes_a_quoted_reply(self):
+        # 「开头的是可见回复，。！？后面的 end 不能把它当草稿删掉。
+        # 「 正文里。！？后面的 end 也不能被跨过，否则会一路读到后面的行首 end，删掉中间的正文。
+        for text in ("「早」今天学了个新单词。end 是结束的意思哦",
+                     "「早」\n今天学了个新单词！end\n就是结束",
+                     "「早」今天学了个新单词。end 是结束的意思哦\n再见\nend 也可以当动词",
+                     "「早」今天学了个新单词。 end 是结束的意思哦\n再见\nend 也可以当动词"):
+            with self.subTest(text=text):
+                self.assertEqual(strip_internal_expression_protocol(text), text)
+
+    def test_a_draft_containing_a_backtick_line_is_left_visible(self):
+        # 草稿里出现以 ``` 开头的行（代码块、行内代码行、四个反引号……）时，分不清哪个 end
+        # 才是真的，整段原样保留：漏出草稿是 7.2.7 之前的现状，删掉可见正文才是新的伤害。
+        for text in (
+                # 以前会剥到草稿的 end 为止，现在整段保留。
+                "th先写个示例。\n```ruby\ndef hi\nend\n```\n再想想。\nend回答",
+                "th先写个示例。\r\n```ruby\r\ndef hi\r\nend\r\n```\r\n再想想。\r\nend回答",
+                "th先举例。\n```ruby\nputs 1\n````\nend代码如下：\n```\ndef f\nend\n```\n完",
+                "th先写。\n```text\n```example\nend\n```\nend回答",
+                "好的。\nth先装依赖：\n```gem install x```\n想好了。\nend代码如下：\n```\ndef f\nend\n```\n完",
+                "好的。\nth先装依赖：\n```pip install x``` 然后运行\n想好了。\nend代码如下。",
+                "好的。\nth先装依赖：\n```pip install x```。\n想好了。\nend代码如下。",
+                "好的。\nth先装依赖：\n```a``` 和 ```b```\n想好了。\nend代码如下。",
+                # 第 9 轮：行内代码后面的 。end、跨到下一行的第二段行内代码。
+                "th先想。\n```ls``` 就行。end请用 ls 查看。\nend 是结束标记。",
+                "th先举例。\n```a``` 和 ```第一行\nend\n第二行```\n再想想。\nend回答",
+                # 一直都原样保留的。
+                "th先写个示例。\n```ruby\ndef hi\nend\n再想想。\nend回答",
+                "回复\nth思考没有结尾\n正文\n```ruby\nif x\nend\n```",
+                "回复\nth思考没有结尾\n正文\n````ruby\nif x\nend\n````\n完",
+                "回复\nth思考没有结尾\n正文\n```ruby `x`\nif x\nend\n```\n完",
+                "th我写：\n````ruby\ndef f\nend\n````\nend回答",
+                "th先想想。\n```先运行 `ls`，再看\nend\n结果```\n这是正文",
+                "用户说要示例。\n```py\nx\n```\nend回答",
+                "「示例」\n```py\nx\n```\nend回答"):
+            with self.subTest(text=text):
+                self.assertEqual(strip_internal_expression_protocol(text), text)
+
+    def test_a_line_start_end_that_does_not_close_the_draft_is_a_boundary(self):
+        # 行首的 end 行如果不是这段草稿的结束标记，就分不清后面哪个 end 才是真的，
+        # 草稿不能跨过它，整段原样保留，不能删掉中间的正文。
+        for text in ("「候选」\n想想。\nend\n正文第一段。\nend 表示结束。",
+                     "th想。\nend of story\n正文。\nend回答"):
+            with self.subTest(text=text):
+                self.assertEqual(strip_internal_expression_protocol(text), text)
+
+    def test_nothing_is_stripped_inside_or_after_a_rejected_explicit_draft(self):
+        # th/用户 草稿被边界拒掉以后，不能在它里面或后面另起一段「/用户 匹配，删掉可见回答。
+        for text in ("th先想。\nend of story\n「候选」\n想好了。end请保留这句。\nend 是结束标记。",
+                     "th先想。\n```text\nfoo\n```\n「候选」\n想好了。end请保留这句。\nend 是结束标记。",
+                     "th先想。\nend of story\n「候选」\n试试。end正文第一段。\n正文第二段。\nend 表示结束。",
+                     "th先想。\nend of story\n用户说累了。\nend请保留这句。",
+                     "th想想。\n```x```\n「安装」说完了。end好的，装好了！\n今天学了个单词：\nend 是结束的意思",
+                     "th想。\nend of story\n「好」我想。end正文。\nend回答"):
+            with self.subTest(text=text):
+                self.assertEqual(strip_internal_expression_protocol(text), text)
+
+    def test_quoted_heading_followed_by_a_bare_end_line_is_kept(self):
+        # 「开头的可能是可见回复：单独一行的 end 后面没有中文，不是草稿结束标记。
+        for text in ("「英语词汇」\nend\n这个词既能作名词也能作动词。",
+                     "「英语词汇」\r\nend\r\n这个词既能作名词也能作动词。"):
+            with self.subTest(text=text):
+                self.assertEqual(strip_internal_expression_protocol(text), text)
+
+    def test_an_indented_th_identifier_before_an_end_line_follows_upstream(self):
+        # Ruby 里缩进的 th 标识符：CRLF 时 end 后面是 \r，不是结束标记，整段保留；
+        # LF 时和上游一样当草稿清理。
+        text = "def read_threshold\r\n  th阈值 = 3\r\nend\r\nputs read_threshold"
+        self.assertEqual(strip_internal_expression_protocol(text), text)
+        self.assertEqual(strip_internal_expression_protocol(
+            "def read_threshold\n  th阈值 = 3\nend\nputs read_threshold"),
+            "def read_threshold\n\nputs read_threshold")
+
+    def test_a_user_said_draft_with_a_crlf_end_line_is_kept(self):
+        # CRLF 时 end 后面是 \r，不是结束标记（上游也从不接受 \r）：草稿原样保留。
+        for text in ("回答。\r\n用户问「在吗」。\r\nend\r\n真正的回答",
+                     "用户问我 Ruby 循环怎么写。\r\n3.times do\r\n  puts 1\r\nend\r\n这会打印三次。",
+                     "用户说：“Ruby 方法以这一行收尾。”\r\nend\r\n这就是结束关键字。"):
+            with self.subTest(text=text):
+                self.assertEqual(strip_internal_expression_protocol(text), text)
+        # LF 时和上游一样在 end 行处结束。
+        self.assertEqual(strip_internal_expression_protocol(
+            "用户问我 Ruby 循环怎么写。\n3.times do\n  puts 1\nend\n这会打印三次。"), "\n这会打印三次。")
+        # 「 不再开启草稿，CRLF 下也原样保留。
+        text = "「候选」\r\n想想。\r\nend真正的回答"
+        self.assertEqual(strip_internal_expression_protocol(text), text)
+
+    def test_a_quoted_line_never_opens_a_draft(self):
+        # 「 是角色扮演里普通的可见文字，不是草稿标记：后面的 end 怎么排都不能删掉正文。
+        for text in ("「英语词汇」\nfriend 是朋友。\nend 是结束。",
+                     "「end」这个词有两个意思。\nend 作名词时表示结尾。",
+                     "示例：\n```text\n「标题」\nend结尾\n```\n完"):
+            with self.subTest(text=text):
+                self.assertEqual(strip_internal_expression_protocol(text), text)
+        # 第一遍去掉 <think> 后「 行到了行首，第二遍清理也不能把它当草稿。
+        visible = "「英语词汇」\n今天学的词是 end。\n这个词可以作动词。\nend 表示结束。"
+        once = strip_internal_expression_protocol("<think>想一想</think>" + visible)
+        self.assertEqual(once, visible)
+        self.assertEqual(strip_internal_expression_protocol(once), visible)
+
+    def test_an_opener_inside_a_code_fence_is_code(self):
+        # 代码块里的 用户说 = ... 是代码，不是草稿开头；未闭合的围栏之后也什么都不删。
+        for text in ("示例：\r\n```ruby\r\ndef demo\r\n  用户说 = \"你好\"\r\nend\r\n```\r\n",
+                     "示例：\n```ruby\ndef demo\n  用户说 = \"你好\"\nend\n```\n",
+                     "示例：\n```ruby\ndef demo\n  用户说 = \"你好\"\nend\n"):
+            with self.subTest(text=text):
+                self.assertEqual(strip_internal_expression_protocol(text), text)
+        # 围栏闭合之后的草稿照常清理。
+        self.assertEqual(strip_internal_expression_protocol(
+            "示例：\n```ruby\n用户说 = 1\nend\n```\nth想想。\nend好的"),
+            "示例：\n```ruby\n用户说 = 1\nend\n```\n好的")
+        # 缩进 4 个空格以上的 ``` 行是围栏内容，不会关掉围栏（CommonMark）。
+        for text in ("```text\r\n    ```\r\nth表示表头单元格。\r\nend\r\n```",
+                     "```text\r\n    ```\r\nth表示表头单元格。\r\nend表示结束。\r\n```",
+                     "```text\r\n    ```\r\nth发音示例\r\nend\r\n```\r\n"):
+            with self.subTest(text=text):
+                self.assertEqual(strip_internal_expression_protocol(text), text)
+        # 跨行的行内代码里的 th 行：CRLF 的单独 end 行不是结束标记，整段保留（和上游一样）。
+        for text in ("```甲``` 和 ```乙\r\nth发音示例\r\nend\r\n丙```",
+                     "```甲``` 和 ```乙\r\n用 ` ``` ` 表示围栏。\r\nth发音示例\r\nend\r\n丙```",
+                     "```甲``` 和 ```乙\r\n丙``` 再看 ```丁\r\nth发音示例\r\nend\r\n戊```",
+                     "th是 HTML 表头元素。\r\nRuby 写作 ```if ready\r\nend\r\n# 结束```",
+                     "示例：````甲\r\n中间有 ``` 三个反引号\r\nth表示表头单元格。\r\nend\r\n丙````"):
+            with self.subTest(text=text):
+                self.assertEqual(strip_internal_expression_protocol(text), text)
+        # 行内的 ` ``` ` 不影响后面的草稿：照常清理（和上游一致）。
+        self.assertEqual(strip_internal_expression_protocol(
+            "标记是 ` ``` `。\nth先想。\n<|DSML|tool_calls>\nend真正的回答。"),
+            "标记是 ` ``` `。\n真正的回答。")
+        # 列表项里缩进的 ``` 和 th 行：缩进的 th 不是草稿开头，整段保留。
+        for text in ("- ```text\r\n  th发音示例\r\n  end\r\n  ```\r\n",
+                     "1. 示例：\n\n    ```html\n    th表示表头单元格。\n    end表示结束。\n    ```\n\n2. 完"):
+            with self.subTest(text=text):
+                self.assertEqual(strip_internal_expression_protocol(text), text)
+        # 缩进 4 个空格的 ``` 行在围栏外也不是开头，后面顶格的草稿照常清理（和上游一致）。
+        self.assertEqual(strip_internal_expression_protocol(
+            "    ```\n\nth先想。\nend好的。"), "    ```\n\n好的。")
+        self.assertEqual(strip_internal_expression_protocol(
+            "- 步骤：\n    ```ruby\n    用户说 = 1\n    end\n    ```\nth想。\nend好的"),
+            "- 步骤：\n    ```ruby\n    用户说 = 1\n    end\n    ```\n好的")
+        # 四个反引号的围栏里，三个反引号的行只是内容，不会关掉围栏（CommonMark）。
+        for text in ("示例：\r\n````markdown\r\n```ruby\r\ndef demo\r\n  用户说 = \"你好\"\r\nend\r\n```\r\n````\r\n",
+                     "示例：\n````markdown\n```text\nth想。\nend好的\n```\n````\n"):
+            with self.subTest(text=text):
+                self.assertEqual(strip_internal_expression_protocol(text), text)
+        # 同一行闭合的 ```code``` 不是围栏开头，后面的草稿照常清理。
+        self.assertEqual(strip_internal_expression_protocol(
+            "先运行：\n```pip install requests```\nth我需要先判断用户的意图。\nend好了。"),
+            "先运行：\n```pip install requests```\n好了。")
+        self.assertEqual(strip_internal_expression_protocol(
+            "```gem install rails```\nth先确认安装命令。\nend安装命令如上。"),
+            "```gem install rails```\n安装命令如上。")
+
+    def test_a_user_manual_or_faq_heading_is_not_a_user_said_draft(self):
+        # 用户说明（使用说明书）、用户说法、用户问题/用户问卷/用户问答 这样的标题不是“用户说/用户问”草稿。
+        for text in ("用户说明：\r\n输入下面的命令退出。\r\n\r\n    end\r\n\r\n程序会关闭。",
+                     "用户问题汇总\r\n如何结束一个 Ruby 代码块？\r\n    end\r\n下一题。",
+                     "用户问卷\n请回答。\nend 表示结束。",
+                     "用户问答\n如何退出？\nend 表示结束。",
+                     "用户说法\n大家怎么说？\nend 表示结束。"):
+            with self.subTest(text=text):
+                self.assertEqual(strip_internal_expression_protocol(text), text)
+
+    def test_inline_end_right_after_cjk_closes_and_any_other_inline_end_bounds_a_draft(self):
+        # 上游文档里的 DeepSeek 形状 th…end<正文>：end 紧跟中文也是结束标记。
+        self.assertEqual(strip_internal_expression_protocol(
+            "th用户在问天气end今天晴天，记得带伞。\n明天见\nend 这个词是结束"),
+            "今天晴天，记得带伞。\n明天见\nend 这个词是结束")
+        # 逗号后面的 end 前面不是字母，后面是中文，和上游一样是结束标记。
+        self.assertEqual(strip_internal_expression_protocol(
+            "th想想，end 是什么\n正文\nend回答"), " 是什么\n正文\nend回答")
+        # 以 end 结尾的单词（weekend）也分不清是不是结束标记，同样是边界：整段保留。
+        for text in ("th用户说weekend要出去。\nend好的",
+                     "用户问我什么是 weekend\n它指周末。\nend 表示结束。",
+                     "th先确认缩写是APIend这里是正文。\nend 是结束标记。",
+                     "th用户想学friend这个词\n好呀！friend 是朋友的意思。\nend呢，是结束的意思。"):
+            with self.subTest(text=text):
+                self.assertEqual(strip_internal_expression_protocol(text), text)
+        # end 后面紧跟字母（endpoint、ended）只是普通文字，草稿照常在自己的 end 处结束。
+        self.assertEqual(strip_internal_expression_protocol(
+            "th用户说endpoint已经ended了。\nend好的"), "好的")
+
+    def test_a_bare_end_line_before_lf_closes_a_draft(self):
+        # 草稿在单独一行的 end 处结束（LF 或到结尾；end 后面的空白和上游一样留在回答里），
+        # 否则草稿里没闭合的控制标签或 DSML 会让后面的清理截掉可见回答（和上游一致）。
+        for text, expected in (
+                ("th想一下。\nend\n第一段讲解。", "\n第一段讲解。"),
+                ("th想一下。\nend  \n第一段讲解。", "  \n第一段讲解。"),
+                ("th想一下。\nend\t\n正文", "\t\n正文"),
+                ("th想一下。\n  end\n第一段讲解。", "\n第一段讲解。"),
+                ("正文。\n  th想一下。\nend好的", "正文。\n好的"),
+                ("th想一下。\nend", ""),
+                ("th回复里不要写 <pc_reaction_expression>。\nend\n今天晴天。", "\n今天晴天。"),
+                ("正文开头。\nth先想。\n<|DSML|tool_calls>\nend\n真正的回答。", "正文开头。\n\n真正的回答。")):
+            with self.subTest(text=text):
+                self.assertEqual(strip_internal_expression_protocol(text), expected)
+        # CRLF 的单独 end 行不算（上游也从不接受 \r）：整段保留。
+        for text in ("th想一下。\r\nend\r\n第一段讲解。end 是结束标记。",
+                     "术语表：\r\nth表示表头。\r\nend\r\n以上是两个词条。"):
+            with self.subTest(text=text):
+                self.assertEqual(strip_internal_expression_protocol(text), text)
+
+    def test_a_draft_upstream_strips_is_stripped_so_later_cleanup_cannot_truncate(self):
+        # 上游会清理、而本分支留下的草稿，会让后面的清理把草稿里的标签或反引号和可见回答配对，
+        # 截掉回答。这些形状按上游的结果清理。
+        for text, expected in (
+                ("用户问先想。<think>\nend\n真正的回答。</think>", "\n真正的回答。"),
+                ("  th先想。`end实际正文：`<think>示例</think>`。", "实际正文：`<think>示例</think>`。"),
+                ("th先想。示例用 ```xml 开头。\n  end\n下面是示例。\n```xml\n"
+                 "<pc_reaction_expression>\n```\n最后一步。",
+                 "\n下面是示例。\n```xml\n<pc_reaction_expression>\n```\n最后一步。")):
+            with self.subTest(text=text):
+                self.assertEqual(strip_internal_expression_protocol(text), expected)
+
+    def test_th_draft_with_many_fences_and_no_end_finishes_quickly(self):
+        # 没有 end 的 th 草稿里有很多代码块时，正则不能指数级回溯卡住事件循环。
+        cases = {
+            "trailing spaces after each close":
+                "th想一下。\n" + "```py\nx.append(1)\n```      \n正文\n" * 40 + "结尾",
+            "one-line snippet shifts the pairing":
+                "th用户想要几个例子，我整理一下\n先装依赖：\n```pip install requests```\n"
+                + "".join("例子%d：\n```python\nitems.append(%d)\n```\n" % (i, i)
+                          for i in range(7)) + "就这些。",
+            "text after each closing fence":
+                "th让我想想\n" + "".join("```python\nitems.append(%d)\n```  说明\n" % i
+                                       for i in range(8)) + "```\n截断",
+            "bare fence mentioned in the draft":
+                "好的。\nth用户要几段示例，每段用\n```\n包起来，逐段解释。\n下面是示例：\n"
+                + "```python\nitems.append(0)\n```\n第0段说明。\n" * 8,
+            "CRLF with trailing spaces after each close":
+                "th想一下。\r\n" + "```py\r\nx.append(1)\r\n```      \r\n正文\r\n" * 40 + "结尾",
+            "four-backtick fences":
+                "th想一下。\n" + "````py\nx.append(1)\n````      \n正文\n" * 40 + "结尾",
+            "many 用户 openers before a boundary":
+                "用户说。\n" * 4000 + "end of story\nend回答",
+        }
+        for name, text in cases.items():
+            with self.subTest(name):
+                start = time.perf_counter()
+                self.assertEqual(strip_internal_expression_protocol(text), text)
+                self.assertLess(time.perf_counter() - start, 0.5)
 
     def test_control_block_cleanup_handles_escaping_fullwidth_orphans_and_unknown_names(self):
         self.assertEqual(strip_internal_expression_protocol(

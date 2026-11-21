@@ -407,6 +407,7 @@ class StorageRuntime:
         self._slow_operation_clock = time.monotonic
         self._write_depth = 0
         self._write_owner_thread_id: int | None = None
+        self._transaction_rollback_epoch = 0
         self._configuration_only = False
         self._configuration_store: StorageRuntime | None = None
 
@@ -657,6 +658,7 @@ class StorageRuntime:
                         connection.execute(f"RELEASE SAVEPOINT {savepoint}")
                     else:
                         connection.execute("ROLLBACK")
+                    self._transaction_rollback_epoch += 1
                     rollback_ms = round((time.perf_counter() - rollback_started) * 1000)
                 raise
             finally:
@@ -716,6 +718,17 @@ class StorageRuntime:
                         self._report_slow_operation("read_snapshot", started, lock_acquired, finished)
                 finally:
                     del self._read_snapshot_diagnostics.current
+
+    def reads_private_view(self) -> bool:
+        """Whether this thread's reads may differ from the latest committed state.
+
+        Inside ``read_snapshot`` they come from a pinned snapshot that can predate
+        later commits; inside a write transaction this thread owns they include
+        changes that may still roll back.
+        """
+
+        return (getattr(self._read_snapshot_diagnostics, "current", None) is not None
+                or self._write_owner_thread_id == get_ident())
 
     @contextmanager
     def _reader_connection(self) -> Iterator[sqlite3.Connection]:
