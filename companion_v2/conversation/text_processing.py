@@ -64,21 +64,24 @@ _TOOL_CALL_PROTOCOL_START = re.compile(
 _TOOL_CALL_PROTOCOL_BLANKS = re.compile(r"\n{3,}")
 # Some providers expose free-form reasoning as plain text with no XML wrapper.
 # DeepSeek V4-style drafts have the shape "th...end<visible text>" after the
-# first visible paragraph.  The closing `end` must be followed by CJK/newline
-# and never follow a letter, so ordinary English prose is untouched and words
-# like friend/send/Legend never close a draft.  Each opener has its own guards:
+# first visible paragraph.  The closing `end` must be followed by CJK or a
+# (CR)LF line break and never follow a letter, so ordinary English prose is
+# untouched and words like friend/send/Legend never close a draft.  Each opener
+# has its own guards:
 # - `th` + CJK is an explicit draft: its body crosses anything and closes at
-#   a line-start `end` or an `end` right after 。！？.  A ``` fenced block
-#   is skipped as one unit, so a code `end` inside it never closes the
-#   draft; an unclosed fence cannot be crossed, so that draft is kept.
-#   A fence opens at a ``` line whose info string has no backtick
-#   (CommonMark), so a one-line ```code``` span is ordinary content.  Only
-#   a bare ``` line (optional blanks, then an optional CRLF `\r`) closes
-#   a fence, so ```example inside a block is content.  The body steps
-#   onto an opener line only through the fence unit, which runs to the
-#   first closer and consumes it up to `$`; each ``` line is then an
-#   opener, a closer or plain content in exactly one way, which keeps the
-#   match linear instead of exponential.
+#   a line-start `end` or an `end` right after 。！？.  Every line starting
+#   with ``` is exactly one of three kinds, so each line has one parse and the
+#   match stays linear:
+#   (a) a fence opener, ``` plus an info string without backticks
+#       (CommonMark).  It is crossed only as a whole fenced block that ends at
+#       the first bare ``` line (optional blanks and CRLF `\r`), so a code
+#       `end` inside never closes the draft and ```example inside is content;
+#       an unclosed fence cannot be crossed.
+#   (b) a one-line code span, ```code``` closed on the same line, crossed as
+#       one unit.
+#   (c) anything else (four or more backticks, an inline span left open):
+#       a boundary the draft cannot cross.  The draft then stays visible
+#       rather than deleting visible text after it.
 # - 用户说/用户问: the body stops only at a ``` fence line, so a code block's
 #   `end` is never the close.  It closes like `th`.
 # - 「 may be a visible reply: the body stops at a later th/用户说/用户问 opener
@@ -87,11 +90,12 @@ _BARE_DRAFT_BLOCK = re.compile(
     r"(?ms)^[ \t]*(?:"
     r"th(?=[\u4e00-\u9fff])(?:"
     r"^[ \t]*```[^`\n]*\n(?:(?!^[ \t]*```[ \t]*\r?$)[\s\S])*^[ \t]*```[ \t]*\r?$"
-    r"|(?!^[ \t]*```[^`\n]*$)[\s\S])*?(?:^[ \t]*|(?<=[。！？]))"
+    r"|^[ \t]*```[^`\n]+```[ \t]*\r?$"
+    r"|(?!^[ \t]*```)[\s\S])*?(?:^[ \t]*|(?<=[。！？]))"
     r"|(?=用户(?:说|问))(?:[^\n]|\n(?![ \t]*```))*?(?:^[ \t]*|(?<=[。！？]))"
     r"|(?=「)(?:[^\n]|\n(?![ \t]*(?:th(?=[\u4e00-\u9fff])|用户(?:说|问)|```)))*?"
     r"^[ \t]*"
-    r")end(?![A-Za-z])(?=[ \t]*(?:[\u4e00-\u9fff]|\n|$))"
+    r")end(?![A-Za-z])(?=[ \t]*(?:[\u4e00-\u9fff]|\r?\n|$))"
 )
 _PAIRS = {"(": ")", "[": "]", "{": "}", "（": "）", "【": "】", "《": "》",
           "〈": "〉", "「": "」", "『": "』", "“": "”", "‘": "’", '"': '"'}
