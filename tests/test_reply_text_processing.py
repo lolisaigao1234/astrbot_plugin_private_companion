@@ -225,6 +225,9 @@ class ReplyTextProcessingTests(unittest.TestCase):
         # 没有自己结尾的 th 行不能一路吞到后面代码块里的 end。
         text = "回复\nth思考没有结尾\n正文\n```ruby\nif x\nend\n```"
         self.assertEqual(strip_internal_expression_protocol(text), text)
+        # CRLF 换行时闭合围栏行尾带 \r，也要认作闭合，整段草稿（含 \r\n）都在匹配里。
+        self.assertEqual(strip_internal_expression_protocol(
+            "th先写个示例。\r\n```ruby\r\ndef hi\r\nend\r\n```\r\n再想想。\r\nend回答"), "回答")
 
     def test_only_a_bare_backtick_line_closes_a_fence_in_a_th_draft(self):
         # ```example 这样带文字的行是代码块内容，不是闭合围栏。
@@ -246,6 +249,8 @@ class ReplyTextProcessingTests(unittest.TestCase):
             "bare fence mentioned in the draft":
                 "好的。\nth用户要几段示例，每段用\n```\n包起来，逐段解释。\n下面是示例：\n"
                 + "```python\nitems.append(0)\n```\n第0段说明。\n" * 8,
+            "CRLF with trailing spaces after each close":
+                "th想一下。\r\n" + "```py\r\nx.append(1)\r\n```      \r\n正文\r\n" * 40 + "结尾",
         }
         for name, text in cases.items():
             with self.subTest(name):
