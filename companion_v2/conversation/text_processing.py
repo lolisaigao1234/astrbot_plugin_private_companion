@@ -71,11 +71,12 @@ _TOOL_CALL_PROTOCOL_BLANKS = re.compile(r"\n{3,}")
 #   a line-start `end` or an `end` right after 。！？.  A ``` fenced block
 #   is skipped as one unit, so a code `end` inside it never closes the
 #   draft; an unclosed fence cannot be crossed, so that draft is kept.
-#   Only a bare ``` line (optional blanks) closes a fence, so ```example
-#   inside a block is content.  The body steps onto a ``` line only
-#   through the fence unit, which runs to the first closer and consumes
-#   it up to `$`; each ``` line is then an opener or a closer in exactly
-#   one way, which keeps the match linear instead of exponential.
+#   Only a bare ``` line (optional blanks, then an optional CRLF `\r`)
+#   closes a fence, so ```example inside a block is content.  The body
+#   steps onto a ``` line only through the fence unit, which runs to the
+#   first closer and consumes it up to `$`; each ``` line is then an
+#   opener or a closer in exactly one way, which keeps the match linear
+#   instead of exponential.
 # - 用户说/用户问: the body stops only at a ``` fence line, so a code block's
 #   `end` is never the close.  It closes like `th`.
 # - 「 may be a visible reply: the body stops at a later th/用户说/用户问 opener
@@ -83,7 +84,7 @@ _TOOL_CALL_PROTOCOL_BLANKS = re.compile(r"\n{3,}")
 _BARE_DRAFT_BLOCK = re.compile(
     r"(?ms)^[ \t]*(?:"
     r"th(?=[\u4e00-\u9fff])(?:"
-    r"^[ \t]*```[^\n]*\n(?:(?!^[ \t]*```[ \t]*$)[\s\S])*^[ \t]*```[ \t]*$"
+    r"^[ \t]*```[^\n]*\n(?:(?!^[ \t]*```[ \t]*\r?$)[\s\S])*^[ \t]*```[ \t]*\r?$"
     r"|(?!^[ \t]*```)[\s\S])*?(?:^[ \t]*|(?<=[。！？]))"
     r"|(?=用户(?:说|问))(?:[^\n]|\n(?![ \t]*```))*?(?:^[ \t]*|(?<=[。！？]))"
     r"|(?=「)(?:[^\n]|\n(?![ \t]*(?:th(?=[\u4e00-\u9fff])|用户(?:说|问)|```)))*?"
