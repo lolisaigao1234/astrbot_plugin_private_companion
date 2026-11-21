@@ -323,14 +323,23 @@ class ReplyTextProcessingTests(unittest.TestCase):
         # 缩进 4 个空格以上的 ``` 行是围栏内容，不会关掉围栏（CommonMark）。
         for text in ("```text\r\n    ```\r\nth表示表头单元格。\r\nend\r\n```",
                      "```text\r\n    ```\r\nth表示表头单元格。\r\nend表示结束。\r\n```",
-                     "```text\r\n    ```\r\nth发音示例\r\nend\r\n```\r\n",
-                     "```甲``` 和 ```乙\r\nth发音示例\r\nend\r\n丙```",
-                     "- ```text\r\n  th发音示例\r\n  end\r\n  ```\r\n"):
+                     "```text\r\n    ```\r\nth发音示例\r\nend\r\n```\r\n"):
             with self.subTest(text=text):
                 self.assertEqual(strip_internal_expression_protocol(text), text)
-        # 缩进 4 个空格的 ``` 行在围栏外也不是开头，后面的草稿照常清理（和上游一致）。
+        # 跨行的行内代码（一行里 ``` 是奇数个）里的 th 行是代码，不是草稿开头。
+        text = "```甲``` 和 ```乙\r\nth发音示例\r\nend\r\n丙```"
+        self.assertEqual(strip_internal_expression_protocol(text), text)
+        # 列表项里缩进的 ``` 和 th 行：缩进的 th 不是草稿开头，整段保留。
+        for text in ("- ```text\r\n  th发音示例\r\n  end\r\n  ```\r\n",
+                     "1. 示例：\n\n    ```html\n    th表示表头单元格。\n    end表示结束。\n    ```\n\n2. 完"):
+            with self.subTest(text=text):
+                self.assertEqual(strip_internal_expression_protocol(text), text)
+        # 缩进 4 个空格的 ``` 行在围栏外也不是开头，后面顶格的草稿照常清理（和上游一致）。
         self.assertEqual(strip_internal_expression_protocol(
             "    ```\n\nth先想。\nend好的。"), "    ```\n\n好的。")
+        self.assertEqual(strip_internal_expression_protocol(
+            "- 步骤：\n    ```ruby\n    用户说 = 1\n    end\n    ```\nth想。\nend好的"),
+            "- 步骤：\n    ```ruby\n    用户说 = 1\n    end\n    ```\n好的")
         # 四个反引号的围栏里，三个反引号的行只是内容，不会关掉围栏（CommonMark）。
         for text in ("示例：\r\n````markdown\r\n```ruby\r\ndef demo\r\n  用户说 = \"你好\"\r\nend\r\n```\r\n````\r\n",
                      "示例：\n````markdown\n```text\nth想。\nend好的\n```\n````\n"):
@@ -373,11 +382,21 @@ class ReplyTextProcessingTests(unittest.TestCase):
         self.assertEqual(strip_internal_expression_protocol(
             "th用户说endpoint已经ended了。\nend好的"), "好的")
 
-    def test_a_bare_end_line_never_closes_a_th_draft(self):
-        # end 后面同一行没有中文（换行、CRLF 或到结尾）就不是结束标记，是边界：整段保留。
-        for text in ("th想一下。\r\nend\r\n第一段讲解。end 是结束标记。",
-                     "th想一下。\nend\n第一段讲解。",
-                     "th想一下。\nend"):
+    def test_an_unindented_bare_end_line_closes_a_th_draft(self):
+        # 顶格的 th 草稿在顶格单独一行的 end 处结束（LF、CRLF、行尾空白或到结尾），
+        # 否则草稿里没闭合的控制标签或 DSML 会让后面的清理截掉可见回答（和上游一致）。
+        for text, expected in (
+                ("th想一下。\r\nend\r\n第一段讲解。end 是结束标记。", "\r\n第一段讲解。end 是结束标记。"),
+                ("th想一下。\nend\n第一段讲解。", "\n第一段讲解。"),
+                ("th想一下。\nend  \n第一段讲解。", "\n第一段讲解。"),
+                ("th想一下。\nend", ""),
+                ("th回复里不要写 <pc_reaction_expression>。\nend\n今天晴天。", "\n今天晴天。"),
+                ("正文开头。\nth先想。\n<|DSML|tool_calls>\nend\n真正的回答。", "正文开头。\n\n真正的回答。")):
+            with self.subTest(text=text):
+                self.assertEqual(strip_internal_expression_protocol(text), expected)
+        # 缩进的 end 行、缩进的 th 行都不算：整段保留。
+        for text in ("th想一下。\n  end\n第一段讲解。",
+                     "正文。\n  th想一下。\nend好的"):
             with self.subTest(text=text):
                 self.assertEqual(strip_internal_expression_protocol(text), text)
 

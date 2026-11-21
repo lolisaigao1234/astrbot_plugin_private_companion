@@ -65,27 +65,38 @@ _TOOL_CALL_PROTOCOL_BLANKS = re.compile(r"\n{3,}")
 # Some providers expose free-form reasoning as plain text with no XML wrapper:
 # "th...end<visible text>".  Strip a draft only when it is unambiguous: a
 # leaked draft is the status quo before 7.2.7, deleted visible text is a new
-# harm.  Only `th` + CJK or 用户说/用户问 opens a draft (not the headings
-# 用户说明/用户说法/用户问题/用户问卷/用户问答, and not inside a ``` fence);
-# 「 is ordinary role-play text.  A draft closes at `end` that starts a line,
-# follows 。！？ (blanks allowed) or follows CJK, and only when CJK follows that
-# `end` on the same line (upstream's end实际正文 shape); a bare `end` line is
-# code or prose.  A body crosses no line starting with ``` and no other `end`
-# not followed by a letter (so weekend and APIend are boundaries, endpoint is
-# text); such a draft stays visible.
+# harm.  Only `th` + CJK or 用户说/用户问 at column 0 opens a draft (not the
+# headings 用户说明/用户说法/用户问题/用户问卷/用户问答, and not inside a ```
+# fence or a multiline ```span```); 「 is ordinary role-play text.  A draft
+# closes at `end` that starts a line, follows 。！？ (blanks allowed) or follows
+# CJK, when CJK follows that `end` on the same line (upstream's end实际正文
+# shape).  A `th` draft also closes at a bare `end` line at column 0, since a
+# leaked draft can hide an unclosed control tag that a later cleanup cuts the
+# reply at; an indented bare `end` is code.  A body crosses no line starting
+# with ``` and no other `end` not followed by a letter (so weekend and APIend
+# are boundaries, endpoint is text); such a draft stays visible.  The body's
+# ``` boundary allows any indent and is deliberately stricter than the 0-3
+# space _FENCE_OPENER/_FENCE_CLOSER; do not unify them.
+_DRAFT_BODY = r"(?:(?!^[ \t]*```|end(?![A-Za-z]))[\s\S])*?"
+_DRAFT_CLOSE_BEFORE_CJK = (
+    r"(?:^[ \t]*|(?<=[。！？])[ \t]*|(?<=[\u4e00-\u9fff]))end(?=[ \t]*[\u4e00-\u9fff])")
 _BARE_DRAFT_BLOCK = re.compile(
-    r"(?ms)^[ \t]*(?:th(?=[\u4e00-\u9fff])|(?=用户(?:说(?![明法])|问(?![题卷答]))))"
-    r"(?:(?!^[ \t]*```|end(?![A-Za-z]))[\s\S])*?"
-    r"(?:^[ \t]*|(?<=[。！？])[ \t]*|(?<=[\u4e00-\u9fff]))"
-    r"end(?=[ \t]*[\u4e00-\u9fff])"
+    r"(?ms)^(?:"
+    r"th(?=[\u4e00-\u9fff])" + _DRAFT_BODY
+    + r"(?:" + _DRAFT_CLOSE_BEFORE_CJK + r"|^end[ \t]*(?=\r?\n|$))"
+    r"|(?=用户(?:说(?![明法])|问(?![题卷答])))" + _DRAFT_BODY + _DRAFT_CLOSE_BEFORE_CJK
+    + r")"
 )
 # Where a draft match may start: the same line starts the regex accepts.
 _BARE_DRAFT_OPENER = re.compile(
-    r"(?m)^[ \t]*(?:th(?=[\u4e00-\u9fff])|用户(?:说(?![明法])|问(?![题卷答])))")
-# A CommonMark fence line: at most three spaces, a run of three or more
-# backticks, and the rest of the line.
-_FENCE_LINE = re.compile(r"(?m)^ {0,3}(`{3,})(.*)$")
-_FENCE_CLOSER_REST = re.compile(r"[ \t]*\r?")
+    r"(?m)^(?:th(?=[\u4e00-\u9fff])|用户(?:说(?![明法])|问(?![题卷答])))")
+# Lines holding a ``` run, and the CommonMark fence lines among them: at most
+# three spaces, a run of three or more backticks, then an info string without
+# backticks (opener) or only blanks (closer).
+_BACKTICK_LINE = re.compile(r"(?m)^.*```.*$")
+_BACKTICK_RUN = re.compile(r"`{3,}")
+_FENCE_OPENER = re.compile(r" {0,3}(`{3,})[^`]*")
+_FENCE_CLOSER = re.compile(r" {0,3}(`{3,})[ \t]*\r?")
 _PAIRS = {"(": ")", "[": "]", "{": "}", "（": "）", "【": "】", "《": "》",
           "〈": "〉", "「": "」", "『": "』", "“": "”", "‘": "’", '"': '"'}
 
@@ -581,25 +592,42 @@ def unwrap_text_emit_calls(text):
     return visible
 
 
-def _fenced_regions(text):
-    """(start, end) spans of ``` fences, CommonMark style, in one pass.
+def _code_regions(text):
+    """(start, end) spans of code a draft opener must not start in, one pass.
 
-    Fence lines are indented by at most three spaces; a line indented more
-    is content inside a fence and never an opener outside one.  Outside a
-    fence, a backtick run of n >= 3 opens a fence when the rest of the line
-    has no backtick (so ```code``` on one line is not an opener).  Inside,
-    only a bare run of at least n backticks closes it; any other backtick
-    line is content.  An unclosed fence runs to the end of the text.
+    Fences follow CommonMark: an opener or closer is indented by at most
+    three spaces.  Outside a fence, a run of n >= 3 backticks opens one when
+    the rest of the line has no backtick; inside, only a bare run of at least
+    n backticks closes it.  Outside a fence, a line with an odd number of ```
+    runs that is not an opener (```甲``` 和 ```乙) opens a multiline inline
+    span that ends at the next line holding a ``` run; a line indented four
+    or more columns is indented code and opens no span.  If that next line
+    opens a fence, the span gives way to the fence.  An unclosed fence or
+    span runs to the end of the text.
     """
-    regions, start, length = [], None, 0
-    for line in _FENCE_LINE.finditer(text):
-        run, rest = line.group(1), line.group(2)
-        if start is None:
-            if "`" not in rest:
-                start, length = line.start(), len(run)
-        elif len(run) >= length and _FENCE_CLOSER_REST.fullmatch(rest):
-            regions.append((start, line.end()))
-            start = None
+    regions, start, fence = [], None, 0
+    for line in _BACKTICK_LINE.finditer(text):
+        content = line.group()
+        if start is not None and fence:
+            closer = _FENCE_CLOSER.fullmatch(content)
+            if closer and len(closer.group(1)) >= fence:
+                regions.append((start, line.end()))
+                start = None
+            continue
+        opener = _FENCE_OPENER.fullmatch(content)
+        if start is not None:
+            if opener is None:
+                regions.append((start, line.end()))
+                start = None
+                continue
+            regions.append((start, line.start()))
+        if opener is not None:
+            start, fence = line.start(), len(opener.group(1))
+        else:
+            expanded = content.expandtabs(4)
+            if (len(expanded) - len(expanded.lstrip(" ")) < 4
+                    and len(_BACKTICK_RUN.findall(content)) % 2):
+                start, fence = line.start(), 0
     if start is not None:
         regions.append((start, len(text)))
     return regions
@@ -608,11 +636,11 @@ def _fenced_regions(text):
 def _strip_bare_drafts(text):
     """Remove unambiguous bare drafts, scanning openers left to right.
 
-    An opener inside a ``` fence is code and is skipped.  Any other opener
-    that does not match is an explicit draft the regex rejected, so nothing
-    inside or after it is stripped.
+    An opener inside a ``` fence or multiline ```span``` is code and is
+    skipped.  Any other opener that does not match is an explicit draft the
+    regex rejected, so nothing inside or after it is stripped.
     """
-    regions, region = _fenced_regions(text), 0
+    regions, region = _code_regions(text), 0
     kept, copied, pos = [], 0, 0
     while (opener := _BARE_DRAFT_OPENER.search(text, pos)) is not None:
         while region < len(regions) and regions[region][1] <= opener.start():
