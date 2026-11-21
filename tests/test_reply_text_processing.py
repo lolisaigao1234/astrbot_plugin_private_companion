@@ -234,6 +234,13 @@ class ReplyTextProcessingTests(unittest.TestCase):
         self.assertEqual(strip_internal_expression_protocol(
             "th先写。\n```text\n```example\nend\n```\nend回答"), "回答")
 
+    def test_one_line_code_span_in_a_th_draft_is_not_a_fence_opener(self):
+        # ```gem install x``` 是行内代码，不是围栏开头；草稿在自己的 end 处结束，
+        # 后面可见代码块里的 Ruby end 不能被吞掉。
+        self.assertEqual(strip_internal_expression_protocol(
+            "好的。\nth先装依赖：\n```gem install x```\n想好了。\nend代码如下：\n```\ndef f\nend\n```\n完"),
+            "好的。\n代码如下：\n```\ndef f\nend\n```\n完")
+
     def test_th_draft_with_many_fences_and_no_end_finishes_quickly(self):
         # 没有 end 的 th 草稿里有很多代码块时，正则不能指数级回溯卡住事件循环。
         cases = {
