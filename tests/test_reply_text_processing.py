@@ -193,6 +193,9 @@ class ReplyTextProcessingTests(unittest.TestCase):
             "th用户问「在吗」。end我在。"), "我在。")
         self.assertEqual(strip_internal_expression_protocol(
             "第一行\nth用户说累。\n候选。1-2句。end实际正文"), "第一行\n实际正文")
+        # 。和 end 之间有空格也一样，在第一个 end 处结束，不能跨过它删到后面的 end。
+        self.assertEqual(strip_internal_expression_protocol(
+            "th先想。 end请保留这句。end 是结束的意思。"), "请保留这句。end 是结束的意思。")
 
     def test_th_draft_runs_through_a_later_user_said_line_to_its_own_end(self):
         # th 开头的草稿里出现“用户问”行，草稿第一行也不能漏出来。
@@ -214,7 +217,8 @@ class ReplyTextProcessingTests(unittest.TestCase):
         # 「 正文里。！？后面的 end 也不能被跨过，否则会一路读到后面的行首 end，删掉中间的正文。
         for text in ("「早」今天学了个新单词。end 是结束的意思哦",
                      "「早」\n今天学了个新单词！end\n就是结束",
-                     "「早」今天学了个新单词。end 是结束的意思哦\n再见\nend 也可以当动词"):
+                     "「早」今天学了个新单词。end 是结束的意思哦\n再见\nend 也可以当动词",
+                     "「早」今天学了个新单词。 end 是结束的意思哦\n再见\nend 也可以当动词"):
             with self.subTest(text=text):
                 self.assertEqual(strip_internal_expression_protocol(text), text)
 
