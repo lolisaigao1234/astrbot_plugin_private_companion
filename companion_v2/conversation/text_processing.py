@@ -70,8 +70,9 @@ _TOOL_CALL_PROTOCOL_BLANKS = re.compile(r"\n{3,}")
 # A close is `end` followed by CJK, a (CR)LF or the end of the text, never a
 # letter (friend/send/Legend).  `th` + CJK crosses 用户/「/th lines and closes at
 # a line-start `end` or one right after 。！？; 用户说/用户问 closes the same
-# way; 「 may be visible text, so it stops at a later th/用户 line and closes
-# only at a line-start `end` followed by CJK on the same line.
+# way; 「 may be visible text, so it stops at a later th/用户 line or at an
+# inline `end` after 。！？, and closes only at a line-start `end` followed by
+# CJK on the same line.
 _BARE_DRAFT_BLOCK = re.compile(
     r"(?ms)^[ \t]*(?:"
     r"th(?=[\u4e00-\u9fff])"
@@ -79,7 +80,8 @@ _BARE_DRAFT_BLOCK = re.compile(
     r"|(?=用户(?:说|问))"
     r"(?:(?!^[ \t]*(?:```|end(?![A-Za-z])))[\s\S])*?(?:^[ \t]*|(?<=[。！？]))"
     r"|(?=「)"
-    r"(?:(?!^[ \t]*(?:```|end(?![A-Za-z])|th(?=[\u4e00-\u9fff])|用户(?:说|问)))[\s\S])*?"
+    r"(?:(?!^[ \t]*(?:```|end(?![A-Za-z])|th(?=[\u4e00-\u9fff])|用户(?:说|问))"
+    r"|(?<=[。！？])end(?![A-Za-z]))[\s\S])*?"
     r"^[ \t]*(?=end[ \t]*[\u4e00-\u9fff])"
     r")end(?![A-Za-z])(?=[ \t]*(?:[\u4e00-\u9fff]|\r?\n|$))"
 )
