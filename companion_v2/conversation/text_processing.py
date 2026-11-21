@@ -83,6 +83,8 @@ _BARE_DRAFT_BLOCK = re.compile(
     r"^[ \t]*(?=end[ \t]*[\u4e00-\u9fff])"
     r")end(?![A-Za-z])(?=[ \t]*(?:[\u4e00-\u9fff]|\r?\n|$))"
 )
+# Where a draft match may start: the same line starts the regex accepts.
+_BARE_DRAFT_OPENER = re.compile(r"(?m)^[ \t]*(?:th(?=[\u4e00-\u9fff])|用户(?:说|问)|(?P<quote>「))")
 _PAIRS = {"(": ")", "[": "]", "{": "}", "（": "）", "【": "】", "《": "》",
           "〈": "〉", "「": "」", "『": "』", "“": "”", "‘": "’", '"': '"'}
 
@@ -578,10 +580,31 @@ def unwrap_text_emit_calls(text):
     return visible
 
 
+def _strip_bare_drafts(text):
+    """Remove unambiguous bare drafts, scanning openers left to right.
+
+    A th or 用户 opener that does not match is an explicit draft the regex
+    rejected, so nothing inside or after it is stripped.  A 「 opener that
+    does not match is probably visible text; the scan moves on.
+    """
+    kept, copied, pos = [], 0, 0
+    while (opener := _BARE_DRAFT_OPENER.search(text, pos)) is not None:
+        draft = _BARE_DRAFT_BLOCK.match(text, opener.start())
+        if draft is not None:
+            kept.append(text[copied:draft.start()])
+            copied = pos = draft.end()
+        elif opener.group("quote"):
+            pos = opener.end()
+        else:
+            break
+    kept.append(text[copied:])
+    return "".join(kept)
+
+
 def strip_internal_expression_protocol(text):
     """Remove internal control blocks and unparsed tool-call syntax."""
     if type(text) is str and "end" in text:
-        text = _BARE_DRAFT_BLOCK.sub("", text)
+        text = _strip_bare_drafts(text)
     return strip_tool_call_protocol(strip_paired_control_blocks(unwrap_text_emit_calls(text)))
 
 
