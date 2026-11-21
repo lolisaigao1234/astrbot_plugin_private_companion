@@ -74,27 +74,35 @@ _TOOL_CALL_PROTOCOL_BLANKS = re.compile(r"\n{3,}")
 #   match stays linear:
 #   (a) a fence opener, ``` plus an info string without backticks
 #       (CommonMark).  It is crossed only as a whole fenced block that ends at
-#       the first bare ``` line (optional blanks and CRLF `\r`), so a code
-#       `end` inside never closes the draft and ```example inside is content;
-#       an unclosed fence cannot be crossed.
-#   (b) a one-line code span, ```code``` closed on the same line, crossed as
-#       one unit.
-#   (c) anything else (four or more backticks, an inline span left open):
-#       a boundary the draft cannot cross.  The draft then stays visible
+#       the first bare line of three or more backticks (optional blanks and
+#       CRLF `\r`; CommonMark lets the closer be longer than the opener), so
+#       a code `end` inside never closes the draft and ```example inside is
+#       content.  Inside the block every bare 3+ backtick line is the closer,
+#       never a boundary; an unclosed fence cannot be crossed.
+#   (b) a one-line code span: ```, at least one non-backtick character,
+#       a closing ```, then anything to the end of the line (```a``` 然后运行,
+#       ```a``` 和 ```b```).  The whole line is crossed as one unit up to `$`,
+#       so the tail is never split between the unit and the body.
+#   (c) anything else: four or more backticks, an opener whose info string
+#       contains a backtick without closing ``` right after its first run of
+#       text (```ruby `x`, ```a `b` c```), or an inline span left open.  This
+#       is a boundary the draft cannot cross, so the draft then stays visible
 #       rather than deleting visible text after it.
 # - 用户说/用户问: the body stops only at a ``` fence line, so a code block's
 #   `end` is never the close.  It closes like `th`.
 # - 「 may be a visible reply: the body stops at a later th/用户说/用户问 opener
-#   line or a fence line, and it closes only at a line-start `end`.
+#   line or a fence line, and it closes only at a line-start `end` followed
+#   by CJK on the same line.  A bare `end` line (LF or CRLF) after a 「
+#   heading is visible text, such as a word being explained.
 _BARE_DRAFT_BLOCK = re.compile(
     r"(?ms)^[ \t]*(?:"
     r"th(?=[\u4e00-\u9fff])(?:"
-    r"^[ \t]*```[^`\n]*\n(?:(?!^[ \t]*```[ \t]*\r?$)[\s\S])*^[ \t]*```[ \t]*\r?$"
-    r"|^[ \t]*```[^`\n]+```[ \t]*\r?$"
+    r"^[ \t]*```[^`\n]*\n(?:(?!^[ \t]*`{3,}[ \t]*\r?$)[\s\S])*^[ \t]*`{3,}[ \t]*\r?$"
+    r"|^[ \t]*```[^`\n]+```[^\n]*$"
     r"|(?!^[ \t]*```)[\s\S])*?(?:^[ \t]*|(?<=[。！？]))"
     r"|(?=用户(?:说|问))(?:[^\n]|\n(?![ \t]*```))*?(?:^[ \t]*|(?<=[。！？]))"
     r"|(?=「)(?:[^\n]|\n(?![ \t]*(?:th(?=[\u4e00-\u9fff])|用户(?:说|问)|```)))*?"
-    r"^[ \t]*"
+    r"^[ \t]*(?=end[ \t]*[\u4e00-\u9fff])"
     r")end(?![A-Za-z])(?=[ \t]*(?:[\u4e00-\u9fff]|\r?\n|$))"
 )
 _PAIRS = {"(": ")", "[": "]", "{": "}", "（": "）", "【": "】", "《": "》",
