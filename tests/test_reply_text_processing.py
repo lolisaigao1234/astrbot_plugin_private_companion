@@ -237,6 +237,36 @@ class ReplyTextProcessingTests(unittest.TestCase):
         self.assertEqual(strip_internal_expression_protocol(
             "th先写个示例。\r\n```ruby\r\ndef hi\r\nend\r\n```\r\n再想想。\r\nend回答"), "回答")
 
+    def test_a_longer_backtick_line_closes_a_three_backtick_fence(self):
+        # CommonMark：闭合围栏可以比开头更长；```` 关掉 ``` 围栏后，草稿在自己的 end 处结束，
+        # 后面可见代码块里的 Ruby end 不能被吞掉。
+        self.assertEqual(strip_internal_expression_protocol(
+            "th先举例。\n```ruby\nputs 1\n````\nend代码如下：\n```\ndef f\nend\n```\n完"),
+            "代码如下：\n```\ndef f\nend\n```\n完")
+
+    def test_quoted_heading_followed_by_a_bare_end_line_is_kept(self):
+        # 「开头的可能是可见回复：单独一行的 end 后面没有中文，不是草稿结束标记。
+        for text in ("「英语词汇」\nend\n这个词既能作名词也能作动词。",
+                     "「英语词汇」\r\nend\r\n这个词既能作名词也能作动词。"):
+            with self.subTest(text=text):
+                self.assertEqual(strip_internal_expression_protocol(text), text)
+
+    def test_one_line_code_span_with_text_after_it_is_content_in_a_th_draft(self):
+        # 同一行闭合的 ```code``` 后面还有文字（然后运行、句号、第二个代码），
+        # 整行都是草稿内容，草稿照常在自己的 end 处结束。
+        for line in ("```pip install x``` 然后运行", "```pip install x```。", "```a``` 和 ```b```"):
+            with self.subTest(line=line):
+                self.assertEqual(strip_internal_expression_protocol(
+                    "好的。\nth先装依赖：\n" + line + "\n想好了。\nend代码如下。"), "好的。\n代码如下。")
+
+    def test_end_followed_by_crlf_closes_user_said_and_quoted_drafts(self):
+        # CRLF 下 用户问 草稿在 end 处结束，end 后面的 \r\n 原样保留。
+        self.assertEqual(strip_internal_expression_protocol(
+            "回答。\r\n用户问「在吗」。\r\nend\r\n真正的回答"), "回答。\r\n\r\n真正的回答")
+        # 「 草稿在 CRLF 下仍在后面紧跟中文的行首 end 处结束。
+        self.assertEqual(strip_internal_expression_protocol(
+            "「候选」\r\n想想。\r\nend真正的回答"), "真正的回答")
+
     def test_end_followed_by_crlf_closes_a_th_draft(self):
         # end 后面是 \r\n 也算草稿结束；草稿只删到 end，后面的换行和正文原样保留，
         # 和 LF 时一致（"th想。\nend\n回答" 得到 "\n回答"）。
