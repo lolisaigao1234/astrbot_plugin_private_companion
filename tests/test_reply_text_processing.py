@@ -251,6 +251,15 @@ class ReplyTextProcessingTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(strip_internal_expression_protocol(text), text)
 
+    def test_nothing_is_stripped_inside_or_after_a_rejected_explicit_draft(self):
+        # th/用户 草稿被边界拒掉以后，不能在它里面或后面另起一段「/用户 匹配，删掉可见回答。
+        for text in ("th先想。\nend of story\n「候选」\n想好了。end请保留这句。\nend 是结束标记。",
+                     "th先想。\n```text\nfoo\n```\n「候选」\n想好了。end请保留这句。\nend 是结束标记。",
+                     "th先想。\nend of story\n「候选」\n试试。end正文第一段。\n正文第二段。\nend 表示结束。",
+                     "th先想。\nend of story\n用户说累了。\nend请保留这句。"):
+            with self.subTest(text=text):
+                self.assertEqual(strip_internal_expression_protocol(text), text)
+
     def test_quoted_heading_followed_by_a_bare_end_line_is_kept(self):
         # 「开头的可能是可见回复：单独一行的 end 后面没有中文，不是草稿结束标记。
         for text in ("「英语词汇」\nend\n这个词既能作名词也能作动词。",
@@ -291,6 +300,8 @@ class ReplyTextProcessingTests(unittest.TestCase):
                 "th想一下。\r\n" + "```py\r\nx.append(1)\r\n```      \r\n正文\r\n" * 40 + "结尾",
             "four-backtick fences":
                 "th想一下。\n" + "````py\nx.append(1)\n````      \n正文\n" * 40 + "结尾",
+            "many 用户 openers before a boundary":
+                "用户说。\n" * 4000 + "end of story\nend回答",
         }
         for name, text in cases.items():
             with self.subTest(name):
