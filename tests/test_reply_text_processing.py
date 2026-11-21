@@ -200,7 +200,8 @@ class ReplyTextProcessingTests(unittest.TestCase):
             "th先核对聊天记录。\n用户问还记得吗。\nend记得。"), "记得。")
 
     def test_each_draft_opener_keeps_its_own_guards(self):
-        # th 草稿可以跨过任何行；用户说/用户问 草稿只在代码围栏处停下。
+        # th 草稿可以跨过 th/用户/「 行；用户说/用户问 草稿可以跨过其他 用户 行。
+        # 两者都在 ``` 行和不能收尾的行首 end 处停下。
         for text, expected in (
                 ("th先想。\nth再想。\nend好的", "好的"),
                 ("用户说累了。\n用户问能不能休息。\nend好的", "好的"),
