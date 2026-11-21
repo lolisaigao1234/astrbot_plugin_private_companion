@@ -65,28 +65,19 @@ _TOOL_CALL_PROTOCOL_BLANKS = re.compile(r"\n{3,}")
 # Some providers expose free-form reasoning as plain text with no XML wrapper:
 # "th...end<visible text>".  Strip a draft only when it is unambiguous: a
 # leaked draft is the status quo before 7.2.7, deleted visible text is a new
-# harm.  So no draft body crosses a line starting with ``` (fences, code spans)
-# or a line-start `end` that does not close it; such a draft stays visible.
-# A close is `end` followed by CJK, a (CR)LF or the end of the text, never a
-# letter (friend/send/Legend).  `th` + CJK crosses 用户/「/th lines and closes at
-# a line-start `end` or one after 。！？ (optional blanks between);
-# 用户说/用户问 closes the same way; 「 may be visible text, so it stops at a
-# later th/用户 line or at an inline `end` after 。！？, and closes only at a
-# line-start `end` followed by CJK on the same line.
+# harm.  Only `th` + CJK or 用户说/用户问 (not 用户说明) opens a draft; 「 is
+# ordinary role-play text.  A draft closes at a word-bounded `end` that starts
+# a line, follows 。！？ (blanks allowed) or follows CJK, and is itself followed
+# by CJK, a (CR)LF or the end of the text.  Its body crosses no line starting
+# with ``` and no other word-bounded `end`, so such a draft stays visible.
 _BARE_DRAFT_BLOCK = re.compile(
-    r"(?ms)^[ \t]*(?:"
-    r"th(?=[\u4e00-\u9fff])"
-    r"(?:(?!^[ \t]*(?:```|end(?![A-Za-z])))[\s\S])*?(?:^[ \t]*|(?<=[。！？])[ \t]*)"
-    r"|(?=用户(?:说|问))"
-    r"(?:(?!^[ \t]*(?:```|end(?![A-Za-z])))[\s\S])*?(?:^[ \t]*|(?<=[。！？])[ \t]*)"
-    r"|(?=「)"
-    r"(?:(?!^[ \t]*(?:```|end(?![A-Za-z])|th(?=[\u4e00-\u9fff])|用户(?:说|问))"
-    r"|(?<=[。！？])[ \t]*end(?![A-Za-z]))[\s\S])*?"
-    r"^[ \t]*(?=end[ \t]*[\u4e00-\u9fff])"
-    r")end(?![A-Za-z])(?=[ \t]*(?:[\u4e00-\u9fff]|\r?\n|$))"
+    r"(?ms)^[ \t]*(?:th(?=[\u4e00-\u9fff])|(?=用户(?:说(?!明)|问)))"
+    r"(?:(?!^[ \t]*```|(?<![A-Za-z])end(?![A-Za-z]))[\s\S])*?"
+    r"(?:^[ \t]*|(?<=[。！？])[ \t]*|(?<=[\u4e00-\u9fff]))"
+    r"end(?![A-Za-z])(?=[ \t]*(?:[\u4e00-\u9fff]|\r?\n|$))"
 )
 # Where a draft match may start: the same line starts the regex accepts.
-_BARE_DRAFT_OPENER = re.compile(r"(?m)^[ \t]*(?:th(?=[\u4e00-\u9fff])|用户(?:说|问)|(?P<quote>「))")
+_BARE_DRAFT_OPENER = re.compile(r"(?m)^[ \t]*(?:th(?=[\u4e00-\u9fff])|用户(?:说(?!明)|问))")
 _PAIRS = {"(": ")", "[": "]", "{": "}", "（": "）", "【": "】", "《": "》",
           "〈": "〉", "「": "」", "『": "』", "“": "”", "‘": "’", '"': '"'}
 
@@ -585,20 +576,16 @@ def unwrap_text_emit_calls(text):
 def _strip_bare_drafts(text):
     """Remove unambiguous bare drafts, scanning openers left to right.
 
-    A th or 用户 opener that does not match is an explicit draft the regex
-    rejected, so nothing inside or after it is stripped.  A 「 opener that
-    does not match is probably visible text; the scan moves on.
+    An opener that does not match is an explicit draft the regex rejected,
+    so nothing inside or after it is stripped.
     """
     kept, copied, pos = [], 0, 0
     while (opener := _BARE_DRAFT_OPENER.search(text, pos)) is not None:
         draft = _BARE_DRAFT_BLOCK.match(text, opener.start())
-        if draft is not None:
-            kept.append(text[copied:draft.start()])
-            copied = pos = draft.end()
-        elif opener.group("quote"):
-            pos = opener.end()
-        else:
+        if draft is None:
             break
+        kept.append(text[copied:draft.start()])
+        copied = pos = draft.end()
     kept.append(text[copied:])
     return "".join(kept)
 

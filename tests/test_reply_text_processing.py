@@ -276,13 +276,43 @@ class ReplyTextProcessingTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(strip_internal_expression_protocol(text), text)
 
-    def test_end_followed_by_crlf_closes_user_said_and_quoted_drafts(self):
+    def test_end_followed_by_crlf_closes_a_user_said_draft_but_not_a_quoted_line(self):
         # CRLF 下 用户问 草稿在 end 处结束，end 后面的 \r\n 原样保留。
         self.assertEqual(strip_internal_expression_protocol(
             "回答。\r\n用户问「在吗」。\r\nend\r\n真正的回答"), "回答。\r\n\r\n真正的回答")
-        # 「 草稿在 CRLF 下仍在后面紧跟中文的行首 end 处结束。
+        # 「 不再开启草稿，CRLF 下也原样保留。
+        text = "「候选」\r\n想想。\r\nend真正的回答"
+        self.assertEqual(strip_internal_expression_protocol(text), text)
+
+    def test_a_quoted_line_never_opens_a_draft(self):
+        # 「 是角色扮演里普通的可见文字，不是草稿标记：后面的 end 怎么排都不能删掉正文。
+        for text in ("「英语词汇」\nfriend 是朋友。\nend 是结束。",
+                     "「end」这个词有两个意思。\nend 作名词时表示结尾。",
+                     "示例：\n```text\n「标题」\nend结尾\n```\n完"):
+            with self.subTest(text=text):
+                self.assertEqual(strip_internal_expression_protocol(text), text)
+        # 第一遍去掉 <think> 后「 行到了行首，第二遍清理也不能把它当草稿。
+        visible = "「英语词汇」\n今天学的词是 end。\n这个词可以作动词。\nend 表示结束。"
+        once = strip_internal_expression_protocol("<think>想一想</think>" + visible)
+        self.assertEqual(once, visible)
+        self.assertEqual(strip_internal_expression_protocol(once), visible)
+
+    def test_a_user_manual_is_not_a_user_said_draft(self):
+        # 用户说明（使用说明书）不是“用户说”草稿。
+        text = "用户说明：\r\n输入下面的命令退出。\r\n\r\n    end\r\n\r\n程序会关闭。"
+        self.assertEqual(strip_internal_expression_protocol(text), text)
+
+    def test_inline_end_right_after_cjk_closes_and_any_other_inline_end_bounds_a_draft(self):
+        # 上游文档里的 DeepSeek 形状 th…end<正文>：end 紧跟中文也是结束标记。
         self.assertEqual(strip_internal_expression_protocol(
-            "「候选」\r\n想想。\r\nend真正的回答"), "真正的回答")
+            "th用户在问天气end今天晴天，记得带伞。\n明天见\nend 这个词是结束"),
+            "今天晴天，记得带伞。\n明天见\nend 这个词是结束")
+        # 其他独立的 end（逗号、数字、空格后）不是结束标记，就是边界：整段保留。
+        text = "th想想，end 是什么\n正文\nend回答"
+        self.assertEqual(strip_internal_expression_protocol(text), text)
+        # 单词里的 end（weekend）只是普通文字，草稿照常在自己的 end 处结束。
+        self.assertEqual(strip_internal_expression_protocol(
+            "th用户说weekend要出去。\nend好的"), "好的")
 
     def test_end_followed_by_crlf_closes_a_th_draft(self):
         # end 后面是 \r\n 也算草稿结束；草稿只删到 end，后面的换行和正文原样保留，
