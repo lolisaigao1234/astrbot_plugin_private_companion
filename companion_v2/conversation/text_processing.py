@@ -68,27 +68,23 @@ _TOOL_CALL_PROTOCOL_BLANKS = re.compile(r"\n{3,}")
 # harm.  Only `th` + CJK or 用户说/用户问 opens a draft (not the headings
 # 用户说明/用户说法/用户问题/用户问卷/用户问答, and not inside a ``` fence);
 # 「 is ordinary role-play text.  A draft closes at `end` that starts a line,
-# follows 。！？ (blanks allowed) or follows CJK.  After a `th` draft's `end`
-# comes CJK, a (CR)LF or the end of the text; 用户说/用户问 is often a visible
-# sentence, so its `end` must be followed by CJK on the same line.  A body
-# crosses no line starting with ``` and no other `end` not followed by a
-# letter (so weekend and APIend are boundaries, endpoint is text); such a
-# draft stays visible.
-_DRAFT_BODY = r"(?:(?!^[ \t]*```|end(?![A-Za-z]))[\s\S])*?"
-_DRAFT_CLOSE_AT = r"(?:^[ \t]*|(?<=[。！？])[ \t]*|(?<=[\u4e00-\u9fff]))end"
+# follows 。！？ (blanks allowed) or follows CJK, and only when CJK follows that
+# `end` on the same line (upstream's end实际正文 shape); a bare `end` line is
+# code or prose.  A body crosses no line starting with ``` and no other `end`
+# not followed by a letter (so weekend and APIend are boundaries, endpoint is
+# text); such a draft stays visible.
 _BARE_DRAFT_BLOCK = re.compile(
-    r"(?ms)^[ \t]*(?:"
-    r"th(?=[\u4e00-\u9fff])" + _DRAFT_BODY + _DRAFT_CLOSE_AT
-    + r"(?![A-Za-z])(?=[ \t]*(?:[\u4e00-\u9fff]|\r?\n|$))"
-    r"|(?=用户(?:说(?![明法])|问(?![题卷答])))" + _DRAFT_BODY + _DRAFT_CLOSE_AT
-    + r"(?=[ \t]*[\u4e00-\u9fff])"
-    r")"
+    r"(?ms)^[ \t]*(?:th(?=[\u4e00-\u9fff])|(?=用户(?:说(?![明法])|问(?![题卷答]))))"
+    r"(?:(?!^[ \t]*```|end(?![A-Za-z]))[\s\S])*?"
+    r"(?:^[ \t]*|(?<=[。！？])[ \t]*|(?<=[\u4e00-\u9fff]))"
+    r"end(?=[ \t]*[\u4e00-\u9fff])"
 )
 # Where a draft match may start: the same line starts the regex accepts.
 _BARE_DRAFT_OPENER = re.compile(
     r"(?m)^[ \t]*(?:th(?=[\u4e00-\u9fff])|用户(?:说(?![明法])|问(?![题卷答])))")
-# A line starting with three or more backticks, split into the run and the rest.
-_FENCE_LINE = re.compile(r"(?m)^[ \t]*(`{3,})(.*)$")
+# A CommonMark fence line: at most three spaces, a run of three or more
+# backticks, and the rest of the line.
+_FENCE_LINE = re.compile(r"(?m)^ {0,3}(`{3,})(.*)$")
 _FENCE_CLOSER_REST = re.compile(r"[ \t]*\r?")
 _PAIRS = {"(": ")", "[": "]", "{": "}", "（": "）", "【": "】", "《": "》",
           "〈": "〉", "「": "」", "『": "』", "“": "”", "‘": "’", '"': '"'}
@@ -588,10 +584,12 @@ def unwrap_text_emit_calls(text):
 def _fenced_regions(text):
     """(start, end) spans of ``` fences, CommonMark style, in one pass.
 
-    Outside a fence, a backtick run of n >= 3 opens a fence when the rest of
-    the line has no backtick (so ```code``` on one line is not an opener).
-    Inside, only a bare run of at least n backticks closes it; any other
-    backtick line is content.  An unclosed fence runs to the end of the text.
+    Fence lines are indented by at most three spaces; a line indented more
+    is content inside a fence and never an opener outside one.  Outside a
+    fence, a backtick run of n >= 3 opens a fence when the rest of the line
+    has no backtick (so ```code``` on one line is not an opener).  Inside,
+    only a bare run of at least n backticks closes it; any other backtick
+    line is content.  An unclosed fence runs to the end of the text.
     """
     regions, start, length = [], None, 0
     for line in _FENCE_LINE.finditer(text):

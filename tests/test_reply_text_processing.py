@@ -276,6 +276,13 @@ class ReplyTextProcessingTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(strip_internal_expression_protocol(text), text)
 
+    def test_a_th_draft_closes_only_before_cjk_on_the_same_line(self):
+        # 缩进的 th 标识符（Ruby 变量）后面跟着方法的 end 换行，不是草稿：整段保留。
+        for text in ("def read_threshold\r\n  th阈值 = 3\r\nend\r\nputs read_threshold",
+                     "def read_threshold\n  th阈值 = 3\nend\nputs read_threshold"):
+            with self.subTest(text=text):
+                self.assertEqual(strip_internal_expression_protocol(text), text)
+
     def test_a_user_said_draft_closes_only_before_cjk_on_the_same_line(self):
         # 用户说/用户问 常常是可见的句子，是弱标记：只有 end 后面同一行紧跟中文才算结束，
         # end 后面换行或到结尾都不算，草稿原样保留（和上游的 end真正的回答 形状一致）。
@@ -313,6 +320,17 @@ class ReplyTextProcessingTests(unittest.TestCase):
         self.assertEqual(strip_internal_expression_protocol(
             "示例：\n```ruby\n用户说 = 1\nend\n```\nth想想。\nend好的"),
             "示例：\n```ruby\n用户说 = 1\nend\n```\n好的")
+        # 缩进 4 个空格以上的 ``` 行是围栏内容，不会关掉围栏（CommonMark）。
+        for text in ("```text\r\n    ```\r\nth表示表头单元格。\r\nend\r\n```",
+                     "```text\r\n    ```\r\nth表示表头单元格。\r\nend表示结束。\r\n```",
+                     "```text\r\n    ```\r\nth发音示例\r\nend\r\n```\r\n",
+                     "```甲``` 和 ```乙\r\nth发音示例\r\nend\r\n丙```",
+                     "- ```text\r\n  th发音示例\r\n  end\r\n  ```\r\n"):
+            with self.subTest(text=text):
+                self.assertEqual(strip_internal_expression_protocol(text), text)
+        # 缩进 4 个空格的 ``` 行在围栏外也不是开头，后面的草稿照常清理（和上游一致）。
+        self.assertEqual(strip_internal_expression_protocol(
+            "    ```\n\nth先想。\nend好的。"), "    ```\n\n好的。")
         # 四个反引号的围栏里，三个反引号的行只是内容，不会关掉围栏（CommonMark）。
         for text in ("示例：\r\n````markdown\r\n```ruby\r\ndef demo\r\n  用户说 = \"你好\"\r\nend\r\n```\r\n````\r\n",
                      "示例：\n````markdown\n```text\nth想。\nend好的\n```\n````\n"):
@@ -355,11 +373,13 @@ class ReplyTextProcessingTests(unittest.TestCase):
         self.assertEqual(strip_internal_expression_protocol(
             "th用户说endpoint已经ended了。\nend好的"), "好的")
 
-    def test_end_followed_by_crlf_closes_a_th_draft(self):
-        # end 后面是 \r\n 也算草稿结束；草稿只删到 end，后面的换行和正文原样保留，
-        # 和 LF 时一致（"th想。\nend\n回答" 得到 "\n回答"）。
-        self.assertEqual(strip_internal_expression_protocol(
-            "th想一下。\r\nend\r\n第一段讲解。end 是结束标记。"), "\r\n第一段讲解。end 是结束标记。")
+    def test_a_bare_end_line_never_closes_a_th_draft(self):
+        # end 后面同一行没有中文（换行、CRLF 或到结尾）就不是结束标记，是边界：整段保留。
+        for text in ("th想一下。\r\nend\r\n第一段讲解。end 是结束标记。",
+                     "th想一下。\nend\n第一段讲解。",
+                     "th想一下。\nend"):
+            with self.subTest(text=text):
+                self.assertEqual(strip_internal_expression_protocol(text), text)
 
     def test_th_draft_with_many_fences_and_no_end_finishes_quickly(self):
         # 没有 end 的 th 草稿里有很多代码块时，正则不能指数级回溯卡住事件循环。
