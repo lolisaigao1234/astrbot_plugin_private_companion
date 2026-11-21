@@ -1,5 +1,6 @@
 from dataclasses import asdict, replace
 import json
+import time
 import unittest
 
 from companion_v2.configuration.models import ConfigurationError
@@ -224,6 +225,33 @@ class ReplyTextProcessingTests(unittest.TestCase):
         # 没有自己结尾的 th 行不能一路吞到后面代码块里的 end。
         text = "回复\nth思考没有结尾\n正文\n```ruby\nif x\nend\n```"
         self.assertEqual(strip_internal_expression_protocol(text), text)
+
+    def test_only_a_bare_backtick_line_closes_a_fence_in_a_th_draft(self):
+        # ```example 这样带文字的行是代码块内容，不是闭合围栏。
+        self.assertEqual(strip_internal_expression_protocol(
+            "th先写。\n```text\n```example\nend\n```\nend回答"), "回答")
+
+    def test_th_draft_with_many_fences_and_no_end_finishes_quickly(self):
+        # 没有 end 的 th 草稿里有很多代码块时，正则不能指数级回溯卡住事件循环。
+        cases = {
+            "trailing spaces after each close":
+                "th想一下。\n" + "```py\nx.append(1)\n```      \n正文\n" * 40 + "结尾",
+            "one-line snippet shifts the pairing":
+                "th用户想要几个例子，我整理一下\n先装依赖：\n```pip install requests```\n"
+                + "".join("例子%d：\n```python\nitems.append(%d)\n```\n" % (i, i)
+                          for i in range(7)) + "就这些。",
+            "text after each closing fence":
+                "th让我想想\n" + "".join("```python\nitems.append(%d)\n```  说明\n" % i
+                                       for i in range(8)) + "```\n截断",
+            "bare fence mentioned in the draft":
+                "好的。\nth用户要几段示例，每段用\n```\n包起来，逐段解释。\n下面是示例：\n"
+                + "```python\nitems.append(0)\n```\n第0段说明。\n" * 8,
+        }
+        for name, text in cases.items():
+            with self.subTest(name):
+                start = time.perf_counter()
+                self.assertEqual(strip_internal_expression_protocol(text), text)
+                self.assertLess(time.perf_counter() - start, 0.5)
 
     def test_control_block_cleanup_handles_escaping_fullwidth_orphans_and_unknown_names(self):
         self.assertEqual(strip_internal_expression_protocol(
