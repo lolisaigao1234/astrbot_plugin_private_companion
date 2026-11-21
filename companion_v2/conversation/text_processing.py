@@ -70,30 +70,34 @@ _TOOL_CALL_PROTOCOL_BLANKS = re.compile(r"\n{3,}")
 # where upstream's behaviour was the harm.
 # - Open: a line starting, after at most three spaces, with `th` + CJK or
 #   用户说/用户问; not the headings 用户说明/用户说法/用户问题/用户问卷/用户问答,
-#   not inside a ``` fence.  A line indented four or more columns is indented
-#   or list-nested code (CommonMark), and 「 is ordinary role-play text.
+#   not inside a ``` fence.  As a heuristic (not a strict CommonMark rule,
+#   since an indented line can continue a paragraph), a line indented four or
+#   more columns is treated as indented or list-nested code and opens nothing;
+#   「 is ordinary role-play text.
 # - Close: an `end` with no ASCII letter on either side, followed by
 #   upstream's tail: CJK, or blanks and then LF or the end of the text (never
 #   \r).  The blanks are only looked at, so they stay in the reply.
-# - Body: crosses no line starting with ``` and no `end` that does not close
-#   it, so friend/weekend/APIend or an `end` before CRLF, a letter or a digit
-#   leaves the draft visible.  The body's ``` boundary allows any indent and is
-#   deliberately stricter than the 0-3 space _FENCE_OPENER/_FENCE_CLOSER; do
-#   not unify them.
+# - Body: stops only at a line starting with ``` and at a letter-preceded
+#   `end` that upstream would close at (friend, weekend, APIend), which leaves
+#   the draft visible.  It crosses every other non-closing `end` (end1, an
+#   `end` before CRLF or a letter, ...) as upstream does; endpoint is text.
+#   The body's ``` boundary allows any indent and is deliberately stricter
+#   than the fence tracking in _fenced_regions; do not unify them.
 _BARE_DRAFT_BLOCK = re.compile(
     r"(?ms)^ {0,3}(?:th(?=[\u4e00-\u9fff])|(?=用户(?:说(?![明法])|问(?![题卷答]))))"
-    r"(?:(?!^[ \t]*```|end(?![A-Za-z]))[\s\S])*?"
+    r"(?:(?!^[ \t]*```|(?<=[A-Za-z])end(?![A-Za-z])(?=[ \t]*(?:[\u4e00-\u9fff]|\n|$)))[\s\S])*?"
     r"(?<![A-Za-z])end(?![A-Za-z])(?=[ \t]*(?:[\u4e00-\u9fff]|\n|$))"
 )
 # Where a draft match may start: the same line starts the regex accepts.
 _BARE_DRAFT_OPENER = re.compile(
     r"(?m)^ {0,3}(?:th(?=[\u4e00-\u9fff])|用户(?:说(?![明法])|问(?![题卷答])))")
-# A CommonMark fence line: at most three spaces, a run of three or more
-# backticks, then an info string without backticks (opener) or only blanks
-# (closer).
-_FENCE_LINE = re.compile(r"(?m)^ {0,3}`{3,}.*$")
-_FENCE_OPENER = re.compile(r" {0,3}(`{3,})[^`]*")
-_FENCE_CLOSER = re.compile(r" {0,3}(`{3,})[ \t]*\r?")
+# CommonMark fence lines: a run of three or more backticks, then an info
+# string without backticks (opener) or only blanks (closer).  An opener is
+# indented by at most three spaces, or follows a list marker (- * + or 1. 1));
+# a closer's indent is checked against its opener in _fenced_regions.
+_FENCE_LINE = re.compile(r"(?m)^.*```.*$")
+_FENCE_OPENER = re.compile(r" {0,3}(?P<marker>(?:[-*+]|\d{1,9}[.)])[ \t]+)?(?P<run>`{3,})[^`]*")
+_FENCE_CLOSER = re.compile(r"( *)(`{3,})[ \t]*\r?")
 _PAIRS = {"(": ")", "[": "]", "{": "}", "（": "）", "【": "】", "《": "》",
           "〈": "〉", "「": "」", "『": "』", "“": "”", "‘": "’", '"': '"'}
 
@@ -592,22 +596,26 @@ def unwrap_text_emit_calls(text):
 def _fenced_regions(text):
     """(start, end) spans of ``` fences, CommonMark style, in one pass.
 
-    A fence opener or closer is indented by at most three spaces.  Outside a
+    A plain opener is indented by at most three spaces; a list-item opener
+    (- ```text) sets its content column W at the backtick run.  Outside a
     fence, a run of n >= 3 backticks opens one when the rest of the line has
-    no backtick (so ```code``` on one line is not an opener); inside, only a
-    bare run of at least n backticks closes it, and any other line is
-    content.  An unclosed fence runs to the end of the text.
+    no backtick (so ```code``` on one line is not an opener).  Inside, only a
+    bare run of at least n backticks indented at most W + 3 spaces (W = 0 for
+    a plain fence) closes it, and any other line is content.  An unclosed
+    fence runs to the end of the text.
     """
-    regions, start, length = [], None, 0
+    regions, start, length, indent = [], None, 0, 0
     for line in _FENCE_LINE.finditer(text):
         content = line.group()
         if start is None:
             opener = _FENCE_OPENER.fullmatch(content)
             if opener is not None:
-                start, length = line.start(), len(opener.group(1))
+                start, length = line.start(), len(opener.group("run"))
+                indent = opener.start("run") if opener.group("marker") else 0
         else:
             closer = _FENCE_CLOSER.fullmatch(content)
-            if closer is not None and len(closer.group(1)) >= length:
+            if (closer is not None and len(closer.group(2)) >= length
+                    and len(closer.group(1)) <= indent + 3):
                 regions.append((start, line.end()))
                 start = None
     if start is not None:

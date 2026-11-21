@@ -250,24 +250,35 @@ class ReplyTextProcessingTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(strip_internal_expression_protocol(text), text)
 
-    def test_a_line_start_end_that_does_not_close_the_draft_is_a_boundary(self):
-        # 行首的 end 行如果不是这段草稿的结束标记，就分不清后面哪个 end 才是真的，
-        # 草稿不能跨过它，整段原样保留，不能删掉中间的正文。
-        for text in ("「候选」\n想想。\nend\n正文第一段。\nend 表示结束。",
-                     "th想。\nend of story\n正文。\nend回答"):
-            with self.subTest(text=text):
-                self.assertEqual(strip_internal_expression_protocol(text), text)
+    def test_a_line_start_end_that_does_not_close_is_crossed_like_upstream(self):
+        # 「 不开启草稿，后面的 end 怎么排都不删。
+        text = "「候选」\n想想。\nend\n正文第一段。\nend 表示结束。"
+        self.assertEqual(strip_internal_expression_protocol(text), text)
+        # end of story 不是上游会结束的地方，草稿和上游一样跨过它，在后面的 end 处结束。
+        self.assertEqual(strip_internal_expression_protocol(
+            "th想。\nend of story\n正文。\nend回答"), "回答")
 
     def test_nothing_is_stripped_inside_or_after_a_rejected_explicit_draft(self):
-        # th/用户 草稿被边界拒掉以后，不能在它里面或后面另起一段「/用户 匹配，删掉可见回答。
-        for text in ("th先想。\nend of story\n「候选」\n想好了。end请保留这句。\nend 是结束标记。",
+        # th/用户 草稿被边界（``` 行、friend 这样前面是字母的 end）拒掉以后，
+        # 不能在它里面或后面另起一段「/用户 匹配，删掉可见回答。
+        for text in ("th先想。\nfriend\n「候选」\n想好了。end请保留这句。\nend 是结束标记。",
                      "th先想。\n```text\nfoo\n```\n「候选」\n想好了。end请保留这句。\nend 是结束标记。",
-                     "th先想。\nend of story\n「候选」\n试试。end正文第一段。\n正文第二段。\nend 表示结束。",
-                     "th先想。\nend of story\n用户说累了。\nend请保留这句。",
+                     "th先想。\nfriend\n「候选」\n试试。end正文第一段。\n正文第二段。\nend 表示结束。",
+                     "th先想。\nfriend\n用户说累了。\nend请保留这句。",
                      "th想想。\n```x```\n「安装」说完了。end好的，装好了！\n今天学了个单词：\nend 是结束的意思",
-                     "th想。\nend of story\n「好」我想。end正文。\nend回答"):
+                     "th想。\nfriend\n「好」我想。end正文。\nend回答"):
             with self.subTest(text=text):
                 self.assertEqual(strip_internal_expression_protocol(text), text)
+        # end of story 不是边界（上游也跨过它），这些 th 草稿和上游一样一直清理到第一个结束标记。
+        for text, expected in (
+                ("th先想。\nend of story\n「候选」\n想好了。end请保留这句。\nend 是结束标记。",
+                 "请保留这句。\nend 是结束标记。"),
+                ("th先想。\nend of story\n「候选」\n试试。end正文第一段。\n正文第二段。\nend 表示结束。",
+                 "正文第一段。\n正文第二段。\nend 表示结束。"),
+                ("th先想。\nend of story\n用户说累了。\nend请保留这句。", "请保留这句。"),
+                ("th想。\nend of story\n「好」我想。end正文。\nend回答", "正文。\nend回答")):
+            with self.subTest(text=text):
+                self.assertEqual(strip_internal_expression_protocol(text), expected)
 
     def test_quoted_heading_followed_by_a_bare_end_line_is_kept(self):
         # 「开头的可能是可见回复：单独一行的 end 后面没有中文，不是草稿结束标记。
@@ -408,11 +419,12 @@ class ReplyTextProcessingTests(unittest.TestCase):
                 ("正文开头。\nth先想。\n<|DSML|tool_calls>\nend\n真正的回答。", "正文开头。\n\n真正的回答。")):
             with self.subTest(text=text):
                 self.assertEqual(strip_internal_expression_protocol(text), expected)
-        # CRLF 的单独 end 行不算（上游也从不接受 \r）：整段保留。
-        for text in ("th想一下。\r\nend\r\n第一段讲解。end 是结束标记。",
-                     "术语表：\r\nth表示表头。\r\nend\r\n以上是两个词条。"):
-            with self.subTest(text=text):
-                self.assertEqual(strip_internal_expression_protocol(text), text)
+        # CRLF 的单独 end 行不是结束标记（上游也从不接受 \r）：后面没有结束标记就整段保留，
+        # 有的话和上游一样跨过它，在后面的结束标记处结束。
+        text = "术语表：\r\nth表示表头。\r\nend\r\n以上是两个词条。"
+        self.assertEqual(strip_internal_expression_protocol(text), text)
+        self.assertEqual(strip_internal_expression_protocol(
+            "th想一下。\r\nend\r\n第一段讲解。end 是结束标记。"), " 是结束标记。")
 
     def test_a_draft_upstream_strips_is_stripped_so_later_cleanup_cannot_truncate(self):
         # 上游会清理、而本分支留下的草稿，会让后面的清理把草稿里的标签或反引号和可见回答配对，
@@ -422,7 +434,15 @@ class ReplyTextProcessingTests(unittest.TestCase):
                 ("  th先想。`end实际正文：`<think>示例</think>`。", "实际正文：`<think>示例</think>`。"),
                 ("th先想。示例用 ```xml 开头。\n  end\n下面是示例。\n```xml\n"
                  "<pc_reaction_expression>\n```\n最后一步。",
-                 "\n下面是示例。\n```xml\n<pc_reaction_expression>\n```\n最后一步。")):
+                 "\n下面是示例。\n```xml\n<pc_reaction_expression>\n```\n最后一步。"),
+                # 上游不会在 end1、end。处结束，本分支也照样跨过去，在真正的 end 处结束。
+                ("th先记录编号 end1。<think>\nend\n真正的回答。</think>", "\n真正的回答。"),
+                ("th先想。Ruby 的关键字是 end。<think>\nend\n真正的回答。</think>", "\n真正的回答。"),
+                # 列表项后面的围栏要认出来，否则缩进的闭合行会被当成新的围栏开头。
+                ("- ```text\n  示例\n  ```\n\nth先想。<pc_reaction_expression>\nend正文",
+                 "- ```text\n  示例\n  ```\n\n正文"),
+                ("th想一想。end，\n<think>草稿\nend\n回答。</think>", "\n回答。"),
+                ("th用户要天气。the end.\n<b>\nend\n今天晴。", "\n今天晴。")):
             with self.subTest(text=text):
                 self.assertEqual(strip_internal_expression_protocol(text), expected)
 
@@ -446,7 +466,7 @@ class ReplyTextProcessingTests(unittest.TestCase):
             "four-backtick fences":
                 "th想一下。\n" + "````py\nx.append(1)\n````      \n正文\n" * 40 + "结尾",
             "many 用户 openers before a boundary":
-                "用户说。\n" * 4000 + "end of story\nend回答",
+                "用户说。\n" * 4000 + "friend\nend回答",
         }
         for name, text in cases.items():
             with self.subTest(name):
