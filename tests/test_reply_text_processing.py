@@ -215,34 +215,41 @@ class ReplyTextProcessingTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(strip_internal_expression_protocol(text), text)
 
-    def test_th_draft_skips_a_fenced_code_block_to_its_real_end(self):
-        # 草稿里代码块中的 end 不是结束标记，要跳过整个代码块找真正的 end。
-        self.assertEqual(strip_internal_expression_protocol(
-            "th先写个示例。\n```ruby\ndef hi\nend\n```\n再想想。\nend回答"), "回答")
-        # 代码块没闭合时分不清哪个 end 才是真的，宁可不删也不吞掉正文。
-        text = "th先写个示例。\n```ruby\ndef hi\nend\n再想想。\nend回答"
-        self.assertEqual(strip_internal_expression_protocol(text), text)
-        # 没有自己结尾的 th 行不能一路吞到后面代码块里的 end。
-        text = "回复\nth思考没有结尾\n正文\n```ruby\nif x\nend\n```"
-        self.assertEqual(strip_internal_expression_protocol(text), text)
-        # 不是合法围栏开头、也不是同一行闭合的 ``` 行（四个反引号、带 `x` 的开头、
-        # 跨行的行内代码）是草稿不能跨过的边界：宁可整段草稿漏出来，也不删可见正文。
-        for text in ("回复\nth思考没有结尾\n正文\n````ruby\nif x\nend\n````\n完",
-                     "回复\nth思考没有结尾\n正文\n```ruby `x`\nif x\nend\n```\n完",
-                     "th我写：\n````ruby\ndef f\nend\n````\nend回答",
-                     "th先想想。\n```先运行 `ls`，再看\nend\n结果```\n这是正文"):
+    def test_a_draft_containing_a_backtick_line_is_left_visible(self):
+        # 草稿里出现以 ``` 开头的行（代码块、行内代码行、四个反引号……）时，分不清哪个 end
+        # 才是真的，整段原样保留：漏出草稿是 7.2.7 之前的现状，删掉可见正文才是新的伤害。
+        for text in (
+                # 以前会剥到草稿的 end 为止，现在整段保留。
+                "th先写个示例。\n```ruby\ndef hi\nend\n```\n再想想。\nend回答",
+                "th先写个示例。\r\n```ruby\r\ndef hi\r\nend\r\n```\r\n再想想。\r\nend回答",
+                "th先举例。\n```ruby\nputs 1\n````\nend代码如下：\n```\ndef f\nend\n```\n完",
+                "th先写。\n```text\n```example\nend\n```\nend回答",
+                "好的。\nth先装依赖：\n```gem install x```\n想好了。\nend代码如下：\n```\ndef f\nend\n```\n完",
+                "好的。\nth先装依赖：\n```pip install x``` 然后运行\n想好了。\nend代码如下。",
+                "好的。\nth先装依赖：\n```pip install x```。\n想好了。\nend代码如下。",
+                "好的。\nth先装依赖：\n```a``` 和 ```b```\n想好了。\nend代码如下。",
+                # 第 9 轮：行内代码后面的 。end、跨到下一行的第二段行内代码。
+                "th先想。\n```ls``` 就行。end请用 ls 查看。\nend 是结束标记。",
+                "th先举例。\n```a``` 和 ```第一行\nend\n第二行```\n再想想。\nend回答",
+                # 一直都原样保留的。
+                "th先写个示例。\n```ruby\ndef hi\nend\n再想想。\nend回答",
+                "回复\nth思考没有结尾\n正文\n```ruby\nif x\nend\n```",
+                "回复\nth思考没有结尾\n正文\n````ruby\nif x\nend\n````\n完",
+                "回复\nth思考没有结尾\n正文\n```ruby `x`\nif x\nend\n```\n完",
+                "th我写：\n````ruby\ndef f\nend\n````\nend回答",
+                "th先想想。\n```先运行 `ls`，再看\nend\n结果```\n这是正文",
+                "用户说要示例。\n```py\nx\n```\nend回答",
+                "「示例」\n```py\nx\n```\nend回答"):
             with self.subTest(text=text):
                 self.assertEqual(strip_internal_expression_protocol(text), text)
-        # CRLF 换行时闭合围栏行尾带 \r，也要认作闭合，整段草稿（含 \r\n）都在匹配里。
-        self.assertEqual(strip_internal_expression_protocol(
-            "th先写个示例。\r\n```ruby\r\ndef hi\r\nend\r\n```\r\n再想想。\r\nend回答"), "回答")
 
-    def test_a_longer_backtick_line_closes_a_three_backtick_fence(self):
-        # CommonMark：闭合围栏可以比开头更长；```` 关掉 ``` 围栏后，草稿在自己的 end 处结束，
-        # 后面可见代码块里的 Ruby end 不能被吞掉。
-        self.assertEqual(strip_internal_expression_protocol(
-            "th先举例。\n```ruby\nputs 1\n````\nend代码如下：\n```\ndef f\nend\n```\n完"),
-            "代码如下：\n```\ndef f\nend\n```\n完")
+    def test_a_line_start_end_that_does_not_close_the_draft_is_a_boundary(self):
+        # 行首的 end 行如果不是这段草稿的结束标记，就分不清后面哪个 end 才是真的，
+        # 草稿不能跨过它，整段原样保留，不能删掉中间的正文。
+        for text in ("「候选」\n想想。\nend\n正文第一段。\nend 表示结束。",
+                     "th想。\nend of story\n正文。\nend回答"):
+            with self.subTest(text=text):
+                self.assertEqual(strip_internal_expression_protocol(text), text)
 
     def test_quoted_heading_followed_by_a_bare_end_line_is_kept(self):
         # 「开头的可能是可见回复：单独一行的 end 后面没有中文，不是草稿结束标记。
@@ -250,14 +257,6 @@ class ReplyTextProcessingTests(unittest.TestCase):
                      "「英语词汇」\r\nend\r\n这个词既能作名词也能作动词。"):
             with self.subTest(text=text):
                 self.assertEqual(strip_internal_expression_protocol(text), text)
-
-    def test_one_line_code_span_with_text_after_it_is_content_in_a_th_draft(self):
-        # 同一行闭合的 ```code``` 后面还有文字（然后运行、句号、第二个代码），
-        # 整行都是草稿内容，草稿照常在自己的 end 处结束。
-        for line in ("```pip install x``` 然后运行", "```pip install x```。", "```a``` 和 ```b```"):
-            with self.subTest(line=line):
-                self.assertEqual(strip_internal_expression_protocol(
-                    "好的。\nth先装依赖：\n" + line + "\n想好了。\nend代码如下。"), "好的。\n代码如下。")
 
     def test_end_followed_by_crlf_closes_user_said_and_quoted_drafts(self):
         # CRLF 下 用户问 草稿在 end 处结束，end 后面的 \r\n 原样保留。
@@ -272,18 +271,6 @@ class ReplyTextProcessingTests(unittest.TestCase):
         # 和 LF 时一致（"th想。\nend\n回答" 得到 "\n回答"）。
         self.assertEqual(strip_internal_expression_protocol(
             "th想一下。\r\nend\r\n第一段讲解。end 是结束标记。"), "\r\n第一段讲解。end 是结束标记。")
-
-    def test_only_a_bare_backtick_line_closes_a_fence_in_a_th_draft(self):
-        # ```example 这样带文字的行是代码块内容，不是闭合围栏。
-        self.assertEqual(strip_internal_expression_protocol(
-            "th先写。\n```text\n```example\nend\n```\nend回答"), "回答")
-
-    def test_one_line_code_span_in_a_th_draft_is_not_a_fence_opener(self):
-        # ```gem install x``` 是行内代码，不是围栏开头；草稿在自己的 end 处结束，
-        # 后面可见代码块里的 Ruby end 不能被吞掉。
-        self.assertEqual(strip_internal_expression_protocol(
-            "好的。\nth先装依赖：\n```gem install x```\n想好了。\nend代码如下：\n```\ndef f\nend\n```\n完"),
-            "好的。\n代码如下：\n```\ndef f\nend\n```\n完")
 
     def test_th_draft_with_many_fences_and_no_end_finishes_quickly(self):
         # 没有 end 的 th 草稿里有很多代码块时，正则不能指数级回溯卡住事件循环。
