@@ -297,10 +297,25 @@ class ReplyTextProcessingTests(unittest.TestCase):
         self.assertEqual(once, visible)
         self.assertEqual(strip_internal_expression_protocol(once), visible)
 
-    def test_a_user_manual_is_not_a_user_said_draft(self):
-        # 用户说明（使用说明书）不是“用户说”草稿。
-        text = "用户说明：\r\n输入下面的命令退出。\r\n\r\n    end\r\n\r\n程序会关闭。"
-        self.assertEqual(strip_internal_expression_protocol(text), text)
+    def test_an_opener_inside_a_code_fence_is_code(self):
+        # 代码块里的 用户说 = ... 是代码，不是草稿开头；未闭合的围栏之后也什么都不删。
+        for text in ("示例：\r\n```ruby\r\ndef demo\r\n  用户说 = \"你好\"\r\nend\r\n```\r\n",
+                     "示例：\n```ruby\ndef demo\n  用户说 = \"你好\"\nend\n```\n",
+                     "示例：\n```ruby\ndef demo\n  用户说 = \"你好\"\nend\n"):
+            with self.subTest(text=text):
+                self.assertEqual(strip_internal_expression_protocol(text), text)
+        # 围栏闭合之后的草稿照常清理。
+        self.assertEqual(strip_internal_expression_protocol(
+            "示例：\n```ruby\n用户说 = 1\nend\n```\nth想想。\nend好的"),
+            "示例：\n```ruby\n用户说 = 1\nend\n```\n好的")
+
+    def test_a_user_manual_or_faq_heading_is_not_a_user_said_draft(self):
+        # 用户说明（使用说明书）、用户问题/用户问卷 这样的标题不是“用户说/用户问”草稿。
+        for text in ("用户说明：\r\n输入下面的命令退出。\r\n\r\n    end\r\n\r\n程序会关闭。",
+                     "用户问题汇总\r\n如何结束一个 Ruby 代码块？\r\n    end\r\n下一题。",
+                     "用户问卷\n请回答。\nend 表示结束。"):
+            with self.subTest(text=text):
+                self.assertEqual(strip_internal_expression_protocol(text), text)
 
     def test_inline_end_right_after_cjk_closes_and_any_other_inline_end_bounds_a_draft(self):
         # 上游文档里的 DeepSeek 形状 th…end<正文>：end 紧跟中文也是结束标记。
@@ -310,9 +325,15 @@ class ReplyTextProcessingTests(unittest.TestCase):
         # 其他独立的 end（逗号、数字、空格后）不是结束标记，就是边界：整段保留。
         text = "th想想，end 是什么\n正文\nend回答"
         self.assertEqual(strip_internal_expression_protocol(text), text)
-        # 单词里的 end（weekend）只是普通文字，草稿照常在自己的 end 处结束。
+        # 以 end 结尾的单词（weekend）也分不清是不是结束标记，同样是边界：整段保留。
+        for text in ("th用户说weekend要出去。\nend好的",
+                     "用户问我什么是 weekend\n它指周末。\nend 表示结束。",
+                     "th先确认缩写是APIend这里是正文。\nend 是结束标记。"):
+            with self.subTest(text=text):
+                self.assertEqual(strip_internal_expression_protocol(text), text)
+        # end 后面紧跟字母（endpoint、ended）只是普通文字，草稿照常在自己的 end 处结束。
         self.assertEqual(strip_internal_expression_protocol(
-            "th用户说weekend要出去。\nend好的"), "好的")
+            "th用户说endpoint已经ended了。\nend好的"), "好的")
 
     def test_end_followed_by_crlf_closes_a_th_draft(self):
         # end 后面是 \r\n 也算草稿结束；草稿只删到 end，后面的换行和正文原样保留，
