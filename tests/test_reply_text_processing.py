@@ -276,10 +276,15 @@ class ReplyTextProcessingTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(strip_internal_expression_protocol(text), text)
 
-    def test_end_followed_by_crlf_closes_a_user_said_draft_but_not_a_quoted_line(self):
-        # CRLF 下 用户问 草稿在 end 处结束，end 后面的 \r\n 原样保留。
-        self.assertEqual(strip_internal_expression_protocol(
-            "回答。\r\n用户问「在吗」。\r\nend\r\n真正的回答"), "回答。\r\n\r\n真正的回答")
+    def test_a_user_said_draft_closes_only_before_cjk_on_the_same_line(self):
+        # 用户说/用户问 常常是可见的句子，是弱标记：只有 end 后面同一行紧跟中文才算结束，
+        # end 后面换行或到结尾都不算，草稿原样保留（和上游的 end真正的回答 形状一致）。
+        for text in ("回答。\r\n用户问「在吗」。\r\nend\r\n真正的回答",
+                     "用户问我 Ruby 循环怎么写。\r\n3.times do\r\n  puts 1\r\nend\r\n这会打印三次。",
+                     "用户问我 Ruby 循环怎么写。\n3.times do\n  puts 1\nend\n这会打印三次。",
+                     "用户说：“Ruby 方法以这一行收尾。”\r\nend\r\n这就是结束关键字。"):
+            with self.subTest(text=text):
+                self.assertEqual(strip_internal_expression_protocol(text), text)
         # 「 不再开启草稿，CRLF 下也原样保留。
         text = "「候选」\r\n想想。\r\nend真正的回答"
         self.assertEqual(strip_internal_expression_protocol(text), text)
@@ -308,12 +313,26 @@ class ReplyTextProcessingTests(unittest.TestCase):
         self.assertEqual(strip_internal_expression_protocol(
             "示例：\n```ruby\n用户说 = 1\nend\n```\nth想想。\nend好的"),
             "示例：\n```ruby\n用户说 = 1\nend\n```\n好的")
+        # 四个反引号的围栏里，三个反引号的行只是内容，不会关掉围栏（CommonMark）。
+        for text in ("示例：\r\n````markdown\r\n```ruby\r\ndef demo\r\n  用户说 = \"你好\"\r\nend\r\n```\r\n````\r\n",
+                     "示例：\n````markdown\n```text\nth想。\nend好的\n```\n````\n"):
+            with self.subTest(text=text):
+                self.assertEqual(strip_internal_expression_protocol(text), text)
+        # 同一行闭合的 ```code``` 不是围栏开头，后面的草稿照常清理。
+        self.assertEqual(strip_internal_expression_protocol(
+            "先运行：\n```pip install requests```\nth我需要先判断用户的意图。\nend好了。"),
+            "先运行：\n```pip install requests```\n好了。")
+        self.assertEqual(strip_internal_expression_protocol(
+            "```gem install rails```\nth先确认安装命令。\nend安装命令如上。"),
+            "```gem install rails```\n安装命令如上。")
 
     def test_a_user_manual_or_faq_heading_is_not_a_user_said_draft(self):
-        # 用户说明（使用说明书）、用户问题/用户问卷 这样的标题不是“用户说/用户问”草稿。
+        # 用户说明（使用说明书）、用户说法、用户问题/用户问卷/用户问答 这样的标题不是“用户说/用户问”草稿。
         for text in ("用户说明：\r\n输入下面的命令退出。\r\n\r\n    end\r\n\r\n程序会关闭。",
                      "用户问题汇总\r\n如何结束一个 Ruby 代码块？\r\n    end\r\n下一题。",
-                     "用户问卷\n请回答。\nend 表示结束。"):
+                     "用户问卷\n请回答。\nend 表示结束。",
+                     "用户问答\n如何退出？\nend 表示结束。",
+                     "用户说法\n大家怎么说？\nend 表示结束。"):
             with self.subTest(text=text):
                 self.assertEqual(strip_internal_expression_protocol(text), text)
 
