@@ -276,22 +276,25 @@ class ReplyTextProcessingTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(strip_internal_expression_protocol(text), text)
 
-    def test_a_th_draft_closes_only_before_cjk_on_the_same_line(self):
-        # 缩进的 th 标识符（Ruby 变量）后面跟着方法的 end 换行，不是草稿：整段保留。
-        for text in ("def read_threshold\r\n  th阈值 = 3\r\nend\r\nputs read_threshold",
-                     "def read_threshold\n  th阈值 = 3\nend\nputs read_threshold"):
-            with self.subTest(text=text):
-                self.assertEqual(strip_internal_expression_protocol(text), text)
+    def test_an_indented_th_identifier_before_an_end_line_follows_upstream(self):
+        # Ruby 里缩进的 th 标识符：CRLF 时 end 后面是 \r，不是结束标记，整段保留；
+        # LF 时和上游一样当草稿清理。
+        text = "def read_threshold\r\n  th阈值 = 3\r\nend\r\nputs read_threshold"
+        self.assertEqual(strip_internal_expression_protocol(text), text)
+        self.assertEqual(strip_internal_expression_protocol(
+            "def read_threshold\n  th阈值 = 3\nend\nputs read_threshold"),
+            "def read_threshold\n\nputs read_threshold")
 
-    def test_a_user_said_draft_closes_only_before_cjk_on_the_same_line(self):
-        # 用户说/用户问 常常是可见的句子，是弱标记：只有 end 后面同一行紧跟中文才算结束，
-        # end 后面换行或到结尾都不算，草稿原样保留（和上游的 end真正的回答 形状一致）。
+    def test_a_user_said_draft_with_a_crlf_end_line_is_kept(self):
+        # CRLF 时 end 后面是 \r，不是结束标记（上游也从不接受 \r）：草稿原样保留。
         for text in ("回答。\r\n用户问「在吗」。\r\nend\r\n真正的回答",
                      "用户问我 Ruby 循环怎么写。\r\n3.times do\r\n  puts 1\r\nend\r\n这会打印三次。",
-                     "用户问我 Ruby 循环怎么写。\n3.times do\n  puts 1\nend\n这会打印三次。",
                      "用户说：“Ruby 方法以这一行收尾。”\r\nend\r\n这就是结束关键字。"):
             with self.subTest(text=text):
                 self.assertEqual(strip_internal_expression_protocol(text), text)
+        # LF 时和上游一样在 end 行处结束。
+        self.assertEqual(strip_internal_expression_protocol(
+            "用户问我 Ruby 循环怎么写。\n3.times do\n  puts 1\nend\n这会打印三次。"), "\n这会打印三次。")
         # 「 不再开启草稿，CRLF 下也原样保留。
         text = "「候选」\r\n想想。\r\nend真正的回答"
         self.assertEqual(strip_internal_expression_protocol(text), text)
@@ -377,9 +380,9 @@ class ReplyTextProcessingTests(unittest.TestCase):
         self.assertEqual(strip_internal_expression_protocol(
             "th用户在问天气end今天晴天，记得带伞。\n明天见\nend 这个词是结束"),
             "今天晴天，记得带伞。\n明天见\nend 这个词是结束")
-        # 其他独立的 end（逗号、数字、空格后）不是结束标记，就是边界：整段保留。
-        text = "th想想，end 是什么\n正文\nend回答"
-        self.assertEqual(strip_internal_expression_protocol(text), text)
+        # 逗号后面的 end 前面不是字母，后面是中文，和上游一样是结束标记。
+        self.assertEqual(strip_internal_expression_protocol(
+            "th想想，end 是什么\n正文\nend回答"), " 是什么\n正文\nend回答")
         # 以 end 结尾的单词（weekend）也分不清是不是结束标记，同样是边界：整段保留。
         for text in ("th用户说weekend要出去。\nend好的",
                      "用户问我什么是 weekend\n它指周末。\nend 表示结束。",
@@ -391,24 +394,37 @@ class ReplyTextProcessingTests(unittest.TestCase):
         self.assertEqual(strip_internal_expression_protocol(
             "th用户说endpoint已经ended了。\nend好的"), "好的")
 
-    def test_an_unindented_bare_end_line_closes_a_th_draft(self):
-        # 顶格的 th 草稿在顶格单独一行的 end 处结束（LF 或到结尾；行尾空白和上游一样保留），
+    def test_a_bare_end_line_before_lf_closes_a_draft(self):
+        # 草稿在单独一行的 end 处结束（LF 或到结尾；end 后面的空白和上游一样留在回答里），
         # 否则草稿里没闭合的控制标签或 DSML 会让后面的清理截掉可见回答（和上游一致）。
         for text, expected in (
                 ("th想一下。\nend\n第一段讲解。", "\n第一段讲解。"),
                 ("th想一下。\nend  \n第一段讲解。", "  \n第一段讲解。"),
+                ("th想一下。\nend\t\n正文", "\t\n正文"),
+                ("th想一下。\n  end\n第一段讲解。", "\n第一段讲解。"),
+                ("正文。\n  th想一下。\nend好的", "正文。\n好的"),
                 ("th想一下。\nend", ""),
                 ("th回复里不要写 <pc_reaction_expression>。\nend\n今天晴天。", "\n今天晴天。"),
                 ("正文开头。\nth先想。\n<|DSML|tool_calls>\nend\n真正的回答。", "正文开头。\n\n真正的回答。")):
             with self.subTest(text=text):
                 self.assertEqual(strip_internal_expression_protocol(text), expected)
-        # 缩进的 end 行、缩进的 th 行、CRLF 的单独 end 行都不算（上游也从不接受 \r）：整段保留。
-        for text in ("th想一下。\n  end\n第一段讲解。",
-                     "正文。\n  th想一下。\nend好的",
-                     "th想一下。\r\nend\r\n第一段讲解。end 是结束标记。",
+        # CRLF 的单独 end 行不算（上游也从不接受 \r）：整段保留。
+        for text in ("th想一下。\r\nend\r\n第一段讲解。end 是结束标记。",
                      "术语表：\r\nth表示表头。\r\nend\r\n以上是两个词条。"):
             with self.subTest(text=text):
                 self.assertEqual(strip_internal_expression_protocol(text), text)
+
+    def test_a_draft_upstream_strips_is_stripped_so_later_cleanup_cannot_truncate(self):
+        # 上游会清理、而本分支留下的草稿，会让后面的清理把草稿里的标签或反引号和可见回答配对，
+        # 截掉回答。这些形状按上游的结果清理。
+        for text, expected in (
+                ("用户问先想。<think>\nend\n真正的回答。</think>", "\n真正的回答。"),
+                ("  th先想。`end实际正文：`<think>示例</think>`。", "实际正文：`<think>示例</think>`。"),
+                ("th先想。示例用 ```xml 开头。\n  end\n下面是示例。\n```xml\n"
+                 "<pc_reaction_expression>\n```\n最后一步。",
+                 "\n下面是示例。\n```xml\n<pc_reaction_expression>\n```\n最后一步。")):
+            with self.subTest(text=text):
+                self.assertEqual(strip_internal_expression_protocol(text), expected)
 
     def test_th_draft_with_many_fences_and_no_end_finishes_quickly(self):
         # 没有 end 的 th 草稿里有很多代码块时，正则不能指数级回溯卡住事件循环。

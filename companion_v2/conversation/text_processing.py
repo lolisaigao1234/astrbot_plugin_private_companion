@@ -63,34 +63,31 @@ _TOOL_CALL_PROTOCOL_START = re.compile(
 )
 _TOOL_CALL_PROTOCOL_BLANKS = re.compile(r"\n{3,}")
 # Some providers expose free-form reasoning as plain text with no XML wrapper:
-# "th...end<visible text>".  Strip a draft only when it is unambiguous, and
-# never delete anything upstream 7.2.7 keeps: a leaked draft is the status quo,
-# deleted visible text is a new harm.  Only `th` + CJK or 用户说/用户问 at
-# column 0 opens a draft (not the headings 用户说明/用户说法/用户问题/用户问卷/
-# 用户问答, and not inside a ``` fence); 「 is ordinary role-play text.  A draft
-# closes at `end` that starts a line, follows 。！？ (blanks allowed) or follows
-# CJK, when CJK follows that `end` on the same line (upstream's end实际正文
-# shape).  A `th` draft also closes at a bare `end` line at column 0 followed
-# by LF or the end of the text, never CRLF (upstream's close never accepts
-# \r), since a leaked draft can hide an unclosed control tag that a later
-# cleanup cuts the reply at.  A body crosses no line starting with ``` and no
-# other `end` not followed by a letter (so weekend and APIend are boundaries,
-# endpoint is text); such a draft stays visible.  The body's ``` boundary
-# allows any indent and is deliberately stricter than the 0-3 space
-# _FENCE_OPENER/_FENCE_CLOSER; do not unify them.
-_DRAFT_BODY = r"(?:(?!^[ \t]*```|end(?![A-Za-z]))[\s\S])*?"
-_DRAFT_CLOSE_BEFORE_CJK = (
-    r"(?:^[ \t]*|(?<=[。！？])[ \t]*|(?<=[\u4e00-\u9fff]))end(?=[ \t]*[\u4e00-\u9fff])")
+# "th...end<visible text>".  This is upstream 7.2.7's rule minus the cases
+# that delete visible text, and it never deletes anything upstream keeps: a
+# draft left visible where upstream strips it can make a later cleanup pair a
+# tag or backtick in the draft with the answer and truncate it, so leak only
+# where upstream's behaviour was the harm.
+# - Open: a line starting, after at most three spaces, with `th` + CJK or
+#   用户说/用户问; not the headings 用户说明/用户说法/用户问题/用户问卷/用户问答,
+#   not inside a ``` fence.  A line indented four or more columns is indented
+#   or list-nested code (CommonMark), and 「 is ordinary role-play text.
+# - Close: an `end` with no ASCII letter on either side, followed by
+#   upstream's tail: CJK, or blanks and then LF or the end of the text (never
+#   \r).  The blanks are only looked at, so they stay in the reply.
+# - Body: crosses no line starting with ``` and no `end` that does not close
+#   it, so friend/weekend/APIend or an `end` before CRLF, a letter or a digit
+#   leaves the draft visible.  The body's ``` boundary allows any indent and is
+#   deliberately stricter than the 0-3 space _FENCE_OPENER/_FENCE_CLOSER; do
+#   not unify them.
 _BARE_DRAFT_BLOCK = re.compile(
-    r"(?ms)^(?:"
-    r"th(?=[\u4e00-\u9fff])" + _DRAFT_BODY
-    + r"(?:" + _DRAFT_CLOSE_BEFORE_CJK + r"|^end(?=[ \t]*(?:\n|$)))"
-    r"|(?=用户(?:说(?![明法])|问(?![题卷答])))" + _DRAFT_BODY + _DRAFT_CLOSE_BEFORE_CJK
-    + r")"
+    r"(?ms)^ {0,3}(?:th(?=[\u4e00-\u9fff])|(?=用户(?:说(?![明法])|问(?![题卷答]))))"
+    r"(?:(?!^[ \t]*```|end(?![A-Za-z]))[\s\S])*?"
+    r"(?<![A-Za-z])end(?![A-Za-z])(?=[ \t]*(?:[\u4e00-\u9fff]|\n|$))"
 )
 # Where a draft match may start: the same line starts the regex accepts.
 _BARE_DRAFT_OPENER = re.compile(
-    r"(?m)^(?:th(?=[\u4e00-\u9fff])|用户(?:说(?![明法])|问(?![题卷答])))")
+    r"(?m)^ {0,3}(?:th(?=[\u4e00-\u9fff])|用户(?:说(?![明法])|问(?![题卷答])))")
 # A CommonMark fence line: at most three spaces, a run of three or more
 # backticks, then an info string without backticks (opener) or only blanks
 # (closer).
