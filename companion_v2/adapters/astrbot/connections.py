@@ -41,6 +41,11 @@ def _identity(platform, account, name):
         return name, account.self_id
     if name == "wechat_native":
         value = getattr(getattr(platform, "native_config", None), "account_id", None)
+    elif name == "telegram":
+        # AstrBot rebuilds the bot object after polling errors. The numeric prefix of
+        # a bot token is the bot's public user id, readable before it has connected.
+        token = getattr(platform.get_client(), "token", None)
+        value = token.partition(":")[0] if isinstance(token, str) else None
     else:
         value = getattr(platform, "appid", None) or getattr(platform, "app_id", None)
         if value is None:

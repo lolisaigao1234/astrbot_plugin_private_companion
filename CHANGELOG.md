@@ -1,3 +1,7 @@
+## 未发布
+
+- 新增 Telegram 私聊文字：纳入原生路由白名单，账号键使用平台实例 ID，用户 subject 使用 `telegram-user:` 命名空间；沿用 AstrBot 的 Telegram 通道收发与白名单，事件 bot 从 Telegram 事件的 `client` 读取；AstrBot 在轮询出错后重建 Telegram bot 时，同一 bot 的私聊会恢复，换成另一个 bot 时拒绝；暂不支持 Telegram 群聊（#639）。
+
 ## 7.3.1 - 2026-11-23
 
 - 群聊防抖批次保留明确点名，支持按群开启被 @ 或命中唤醒词时直接应答（#836、#838、#840）。
