@@ -290,8 +290,8 @@ def native_client_connected(platform, account_id, client=None):
         return False
     if meta.name == "telegram":
         application = getattr(platform, "application", None)
-        if (getattr(platform, "_terminating", False)
-                or not getattr(platform, "_application_started", False)
+        if (meta.id != account_id or getattr(platform, "_terminating", False)
+                or not getattr(platform, "_application_started", True)
                 or not getattr(application, "running", False)
                 or not getattr(getattr(application, "updater", None), "running", False)):
             return False

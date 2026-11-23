@@ -147,16 +147,20 @@ def telegram_private_message_route(controller, event, *, configured_peer):
     original = getattr(getattr(message, "raw_message", None), "message", None)
     chat = getattr(original, "chat", None)
     raw_sender = getattr(original, "from_user", None)
-    sender = event_peer_id(event)
+    try:
+        sender = event_peer_id(event)
+        login = event_account_id(event)
+    except ValueError:
+        return None
     if (meta.name != "telegram" or getattr(chat, "type", None) != "private"
-            or str(getattr(chat, "id", None)) != sender or str(getattr(raw_sender, "id", None)) != sender
-            or str(getattr(original, "message_id", None)) != message.message_id
+            or type(getattr(chat, "id", None)) is not int or str(chat.id) != sender
+            or type(getattr(raw_sender, "id", None)) is not int or str(raw_sender.id) != sender
+            or type(getattr(original, "message_id", None)) is not int or str(original.message_id) != message.message_id
             or getattr(message.type, "value", None) != "FriendMessage" or message.group_id
             or message.session_id != sender or getattr(native_session.message_type, "value", None) != "FriendMessage"
             or native_session.platform_id != meta.id or native_session.platform_name != meta.id
             or native_session.session_id != sender or event.unified_msg_origin != f"{meta.id}:FriendMessage:{sender}"):
         return None
-    login = event_account_id(event)
     bridge = session.bridge
     account = bridge.accounts.get((meta.id, login))
     if account is None:
