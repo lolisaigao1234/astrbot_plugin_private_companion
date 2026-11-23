@@ -59,6 +59,16 @@ def telegram_event(platform, number=1, text="你好 😀", peer=OWNER):
 
 
 class TelegramPlatformTests(unittest.TestCase):
+    def test_running_application_without_start_flag_requires_the_right_account(self):
+        from companion_v2.adapters.astrbot.native import native_client_connected
+
+        platform = TelegramPlatform()
+        del platform._application_started
+        self.assertTrue(native_client_connected(platform, "tg-main"))
+        self.assertFalse(native_client_connected(platform, "other-platform"))
+        platform.application.updater.running = False
+        self.assertFalse(native_client_connected(platform, "tg-main"))
+
     def test_the_bot_is_the_event_client(self):
         event = telegram_event(TelegramPlatform())
         self.assertTrue(supported_platform_name("telegram"))
@@ -130,7 +140,14 @@ class TelegramPrivateCommandTests(TelegramHostFixture, unittest.IsolatedAsyncioT
         await self.plugin.receive_companion_message(event)
         return event
 
-    async def dispatch_overlapping_notices(self, peer):
+    async def dispatch_overlapping_notices(self, peer, owner=None):
+        from astrbot_host.private_notice import notice_cooldown_lock
+
+        lock = notice_cooldown_lock(self.controller, owner)
+
+        async def wait_for_contention():
+            while not lock._waiters:
+                await asyncio.sleep(0)
         sending, release = asyncio.Event(), asyncio.Event()
 
         async def send(*args):
@@ -142,7 +159,7 @@ class TelegramPrivateCommandTests(TelegramHostFixture, unittest.IsolatedAsyncioT
         try:
             await asyncio.wait_for(sending.wait(), timeout=10)
             second = asyncio.create_task(self.dispatch("你好", peer))
-            await asyncio.sleep(0)
+            await asyncio.wait_for(wait_for_contention(), timeout=30)
             self.clock.advance(timedelta(seconds=61))
         finally:
             release.set()
@@ -185,6 +202,25 @@ class TelegramPrivateCommandTests(TelegramHostFixture, unittest.IsolatedAsyncioT
         await self.dispatch("你好", peer)
         self.assertEqual(self.platform.send_by_session.await_count, 2)
 
+    async def test_queued_stranger_notice_observes_new_mute(self):
+        from astrbot_host.private_notice import notice_cooldown_lock
+        from astrbot_host.stranger_notice import BLOCK_KIND, stranger_block_view_id
+        from companion_v2.execution.models import encode, stamp
+
+        peer = OWNER + 1
+        defaults = {"stranger_notice": True, "denied_reply": "陌生人提示",
+                    "stranger_daily_cap": 3, "notice_cooldown_seconds": 60}
+        self.controller.session.application.private_access_settings.defaults_installation = Mock(return_value=defaults)
+        async with notice_cooldown_lock(self.controller):
+            queued = asyncio.create_task(self.dispatch("你好", peer))
+            await asyncio.sleep(0)
+            key = stranger_block_view_id("tg-main", "tg-main", str(peer))
+            with self.controller.runtime.transaction() as connection:
+                connection.execute("INSERT INTO memory_views VALUES (?, ?, ?, ?, 'active', ?, ?, ?)",
+                                   (key, key, BLOCK_KIND, 1, encode({}), encode({}), stamp(self.clock.now())))
+        await queued
+        self.platform.send_by_session.assert_not_awaited()
+
     async def test_revoked_dialogue_honors_blank_copy_and_cooldown(self):
         authority = self.controller.authority
         context = authority.context("tg-owner", "role-tg")
@@ -195,7 +231,7 @@ class TelegramPrivateCommandTests(TelegramHostFixture, unittest.IsolatedAsyncioT
         await self.dispatch("你好")
         self.platform.send_by_session.assert_not_awaited()
         defaults["denied_reply"] = "权限提示"
-        await self.dispatch_overlapping_notices(OWNER)
+        await self.dispatch_overlapping_notices(OWNER, self.controller.session.application.private_notice.owner_key(context))
         self.platform.send_by_session.assert_awaited_once()
         self.assertEqual(self.sent_text(), "权限提示")
         self.clock.advance(timedelta(seconds=60))
