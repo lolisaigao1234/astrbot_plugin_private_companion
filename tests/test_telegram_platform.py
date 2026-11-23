@@ -170,6 +170,16 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
                 self.assertEqual((receipt.status, receipt.failure_code), ("not_sent", reason))
                 self.assertNotIn(token, " ".join(logs.output))
 
+    async def test_chat_action_warning_redacts_the_bot_token(self):
+        token = self.platform.client.token
+        self.platform.client.send_chat_action.side_effect = InvalidToken(token)
+        self.platform.client.send_message.side_effect = InvalidToken(token)
+        with self.assertLogs("astrbot", level="WARNING") as host_logs:
+            receipt = await self.send()
+        self.assertEqual((receipt.status, receipt.failure_code), ("not_sent", "telegram_invalid_token"))
+        self.assertNotIn(token, " ".join(host_logs.output))
+        self.assertIn("[redacted]", " ".join(host_logs.output))
+
     async def test_transport_errors_are_unknown(self):
         for error in (TimedOut(), NetworkError("connection lost")):
             with self.subTest(error=type(error).__name__):
