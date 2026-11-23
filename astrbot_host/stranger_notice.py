@@ -43,6 +43,10 @@ BLOCK_KIND = "relationship.stranger_block.v1"
 OWNER = "relationship.stranger_notice"
 
 
+def stranger_cooldown_key(route):
+    return "stranger-notice:" + route.platform_id + ":" + route.login + ":" + route.peer
+
+
 def stranger_block_view_id(platform_id, login, peer):
     """One exact sender muted for one receiving account; never a wildcard."""
     return "stranger-block:" + platform_id + ":" + login + ":" + peer
@@ -161,7 +165,11 @@ class StrangerNotice:
     def _cooldown_ok(self, route, at, cooldown):
         if cooldown <= 0:
             return True
-        document = self._read("stranger-notice:" + route.login + ":" + route.peer, COOLDOWN_KIND)
+        document = self._read(stranger_cooldown_key(route), COOLDOWN_KIND)
+        if not document:
+            legacy = self._read("stranger-notice:" + route.login + ":" + route.peer, COOLDOWN_KIND)
+            if legacy.get("platform_id") == route.platform_id:
+                document = legacy
         previous = document.get("last_notice_at")
         if not isinstance(previous, str) or not previous:
             return True
@@ -208,10 +216,14 @@ class StrangerNotice:
             report("no_reply", reason_code)
             return None
 
-        session = controller.session
         replied = False
         try:
             async with notice_cooldown_lock(controller):
+                # Binding or adapter replacement may have happened while another notice was sending.
+                route = stranger_route(controller, event)
+                if route is None:
+                    return None
+                session = controller.session
                 if stranger_blocked(controller, route):
                     # 被屏蔽的账号不收回执：既不回那句固定文案，也不占冷却与当天额度。
                     # finally 仍会记一条有界的联系记录，管理页据此显示「已屏蔽」。
@@ -239,7 +251,7 @@ class StrangerNotice:
                 replied = True
                 report("replied", "stranger_notice_sent")
                 # 只有真的送出去了才记账：失败不占用冷却，也不占当天的额度。
-                self._write("stranger-notice:" + route.login + ":" + route.peer, COOLDOWN_KIND,
+                self._write(stranger_cooldown_key(route), COOLDOWN_KIND,
                             {"version": 1, "platform_id": route.platform_id, "login": route.login,
                              "peer": route.peer, "text_sha": receipt.get("receipt"), "last_notice_at": stamp(sent_at)}, sent_at)
                 if sent_at.date() != at.date():
@@ -256,7 +268,8 @@ class StrangerNotice:
             # Visibility outlives every gate: a stranger is listed even when the
             # notice was disabled, rate-limited or failed to send.
             try:
-                self._touch_contact(route, controller.now(), outcome[0])
+                if route is not None:
+                    self._touch_contact(route, controller.now(), outcome[0])
             except Exception:  # noqa: BLE001 - the ledger must never block message handling
                 pass
 

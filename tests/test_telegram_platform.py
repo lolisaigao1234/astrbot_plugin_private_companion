@@ -211,6 +211,19 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
         self.assertNotIn(token, " ".join(host_logs.output))
         self.assertIn("[redacted]", " ".join(host_logs.output))
 
+    async def test_private_notice_redacts_host_chat_action_warning(self):
+        from astrbot_host.private_notice import send_private_notice
+
+        event = telegram_event(self.platform)
+        route = authenticate_notice_route(self.controller, event, ScopeKind.PRIVATE, expected_post="message")
+        token = self.platform.client.token
+        self.platform.client.send_chat_action.side_effect = InvalidToken(token)
+        with self.assertLogs("astrbot", level="WARNING") as logs:
+            receipt = await send_private_notice(self.controller, event, text="验证", route=route)
+        self.assertEqual(receipt["state"], "delivered")
+        self.assertNotIn(token, " ".join(logs.output))
+        self.assertIn("[redacted]", " ".join(logs.output))
+
     async def test_unavailable_refusal_classifier_keeps_dispatch_unknown(self):
         self.platform.client.send_message.side_effect = NetworkError("connection lost")
         with patch("companion_v2.adapters.astrbot.platform_sender._telegram_refusal", side_effect=ImportError):
@@ -322,6 +335,19 @@ class TelegramPrivateCommandTests(TelegramHostFixture, unittest.IsolatedAsyncioT
         await self.dispatch("你好", peer)
         self.assertEqual(self.platform.send_by_session.await_count, 2)
 
+    async def test_stranger_cooldown_keeps_legacy_notice_on_its_own_platform(self):
+        from astrbot_host.stranger_notice import COOLDOWN_KIND, StrangerNotice
+        from companion_v2.execution.models import stamp
+
+        notices = StrangerNotice(self.controller)
+        now = self.clock.now()
+        qq = NS(platform_id="qq-main", login="12345", peer="67890")
+        telegram = NS(platform_id="12345", login=qq.login, peer=qq.peer)
+        notices._write("stranger-notice:12345:67890", COOLDOWN_KIND,
+                       {"platform_id": qq.platform_id, "last_notice_at": stamp(now)}, now)
+        self.assertFalse(notices._cooldown_ok(qq, now, 60))
+        self.assertTrue(notices._cooldown_ok(telegram, now, 60))
+
     async def test_stranger_notice_uses_delivery_day_for_daily_cap(self):
         defaults = {"stranger_notice": True, "denied_reply": "陌生人提示",
                     "stranger_daily_cap": 1, "notice_cooldown_seconds": 60}
@@ -352,6 +378,39 @@ class TelegramPrivateCommandTests(TelegramHostFixture, unittest.IsolatedAsyncioT
                                    (key, key, BLOCK_KIND, 1, encode({}), encode({}), stamp(self.clock.now())))
         await queued
         self.platform.send_by_session.assert_not_awaited()
+
+    async def test_queued_notices_recheck_binding_and_dialogue_access(self):
+        from astrbot_host.private_notice import notice_cooldown_lock
+        from companion_v2.identity_policy.models import AuthorizationTier
+
+        session = self.controller.session
+        app = session.application
+        target = self.controller.settings.target("tg-owner")
+        context = self.controller.authority.context("tg-owner", "role-tg")
+        grants = self.controller.authority.identities
+        grants.revoke_grant(self.controller.authority.grant_id(context.scope, "conversation.reply"),
+                            revoked_at=self.clock.now(), expected_revision=grants.revision)
+        defaults = {"stranger_notice": True, "denied_reply": "权限提示",
+                    "stranger_daily_cap": 3, "notice_cooldown_seconds": 60}
+        app.private_access_settings.defaults_installation = Mock(return_value=defaults)
+        app.private_notice.settings = NS(defaults=lambda context: defaults)
+        for peer, owner in ((OWNER, app.private_notice.owner_key(context)), (OWNER + 1, None)):
+            lock = notice_cooldown_lock(self.controller, owner)
+            async with lock:
+                queued = asyncio.create_task(self.dispatch("你好", peer))
+                async with asyncio.timeout(30):
+                    while not lock._waiters:
+                        await asyncio.sleep(0)
+                if peer == OWNER:
+                    grants.issue_grant(grant_id="restored-dialogue", subject=context.actor.subject,
+                                       scope=context.scope, capability="conversation.reply",
+                                       tier=AuthorizationTier.STANDARD, valid_from=self.clock.now(),
+                                       expected_revision=grants.revision)
+                else:
+                    new_target = replace(target, target_id="new-peer", participant_id=str(peer))
+                    self.controller.settings = replace(self.controller.settings, targets=(target, new_target))
+            await queued
+            self.platform.send_by_session.assert_not_awaited()
 
     async def test_revoked_dialogue_honors_blank_copy_and_cooldown(self):
         authority = self.controller.authority
@@ -408,6 +467,16 @@ class TelegramPrivateCommandTests(TelegramHostFixture, unittest.IsolatedAsyncioT
         with self.assertRaises(TaskError) as refused:
             route(event)
         self.assertEqual(refused.exception.code, "host_account_offline")
+
+    async def test_calendar_reply_survives_rebuild_of_the_same_bot(self):
+        async def plan(event, target, *, mode, refresh):
+            self.platform.client = telegram_bot()
+            return {"state": "succeeded", "saved": 1}
+
+        self.controller.session.plan_calendar = plan
+        await self.dispatch("生成日程")
+        self.platform.send_by_session.assert_awaited_once()
+        self.assertIn("1", self.sent_text())
 
     async def test_calendar_reply_requires_the_same_bot_after_planning(self):
         async def plan(event, target, *, mode, refresh):
