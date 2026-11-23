@@ -45,7 +45,7 @@ def _identity(platform, account, name):
         # AstrBot rebuilds the bot object after polling errors. The numeric prefix of
         # a bot token is the bot's public user id, readable before it has connected.
         token = getattr(platform.get_client(), "token", None)
-        value = token.partition(":")[0] if isinstance(token, str) else None
+        value = token.partition(":")[0] if isinstance(token, str) and ":" in token else None
     else:
         value = getattr(platform, "appid", None) or getattr(platform, "app_id", None)
         if value is None:

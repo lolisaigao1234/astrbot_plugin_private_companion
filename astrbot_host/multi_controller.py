@@ -951,7 +951,16 @@ class AstrBotMultiController:
 
     def _configured_platform_name(self, platform_id):
         platform = self.context.get_platform_inst(platform_id)
-        return str(platform.meta().name) if platform is not None else ""
+        if platform is not None:
+            return str(platform.meta().name)
+        # AstrBot loads plugins before platforms. Until a Telegram channel is loaded its name
+        # comes from AstrBot's own configuration, so its people are never taken for QQ numbers.
+        try:
+            return "telegram" if any(
+                row.get("id") == platform_id and row.get("type") == "telegram" and row.get("enable") is True
+                for row in self.context.get_config().get("platform", ())) else ""
+        except (AttributeError, TypeError):
+            return ""
 
     async def _open_async(self):
         if self.runtime is None:
