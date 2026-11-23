@@ -9,7 +9,6 @@ C2C/group openids and media upload rules inside AstrBot.
 
 import asyncio
 from datetime import datetime, timezone
-from contextlib import contextmanager, nullcontext
 import logging
 from time import perf_counter
 from uuid import uuid4
@@ -19,6 +18,7 @@ from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.platform.message_session import MessageSession
 from astrbot.core.platform.message_type import MessageType
 
+from companion_v2.adapters.astrbot.telegram_logging import redact_telegram_token
 from companion_v2.conversation.delivery import DeliveryReceipt, LocalSender
 from companion_v2.delivery.components import build_component_plan
 from companion_v2.delivery.media import ImageDeliveryEnvelope, payload_hash
@@ -29,26 +29,6 @@ from companion_v2.foundation.refs import ScopeKind
 
 
 logger = logging.getLogger(__name__)
-
-
-@contextmanager
-def _redact_telegram_token(client):
-    """AstrBot can log the Bot API error text while sending a chat action."""
-    token = getattr(client, "token", None)
-
-    def redact(record):
-        if token:
-            message = record.getMessage()
-            if token in message:
-                record.msg, record.args = message.replace(token, "[redacted]"), ()
-        return True
-
-    host_logger = logging.getLogger("astrbot")
-    host_logger.addFilter(redact)
-    try:
-        yield
-    finally:
-        host_logger.removeFilter(redact)
 
 
 def _telegram_refusal(error, chain):
@@ -275,7 +255,7 @@ class AstrBotPlatformSender:
             platform = route_bridge.connections.assert_current(lease).platform
             stage = "platform_send"
             try:
-                with _redact_telegram_token(lease.client) if platform_name == "telegram" else nullcontext():
+                with redact_telegram_token(lease.client if platform_name == "telegram" else None):
                     await platform.send_by_session(session, chain)
             except Exception as error:
                 if platform_name == "telegram":
