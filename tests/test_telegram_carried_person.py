@@ -10,10 +10,9 @@ EARLIER = "onebot-user:200"
 
 
 class CarriedPersonTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
-    def record(self, **changes):
-        authority, target = self.controller.authority, self.controller.settings.target("tg-owner")
-        authority.write("host.multi.person:" + digest(authority.principal(target)),
-                        {"platform_name": "telegram", "subject_id": EARLIER, **changes})
+    def record(self, target_id="tg-owner"):
+        authority, target = self.controller.authority, self.controller.settings.target(target_id)
+        authority.write("host.multi.person:" + digest(authority.principal(target)), EARLIER)
         return authority, target
 
     async def test_a_recorded_account_is_admitted_as_the_earlier_person_before_and_after_its_channel_loads(self):
@@ -30,9 +29,12 @@ class CarriedPersonTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.admitted(plugin, 1), EARLIER)
 
     async def test_a_record_for_another_kind_of_channel_is_ignored(self):
+        self.controller = self.make_controller()
         await self.controller._open_async()
-        authority, target = self.record(platform_name="weixin_oc")
-        self.assertEqual(authority.subject(target).subject_id, f"telegram-user:{OWNER}")
+        authority, target = self.record("second")
+        self.assertEqual(authority.subject(replace(target, participant_id="300")).subject_id, "onebot-user:300")
+        authority.write("host.multi.person:" + digest(authority.principal(target)), "onebot-user:999")
+        self.assertEqual(authority.subject(target).subject_id, EARLIER)
 
     async def test_an_account_already_bound_to_someone_else_is_refused(self):
         await self.start_host()
