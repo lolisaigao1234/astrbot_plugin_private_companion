@@ -28,7 +28,7 @@ from companion_v2.adapters.astrbot.native import account_number
 from companion_v2.execution.models import encode, stamp
 from companion_v2.foundation.refs import ScopeKind
 
-from .private_notice import private_notice_allowed, send_private_notice
+from .private_notice import notice_cooldown_lock, private_notice_allowed, send_private_notice
 from .recalls import telegram_private_message_route
 
 
@@ -224,26 +224,27 @@ class StrangerNotice:
             text = defaults["denied_reply"]
             if not text or not private_notice_allowed(controller.settings):
                 return no_reply("stranger_notice_delivery_unavailable")
-            at = controller.now()
-            if not self._cooldown_ok(route, at, defaults["notice_cooldown_seconds"]):
-                return no_reply("stranger_notice_cooldown")
-            room = self._daily_room(at, defaults["stranger_daily_cap"])
-            if room is None:
-                return no_reply("stranger_notice_daily_cap")
-            view_id, count = room
-            receipt = await send_private_notice(controller, event, text=text, route=route)
-            if receipt.get("state") != "delivered":
-                return no_reply("stranger_notice_send_failed")
-            replied = True
-            report("replied", "stranger_notice_sent")
-            # 只有真的送出去了才记账：失败不占用冷却，也不占当天的额度。
-            self._write("stranger-notice:" + route.login + ":" + route.peer, COOLDOWN_KIND,
-                        {"version": 1, "platform_id": route.platform_id, "login": route.login,
-                         "peer": route.peer, "text_sha": receipt.get("receipt"), "last_notice_at": stamp(at)}, at)
-            self._write(view_id, DAILY_KIND,
-                        {"version": 1, "date": at.date().isoformat(), "count": count + 1}, at)
-            return {"platform_id": route.platform_id, "login": route.login, "peer": route.peer,
-                    "count_today": count + 1, "sent_at": stamp(at), "receipt": receipt.get("receipt")}
+            async with notice_cooldown_lock(controller):
+                at = controller.now()
+                if not self._cooldown_ok(route, at, defaults["notice_cooldown_seconds"]):
+                    return no_reply("stranger_notice_cooldown")
+                room = self._daily_room(at, defaults["stranger_daily_cap"])
+                if room is None:
+                    return no_reply("stranger_notice_daily_cap")
+                view_id, count = room
+                receipt = await send_private_notice(controller, event, text=text, route=route)
+                if receipt.get("state") != "delivered":
+                    return no_reply("stranger_notice_send_failed")
+                replied = True
+                report("replied", "stranger_notice_sent")
+                # 只有真的送出去了才记账：失败不占用冷却，也不占当天的额度。
+                self._write("stranger-notice:" + route.login + ":" + route.peer, COOLDOWN_KIND,
+                            {"version": 1, "platform_id": route.platform_id, "login": route.login,
+                             "peer": route.peer, "text_sha": receipt.get("receipt"), "last_notice_at": stamp(at)}, at)
+                self._write(view_id, DAILY_KIND,
+                            {"version": 1, "date": at.date().isoformat(), "count": count + 1}, at)
+                return {"platform_id": route.platform_id, "login": route.login, "peer": route.peer,
+                        "count_today": count + 1, "sent_at": stamp(at), "receipt": receipt.get("receipt")}
         except Exception:
             if not reported:
                 report("no_reply", "stranger_notice_processing_failed")

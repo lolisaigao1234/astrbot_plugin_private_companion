@@ -34,6 +34,9 @@ class TelegramPlatform:
     def __init__(self):
         self.metadata = NS(name="telegram", id="tg-main")
         self.client = telegram_bot()
+        self._terminating = False
+        self._application_started = True
+        self.application = NS(running=True, updater=NS(running=True))
 
     def meta(self):
         return self.metadata
@@ -127,6 +130,23 @@ class TelegramPrivateCommandTests(TelegramHostFixture, unittest.IsolatedAsyncioT
         await self.plugin.receive_companion_message(event)
         return event
 
+    async def dispatch_overlapping_notices(self, peer):
+        sending, release = asyncio.Event(), asyncio.Event()
+
+        async def send(*args):
+            sending.set()
+            await release.wait()
+
+        self.platform.send_by_session.side_effect = send
+        first = asyncio.create_task(self.dispatch("你好", peer))
+        try:
+            await asyncio.wait_for(sending.wait(), timeout=10)
+            second = asyncio.create_task(self.dispatch("你好", peer))
+            await asyncio.sleep(0)
+        finally:
+            release.set()
+        await asyncio.gather(first, second)
+
     def sent_text(self, peer=OWNER):
         session, message = self.platform.send_by_session.await_args.args
         self.assertEqual(str(session), f"tg-main:FriendMessage:{peer}")
@@ -157,8 +177,7 @@ class TelegramPrivateCommandTests(TelegramHostFixture, unittest.IsolatedAsyncioT
         await self.dispatch("你好", peer)
         self.platform.send_by_session.assert_not_awaited()
         defaults["stranger_notice"] = True
-        await self.dispatch("你好", peer)
-        await self.dispatch("你好", peer)
+        await self.dispatch_overlapping_notices(peer)
         self.platform.send_by_session.assert_awaited_once()
         self.assertEqual(self.sent_text(peer), "陌生人提示")
         self.clock.advance(timedelta(seconds=60))
@@ -175,8 +194,7 @@ class TelegramPrivateCommandTests(TelegramHostFixture, unittest.IsolatedAsyncioT
         await self.dispatch("你好")
         self.platform.send_by_session.assert_not_awaited()
         defaults["denied_reply"] = "权限提示"
-        await self.dispatch("你好")
-        await self.dispatch("你好")
+        await self.dispatch_overlapping_notices(OWNER)
         self.platform.send_by_session.assert_awaited_once()
         self.assertEqual(self.sent_text(), "权限提示")
         self.clock.advance(timedelta(seconds=60))
@@ -217,7 +235,7 @@ class TelegramPrivateCommandTests(TelegramHostFixture, unittest.IsolatedAsyncioT
         event.message_obj.raw_message = telegram_event(self.platform, peer=OWNER + 1).message_obj.raw_message
         self.assertIsNone(route(event))
         event = telegram_event(self.platform)
-        self.platform.client.is_shutting_down = True
+        self.platform.application.updater.running = False
         with self.assertRaises(TaskError) as refused:
             route(event)
         self.assertEqual(refused.exception.code, "host_account_offline")

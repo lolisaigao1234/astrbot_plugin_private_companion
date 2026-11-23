@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 
 from companion_v2.execution.models import TaskError, digest
@@ -182,6 +183,14 @@ def private_notice_allowed(settings, *, group=False):
     return True
 
 
+def notice_cooldown_lock(controller):
+    """Serialize the quota check, delivery and receipt across concurrent events."""
+    lock = getattr(controller, "_notice_cooldown_lock", None)
+    if lock is None:
+        lock = controller._notice_cooldown_lock = asyncio.Lock()
+    return lock
+
+
 async def notify_refusal(controller, session, event, *, context):
     """没有对话权限时按配置回一句；返回有界回执或 ``None``（没发就没发）。
 
@@ -192,15 +201,16 @@ async def notify_refusal(controller, session, event, *, context):
 
     if context is None or not private_notice_allowed(controller.settings):
         return None
-    application = session.application
-    at = controller.now()
-    text = application.private_notice.due(context, at)
-    if not text:
-        return None
-    route = authenticate_notice_route(controller, event, ScopeKind.PRIVATE, expected_post="message")
-    if route is None:
-        return None
-    receipt = await send_private_notice(controller, event, text=text, route=route)
-    if receipt.get("state") == "delivered":
-        application.private_notice.mark_sent(context, context.actor.subject.subject_id, text, at)
-    return receipt
+    async with notice_cooldown_lock(controller):
+        application = session.application
+        at = controller.now()
+        text = application.private_notice.due(context, at)
+        if not text:
+            return None
+        route = authenticate_notice_route(controller, event, ScopeKind.PRIVATE, expected_post="message")
+        if route is None:
+            return None
+        receipt = await send_private_notice(controller, event, text=text, route=route)
+        if receipt.get("state") == "delivered":
+            application.private_notice.mark_sent(context, context.actor.subject.subject_id, text, at)
+        return receipt
