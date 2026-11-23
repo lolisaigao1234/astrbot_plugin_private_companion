@@ -185,6 +185,10 @@ class MultiAuthority:
     def subject(self, target, participant_id=None):
         participant = participant_id if participant_id is not None else target.participant_id
         name = self.platform_name(target.platform_id) if callable(self.platform_name) else ""
+        # An operator can record that one exact account is a person from an earlier channel.
+        carried = self.read("host.multi.person:" + digest(self.principal(target, participant_id)))
+        if carried is not None and carried["platform_name"] == name:
+            return SubjectRef(self.runtime.installation_id, SubjectKind.HUMAN, carried["subject_id"])
         try:
             subject_id = native_user_subject_id(name, participant)
         except ValueError:
