@@ -995,6 +995,7 @@ class AstrBotMultiController:
             authority=self.authority, native_types=self.native_types, provider_fingerprint=manifest["provider_fingerprint"],
             connection_manager=connections,
             runtime_instance_id="astrbot-multi-" + uuid4().hex, native_tool_port=self.native_extensions, now=self.now,
+            relay_window_names=self.session_topology.stored_window_names,
             persona_window_snapshot_lookup=self.session_topology.persona_selection_snapshot,
             persona_window_snapshot_update=self.session_topology.update_persona_selection_snapshot,
             private_session_lookup=self.session_topology.private_session_id,

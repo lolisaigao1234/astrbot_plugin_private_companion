@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 SCHEMA = "companion.native-provider.v1"
 PLUGIN_ID = "astrbot_plugin_private_companion.together"
 PROVIDER_ID = "together.native"
-VERSION = "0.9.0"
+VERSION = "0.9.1"
 _ACTIONS = {"together.room.snapshot", "together.room.create", "together.room.close",
             "together.room.members", "together.room.invite", "together.room.invitations",
             "together.room.join"}
@@ -541,6 +541,8 @@ class NativeTogetherProvider:
         read_only = request["action"] in _READ_ACTIONS
         if isinstance(result, dict):
             result.pop("closed_ticket_token", None)
+            if "delivered_privately" in result:
+                result.pop("room", None)
         response = {
             "schema": SCHEMA, "invocation_id": request["invocation_id"],
             "origin_key": request["origin_key"], "arguments_hash": request["arguments_hash"],
@@ -853,7 +855,7 @@ class NativeTogetherProvider:
         try:
             user_id = _user_id(value["context"])
             if action == "together.room.create":
-                operation = await self._create_room(value, scope, operation, user_id=user_id)
+                operation = await self._create_room(value, scope, operation, user_id=user_id, before_dispatch=before_dispatch)
             else:
                 async with self._room_lock:
                     try:
@@ -876,7 +878,7 @@ class NativeTogetherProvider:
                                           effect="unknown" if dispatched else "not_committed", error=code)
         return self._response(value, operation)
 
-    async def _create_room(self, value, scope, operation, *, user_id):
+    async def _create_room(self, value, scope, operation, *, user_id, before_dispatch=None):
         """Open one short-lived room and bind it to this V2 scope.
 
         旧版插件的工具路径会先准备手机公网访问（必要时自动起隧道）；V2 这里原先
@@ -888,8 +890,12 @@ class NativeTogetherProvider:
         native_scope = value["context"]["audience"]["scope"]
         # 房间链接是短期凭证，群里公开出去等于把麦克风交给整个群。宿主侧没有可靠的
         # 私发通道时宁可拒绝，也不让模型在群里贴链接。
+        private_route = None
         if native_scope["kind"] == "group":
-            raise NativeTogetherError("together_private_room_required")
+            resolve = getattr(self.plugin, "telegram_group_invite_route", None)
+            private_route = resolve(native_scope, user_id) if callable(resolve) else None
+            if private_route is None:
+                raise NativeTogetherError("together_private_room_required")
         execution = value["host_execution"]
         model = self.plugin._get_provider_by_id(execution["model_provider_id"])
         if not callable(getattr(model, "text_chat", None)):
@@ -917,6 +923,8 @@ class NativeTogetherProvider:
                     "[TogetherCompanion] 建房准备房间访问失败 via_mobile_gateway=%s error_type=%s",
                     via_mobile_gateway, type(exc).__name__)
                 raise NativeTogetherError("together_public_access_unavailable") from None
+        if private_route is not None and before_dispatch is not None:
+            await _checked(before_dispatch)
         self.store.update(scope, operation["id"], state="dispatching", effect="unknown")
         persona = value["host_persona"]
         ticket = self.plugin.issue_room_ticket(
@@ -931,12 +939,25 @@ class NativeTogetherProvider:
                        "platform": native_scope["platform"],
                        "session_id": native_scope["session_id"],
                        "scope_kind": native_scope["kind"]})
+        url = self.plugin._ticket_url(ticket)
+        if private_route is not None:
+            try:
+                delivered = await self.plugin.send_telegram_group_invite(private_route, url)
+            except BaseException:
+                self.plugin._revoke_unused_ticket(ticket)
+                raise
+            if not delivered:
+                self.plugin._revoke_unused_ticket(ticket)
+                return self.store.update(scope, operation["id"], state="succeeded", effect="committed",
+                    result={"delivered_privately": False, "message": "请先私聊启动 Bot，再申请房间。"})
         result = {"room": {"mode": ticket.mode, "ticket_token": ticket.token,
-                           "url": self.plugin._ticket_url(ticket), "created_at": ticket.created_at,
+                           "url": url, "created_at": ticket.created_at,
                            "expires_at": ticket.expires_at, "user_id": user_id,
                            "bot_id": persona["bot_id"], "persona_id": persona["persona_id"]},
                   "access": {name: bool(access.get(name)) for name in
                              ("tunnel_started", "tunnel_ready", "fixed_public_url")}}
+        if private_route is not None:
+            result.update(delivered_privately=True, message="房间链接已私发给发起人。")
         return self.store.update(scope, operation["id"], state="succeeded", effect="committed", result=result)
 
     async def _close_latest(self, scope: str, user_id: str) -> dict[str, Any]:

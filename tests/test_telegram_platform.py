@@ -122,9 +122,9 @@ class TelegramPlatformTests(unittest.TestCase):
         self.assertEqual(refused.exception.code, "host_route_mismatch")
 
 
-async def group_event(platform, chat_id=-400, kind="group", topic=None, text="你好", **fields):
+async def group_event(platform, chat_id=-400, kind="group", topic=None, text="你好", number=22, **fields):
     chat = Chat(chat_id, kind, title=fields.pop("title", None), is_forum=True if topic else None)
-    message = Message(22, date=datetime.now(timezone.utc), chat=chat, text=text,
+    message = Message(number, date=datetime.now(timezone.utc), chat=chat, text=text,
                       from_user=fields.pop("from_user", User(OWNER, "Synthetic", False)),
                       message_thread_id=topic, is_topic_message=bool(topic), **fields)
     native = await platform.convert_message(Update(12, message=message), NS(bot=platform.client))
@@ -461,6 +461,91 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
                 self.assertEqual(call.kwargs["chat_id"], str(chat))
                 self.assertEqual(call.kwargs.get("message_thread_id"), str(topic) if topic else None)
             self.platform.client.send_message.reset_mock()
+
+    async def test_group_command_uses_current_topic_and_sender_standing(self):
+        from astrbot_host.group_command import receive_group_llm_command
+        from companion_v2.execution.models import require
+        platform, controller = self.platform, self.controller
+        platform.client.get_chat_member = AsyncMock()
+        authority = controller.authority
+        context = authority.context("tg-owner", "role-tg")
+        authority.provision_scope(authority.settings.target("tg-owner"), context.scope,
+                                  context.role_binding.role, core_admin=True)
+        for status, text, expected in (
+                ("administrator", "陪伴群 关闭LLM", "已临时封锁"),
+                ("creator", "陪伴群 LLM状态", "临时封锁"),
+                ("administrator", "陪伴群 开启LLM", "已恢复"),
+                ("administrator", "陪伴群 关闭生图", "已关闭"),
+                ("creator", "陪伴群 开启生图", "已开启"),
+                ("member", "陪伴群 开启生图", "未执行"),
+                ("member", "陪伴群 关闭LLM", "未执行"),
+                (None, "陪伴群 开启LLM", "未执行")):
+            controller.session.group_standing_cache.clear()
+            platform.client.get_chat_member.return_value = NS(user=NS(id=OWNER), status=status)
+            event = await group_event(platform, -100400, "supergroup", 23, text=text)
+            result = require(await receive_group_llm_command(controller, event))
+            self.assertIn(expected, result["text"])
+            kwargs = platform.client.send_message.await_args.kwargs
+            self.assertEqual((kwargs["chat_id"], kwargs["message_thread_id"]), ("-100400", "23"))
+
+    async def test_group_room_only_sends_ticket_to_requester(self):
+        from astrbot_host.native_extensions.together.rooms_methods import TogetherRoomsMethods
+        from tests.test_together_room_creation import FakePlugin, provider_with, request
+
+        class Plugin(FakePlugin, TogetherRoomsMethods):
+            pass
+
+        plugin = Plugin()
+        plugin.controller = self.controller
+        plugin.ticket_store = NS(revoke=Mock())
+        provider = provider_with(plugin)
+        value = request(kind="group")
+        value["context"]["audience"]["scope"].update(platform="tg-main", account_id="tg-main",
+            bot_id="bot-tg", session_id="-100400#23", native_scope_id="-100400#23")
+        value["host_persona"].update(account_id="tg-main", bot_id="bot-tg")
+        for refused in (False, True):
+            self.platform.client.send_message.side_effect = Forbidden("private chat unavailable") if refused else None
+            result = await provider._create_room(value, "scope", {"id": "op"}, user_id=str(OWNER))
+            response = provider._response(dict(action="together.room.create", invocation_id="call", origin_key="test",
+                arguments_hash="hash", binding={}), result)
+            self.assertNotIn("tok-1", json.dumps(response))
+            self.assertEqual(result["result"]["delivered_privately"], not refused)
+            send = self.platform.client.send_message.await_args
+            self.assertEqual(send.kwargs["chat_id"], str(OWNER))
+            self.assertIn("/join/", send.kwargs["text"])
+            self.platform.client.send_message.assert_awaited_once()
+            self.platform.client.send_message.reset_mock()
+        plugin.ticket_store.revoke.assert_called_once_with("tok-1")
+
+    async def test_repeat_sends_the_configured_interruption_into_the_topic(self):
+        from companion_v2.configuration.models import ConfigLayer, ConfigTarget
+        from companion_v2.conversation.participation import (
+            CONFIG_GROUP, GroupParticipationConfigurationOwner, configuration_fields,
+        )
+
+        async def event(number, text):
+            value = await group_event(self.platform, -100400, "supergroup", 23, text=text, number=number)
+            value.created_at = self.clock.now().timestamp()
+            return value
+
+        context = require(await self.controller.observe_group_early(await event(10, "初始化")))
+        target = ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW, context.role_binding.role, context.scope)
+        owner = GroupParticipationConfigurationOwner(self.controller.runtime)
+        fields = configuration_fields()
+        settings = {"group_repeat_trigger_threshold": 3, "group_repeat_follow_probability": 0,
+                    "group_repeat_interrupt_probability": .8, "group_repeat_interrupt_text": "暂停复读"}
+        owner.write(target, fields, changes={CONFIG_GROUP + "." + k: v for k, v in settings.items()},
+                    reset=(), expected_revision=owner.read(target, fields).revision, observed_at=self.clock.now())
+        for number in (11, 12, 13):
+            self.clock.advance(timedelta(seconds=1))
+            current = await event(number, "合成测试")
+            admission = require(await self.controller.group_reply_candidate(current))
+        self.assertEqual(admission["reason"], "repeat")
+        with patch("companion_v2.conversation.repeat_actions.random.random", return_value=.1):
+            require(await self.controller.receive_group_repeat(current, admission))
+        self.platform.client.send_message.assert_awaited_once()
+        kwargs = self.platform.client.send_message.await_args.kwargs
+        self.assertEqual((kwargs["text"], kwargs["chat_id"], kwargs["message_thread_id"]), ("暂停复读", "-100400", "23"))
 
     async def test_unconfigured_and_migrated_windows_stay_silent(self):
         plugin = self.started_plugin()

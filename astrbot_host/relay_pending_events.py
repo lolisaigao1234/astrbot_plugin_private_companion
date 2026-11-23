@@ -16,6 +16,12 @@ def _text(value, limit=800):
     return " ".join(str(value or "").split())[:limit]
 
 
+def _telegram_account(event, target):
+    if getattr(getattr(event, "platform_meta", None), "name", "") == "telegram":
+        return [target.platform_id, target.account_id]
+    return None
+
+
 def _platform_for(controller, platform_id):
     bridge = getattr(getattr(controller, "session", None), "bridge", None)
     pinned = getattr(bridge, "platforms", None)
@@ -27,6 +33,15 @@ def _platform_for(controller, platform_id):
 
 
 def _route(event, controller, *, kind, platform_id, login, peer):
+    if getattr(getattr(event, "platform_meta", None), "name", "") == "telegram":
+        from dataclasses import replace
+        from .recalls import authenticate_notice_route
+        from companion_v2.execution.models import TaskError
+        origin = ScopeKind.GROUP if event.message_obj.group_id else ScopeKind.PRIVATE
+        original = authenticate_notice_route(controller, event, origin, expected_post="message")
+        if original is None or (original.platform_id, original.login) != (platform_id, login):
+            raise TaskError("relay_account_unavailable", "无法验证递话来源")
+        return replace(original, kind=kind, peer=str(peer), session_id=str(peer))
     return SimpleNamespace(
         kind=kind,
         platform_id=platform_id,
@@ -38,30 +53,25 @@ def _route(event, controller, *, kind, platform_id, login, peer):
     )
 
 
-def _native_controller(controller):
-    return SimpleNamespace(native_types=controller.native_types)
-
-
 async def _send_private(controller, event, *, platform_id, login, peer, text):
     route = _route(event, controller, kind=ScopeKind.PRIVATE, platform_id=platform_id, login=login, peer=peer)
-    route.platform = _platform_for(controller, platform_id)
-    transport = prepare_relay_transport(_native_controller(controller), route)
-    return await send_private_notice(_native_controller(controller), None, text=text,
+    transport = prepare_relay_transport(controller, route)
+    return await send_private_notice(controller, None, text=text,
                                      route=route, transport=transport)
 
 
 async def _send_group(controller, event, *, platform_id, login, peer, text, mention_id=""):
     route = _route(event, controller, kind=ScopeKind.GROUP, platform_id=platform_id, login=login, peer=peer)
-    route.platform = _platform_for(controller, platform_id)
-    transport = prepare_relay_transport(_native_controller(controller), route)
-    return await send_group_notice(_native_controller(controller), route, text=text,
+    transport = prepare_relay_transport(controller, route)
+    return await send_group_notice(controller, route, text=text,
                                    mention_id=mention_id, transport=transport)
 
 
 async def process_group_presence(controller, event, target, context):
     """Deliver delayed relays when their target member speaks in the group."""
     target_user_id = str(context.actor.principal.native_account_id)
-    tasks = await asyncio.to_thread(claim_group, controller.runtime, str(target.group_id), target_user_id)
+    tasks = await asyncio.to_thread(claim_group, controller.runtime, str(target.group_id), target_user_id,
+                                    telegram_account=_telegram_account(event, target))
     settled: set[str] = set()
     in_flight: str | None = None
     in_flight_state = "failed"
@@ -94,7 +104,8 @@ async def process_group_presence(controller, event, target, context):
                 pass
     # 带话一直没等到目标成员出现时，告诉发起窗口“已经撤回”，
     # 而不是让那条委托在队列里无声过期。
-    expired = await asyncio.to_thread(claim_expired, controller.runtime, str(target.group_id))
+    expired = await asyncio.to_thread(claim_expired, controller.runtime, str(target.group_id),
+                                      telegram_account=_telegram_account(event, target))
     for task in expired:
         source_kind = str(task.get("source_kind") or "private")
         source_id = str(task.get("source_id") or task.get("source_user") or "")
@@ -143,7 +154,7 @@ async def process_private_receipts(controller, event, target):
     rejected = any(token in text for token in ("不要", "不用", "不行", "不可以", "拒绝", "别转", "算了"))
 
     permission_tasks = await asyncio.to_thread(claim_private_receipts, controller.runtime,
-                                               target_user_id, permission=True)
+                                               target_user_id, permission=True, telegram_account=_telegram_account(event, target))
     settled_permission: set[str] = set()
     in_flight_permission: str | None = None
     in_flight_permission_state = "failed"
@@ -181,7 +192,8 @@ async def process_private_receipts(controller, event, target):
             except Exception:
                 pass
 
-    reply_tasks = await asyncio.to_thread(claim_private_receipts, controller.runtime, target_user_id)
+    reply_tasks = await asyncio.to_thread(claim_private_receipts, controller.runtime, target_user_id,
+                                          telegram_account=_telegram_account(event, target))
     settled_reply: set[str] = set()
     in_flight_report: str | None = None
     in_flight_report_state = "failed"

@@ -149,8 +149,12 @@ def create_bundled_extension(data_root, name, *, now=None, context=None, control
     config = ExtensionSettings(root, name)
     module = import_module("." + name + ".runtime", __package__)
     runtime = getattr(module, name.title() + "Runtime")(context, config, config.root, controller)
+    version = PRODUCT_VERSION
+    if name == "together":
+        from companion_v2.together.provider import VERSION
+        version += "+together." + VERSION
     return BundledNativeLease("astrbot_plugin_private_companion." + name,
-        runtime.build_native(PRODUCT_VERSION), api=runtime, factory=factory,
+        runtime.build_native(version), api=runtime, factory=factory, package_version=version,
         furniture=FurnitureDescriptor(name, name, labels[name], name))
 
 

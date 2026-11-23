@@ -30,6 +30,8 @@ async def send_text_notice(controller, route, *, text, transport=None):
     """平台直发一句纯文本到已认证的路由（私聊或群），返回有界回执。"""
     if not text or not str(text).strip():
         return {"state": "skipped", "reason": "blank_line"}
+    if getattr(route, "platform_name", "") == "telegram" and route.kind is ScopeKind.GROUP:
+        return await send_group_notice(controller, route, text=text)
     api = transport if transport is not None else _transport(controller, route)
     if route.kind is ScopeKind.GROUP:
         action, target = "send_group_msg", {"group_id": int(route.peer)}
@@ -85,12 +87,25 @@ async def send_group_notice(controller, route, *, text, mention_id="", transport
         from astrbot.core.message.message_event_result import MessageChain
         from astrbot.core.platform.message_session import MessageSession
         from astrbot.core.platform.message_type import MessageType
-        chain = []
-        if mention:
-            chain.extend([At(qq=mention), Plain(" ")])
-        chain.append(Plain(str(text)))
-        session = MessageSession(route.platform_id, MessageType.GROUP_MESSAGE, peer)
-        await platform.send_by_session(session, MessageChain(chain))
+        lease = getattr(route, "connection_lease", None)
+        if lease is not None:
+            controller.session.bridge.connections.assert_current(lease)
+        if platform_name == "telegram" and mention:
+            # The native At component only prefixes a username. Telegram IDs
+            # use an explicit text-link entity on the one outgoing message.
+            from telegram import MessageEntity
+            chat, _, topic = peer.partition("#")
+            label = "@" + mention
+            entity = MessageEntity("text_link", 0, len(label), url="tg://user?id=" + mention)
+            await route.client.send_message(chat_id=chat, message_thread_id=int(topic) if topic else None,
+                                            text=f"{label} {text}", entities=[entity])
+        else:
+            chain = [At(qq=mention), Plain(" ")] if mention else []
+            chain.append(Plain(str(text)))
+            session = MessageSession(route.platform_id, MessageType.GROUP_MESSAGE, peer)
+            accepted = await platform.send_by_session(session, MessageChain(chain=chain))
+            if platform_name == "telegram" and accepted is False:
+                return {"state": "failed", "reason": "platform_call_failed"}
     except Exception:  # noqa: BLE001 - send outcome is unknown, never replayed here
         return {"state": "failed", "reason": "platform_call_failed"}
     return {"state": "delivered", "message_id": "session:" + digest(
@@ -143,7 +158,9 @@ async def send_private_notice(controller, event, *, text, route, transport=None)
             platform = lease.platform
         session = MessageSession(route.platform_id, MessageType.FRIEND_MESSAGE, peer)
         with redact_telegram_token(lease.client if platform_name == "telegram" else None):
-            await platform.send_by_session(session, MessageChain([Plain(str(text))]))
+            accepted = await platform.send_by_session(session, MessageChain(chain=[Plain(str(text))]))
+        if platform_name == "telegram" and accepted is False:
+            return {"state": "failed", "reason": "platform_call_failed"}
     except Exception:  # noqa: BLE001 - send outcome is unknown, never replayed here
         return {"state": "failed", "reason": "platform_call_failed"}
     receipt = digest(["private-session-notice.v1", route.platform_id, route.login, peer, str(text)])

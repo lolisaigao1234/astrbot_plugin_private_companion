@@ -88,7 +88,7 @@ def add_task(runtime, task):
         return identifier
 
 
-def claim_group(runtime, group_id, target_user_id, now=None):
+def claim_group(runtime, group_id, target_user_id, now=None, *, telegram_account=None):
     now = time() if now is None else now
     claimed = []
     with runtime.transaction() as connection:
@@ -97,6 +97,7 @@ def claim_group(runtime, group_id, target_user_id, now=None):
         for task in data["tasks"].values():
             if (task.get("kind") == "group_wait" and task.get("state") == "waiting"
                     and task.get("group_id") == group_id
+                    and task.get("telegram_account") == telegram_account
                     and task.get("target_user_id") == target_user_id
                     and task.get("expires_at", 0) > now):
                 task["requeue_state"] = "waiting"
@@ -106,7 +107,7 @@ def claim_group(runtime, group_id, target_user_id, now=None):
     return claimed
 
 
-def claim_private_receipts(runtime, target_user_id, now=None, *, permission=False):
+def claim_private_receipts(runtime, target_user_id, now=None, *, permission=False, telegram_account=None):
     now = time() if now is None else now
     wanted = "waiting_permission" if permission else "waiting_reply"
     next_state = "reporting"
@@ -117,6 +118,7 @@ def claim_private_receipts(runtime, target_user_id, now=None, *, permission=Fals
         ordered = sorted(data["tasks"].values(), key=lambda item: item.get("created_at", 0))
         for task in ordered:
             if (task.get("kind") == "private_receipt" and task.get("state") == wanted
+                    and task.get("telegram_account") == telegram_account
                     and task.get("target_user_id") == target_user_id
                     and task.get("expires_at", 0) > now):
                 task["requeue_state"] = wanted
@@ -127,7 +129,7 @@ def claim_private_receipts(runtime, target_user_id, now=None, *, permission=Fals
     return claimed
 
 
-def claim_expired(runtime, group_id=None, now=None):
+def claim_expired(runtime, group_id=None, now=None, *, telegram_account=None):
     """Take expired tasks once so their origin window can be told the relay was dropped.
 
     Expiry is recorded by ``_prune``; the task is removed here because the notice is
@@ -139,7 +141,7 @@ def claim_expired(runtime, group_id=None, now=None):
         data = _read(runtime)
         _prune(data, now)
         for task_id, task in list(data["tasks"].items()):
-            if task.get("state") != "expired":
+            if task.get("state") != "expired" or task.get("telegram_account") != telegram_account:
                 continue
             if group_id is not None and (
                     task.get("kind") != "group_wait" or task.get("group_id") != group_id):

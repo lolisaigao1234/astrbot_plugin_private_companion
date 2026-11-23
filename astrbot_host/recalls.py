@@ -190,6 +190,18 @@ def authenticate_notice_route(controller, event, kind, *, expected_post="notice"
             or not isinstance(event, controller.native_types.event)):
         return None
     message, meta, native_session = event.message_obj, event.platform_meta, event.session
+    if meta.name == "telegram" and kind is ScopeKind.GROUP and expected_post == "message":
+        from companion_v2.adapters.astrbot.group import group_event_route
+        group = group_event_route(event)
+        target = controller.settings.group_target(*group.route_key)
+        if target is None:
+            return None
+        lease = session.bridge.connections.acquire((group.platform_id, group.account_id))
+        if lease.platform.meta().name != "telegram" or event_native_client(lease.platform, event) is not lease.client:
+            return None
+        return NativeNoticeRoute(kind, group.platform_id, target.bot_id, group.account_id,
+                                 group.sender_id, group.group_id, group.session_id, lease.client,
+                                 platform=lease.platform, platform_name="telegram", connection_lease=lease)
     if meta.name == "telegram" and kind is ScopeKind.PRIVATE and expected_post == "message":
         return telegram_private_message_route(controller, event, configured_peer=True)
     if meta.name == "lark" and kind is ScopeKind.PRIVATE and expected_post == "message":

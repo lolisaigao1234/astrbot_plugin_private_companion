@@ -285,6 +285,9 @@ class SessionTopology:
         return rows
 
     def stored_group_names(self):
+        return self.stored_window_names("group")
+
+    def stored_window_names(self, kind):
         """Read observed labels without discovering sessions or resolving roles."""
         try:
             rows = self._observed()
@@ -296,10 +299,10 @@ class SessionTopology:
                           key=lambda row: str(row.get("last_seen_at") or ""), reverse=True):
             route = self.route(row.get("unified_msg_origin"))
             account = row.get("account_id")
-            if route is None or route[1] != "group" or not isinstance(account, str) or not account:
+            if route is None or route[1] != kind or not isinstance(account, str) or not account:
                 continue
             # Older group display_name fields may contain a speaker's nickname.
-            name = platform_label(row.get("group_name"), route[2])
+            name = platform_label(row.get("group_name" if kind == "group" else "display_name"), route[2])
             if name:
                 names.setdefault((route[0], account, route[2]), name)
         return names
