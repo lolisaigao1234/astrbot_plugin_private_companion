@@ -143,6 +143,7 @@ class TelegramPrivateCommandTests(TelegramHostFixture, unittest.IsolatedAsyncioT
             await asyncio.wait_for(sending.wait(), timeout=10)
             second = asyncio.create_task(self.dispatch("你好", peer))
             await asyncio.sleep(0)
+            self.clock.advance(timedelta(seconds=61))
         finally:
             release.set()
         await asyncio.gather(first, second)

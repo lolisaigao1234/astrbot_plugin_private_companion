@@ -212,5 +212,5 @@ async def notify_refusal(controller, session, event, *, context):
             return None
         receipt = await send_private_notice(controller, event, text=text, route=route)
         if receipt.get("state") == "delivered":
-            application.private_notice.mark_sent(context, context.actor.subject.subject_id, text, at)
+            application.private_notice.mark_sent(context, context.actor.subject.subject_id, text, controller.now())
         return receipt
