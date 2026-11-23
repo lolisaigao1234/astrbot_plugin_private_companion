@@ -186,7 +186,7 @@ class TelegramPrivateCommandTests(TelegramHostFixture, unittest.IsolatedAsyncioT
     async def test_reset_requires_admin_and_confirmation(self):
         authority = self.controller.authority
         context = authority.context("tg-owner", "role-tg")
-        event = await self.dispatch("陪伴 全部重置")
+        event = await self.dispatch("全部重置")
         self.assertTrue(event.call_llm)
         self.assertIn("只允许安装核心管理员", self.sent_text())
         authority.provision_scope(authority.settings.target("tg-owner"), context.scope,
