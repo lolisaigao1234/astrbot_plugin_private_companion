@@ -171,13 +171,11 @@ class StrangerNotice:
             return True
         return (at - moment).total_seconds() >= cooldown
 
-    def _daily_room(self, at, cap):
-        if cap <= 0:
-            return None
+    def _daily_count(self, at):
         view_id = "stranger-notice-day:" + at.date().isoformat()
         document = self._read(view_id, DAILY_KIND)
         count = int(document.get("count") or 0)
-        return None if count >= cap else (view_id, count)
+        return view_id, count
 
     # -- 主流程 --------------------------------------------------------------
 
@@ -231,10 +229,9 @@ class StrangerNotice:
                 at = controller.now()
                 if not self._cooldown_ok(route, at, defaults["notice_cooldown_seconds"]):
                     return no_reply("stranger_notice_cooldown")
-                room = self._daily_room(at, defaults["stranger_daily_cap"])
-                if room is None:
+                view_id, count = self._daily_count(at)
+                if count >= defaults["stranger_daily_cap"]:
                     return no_reply("stranger_notice_daily_cap")
-                view_id, count = room
                 receipt = await send_private_notice(controller, event, text=text, route=route)
                 if receipt.get("state") != "delivered":
                     return no_reply("stranger_notice_send_failed")
@@ -245,8 +242,10 @@ class StrangerNotice:
                 self._write("stranger-notice:" + route.login + ":" + route.peer, COOLDOWN_KIND,
                             {"version": 1, "platform_id": route.platform_id, "login": route.login,
                              "peer": route.peer, "text_sha": receipt.get("receipt"), "last_notice_at": stamp(sent_at)}, sent_at)
+                if sent_at.date() != at.date():
+                    view_id, count = self._daily_count(sent_at)
                 self._write(view_id, DAILY_KIND,
-                            {"version": 1, "date": at.date().isoformat(), "count": count + 1}, at)
+                            {"version": 1, "date": sent_at.date().isoformat(), "count": count + 1}, sent_at)
                 return {"platform_id": route.platform_id, "login": route.login, "peer": route.peer,
                         "count_today": count + 1, "sent_at": stamp(sent_at), "receipt": receipt.get("receipt")}
         except Exception:
