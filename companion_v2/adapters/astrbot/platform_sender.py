@@ -279,7 +279,11 @@ class AstrBotPlatformSender:
                     await platform.send_by_session(session, chain)
             except Exception as error:
                 if platform_name == "telegram":
-                    reason = _telegram_refusal(error, chain)
+                    try:
+                        reason = _telegram_refusal(error, chain)
+                    except Exception:
+                        # Dispatch already started. Only a recognized refusal proves non-delivery.
+                        reason = None
                     if reason:
                         return not_sent(reason)
                 logger.warning("V2 platform delivery outcome unknown part=%s error_type=%s",

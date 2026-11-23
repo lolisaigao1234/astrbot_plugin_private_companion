@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace as NS
 import unittest
 import wave
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from telegram.error import BadRequest, Forbidden, InvalidToken, NetworkError, RetryAfter, TimedOut
 from telegram import Chat, Message, Update, User
@@ -189,6 +189,13 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
         self.assertEqual((receipt.status, receipt.failure_code), ("not_sent", "telegram_invalid_token"))
         self.assertNotIn(token, " ".join(host_logs.output))
         self.assertIn("[redacted]", " ".join(host_logs.output))
+
+    async def test_unavailable_refusal_classifier_keeps_dispatch_unknown(self):
+        self.platform.client.send_message.side_effect = NetworkError("connection lost")
+        with patch("companion_v2.adapters.astrbot.platform_sender._telegram_refusal", side_effect=ImportError):
+            receipt = await self.send()
+        self.assertEqual((receipt.status, receipt.failure_code), ("unknown", None))
+        self.platform.client.send_message.assert_awaited_once()
 
     async def test_transport_errors_are_unknown(self):
         for error in (TimedOut(), NetworkError("connection lost")):
