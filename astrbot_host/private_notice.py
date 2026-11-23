@@ -21,6 +21,7 @@ import asyncio
 from collections.abc import Mapping
 from weakref import WeakValueDictionary
 
+from companion_v2.adapters.astrbot.telegram_logging import redact_telegram_token
 from companion_v2.execution.models import TaskError, digest
 from companion_v2.foundation.refs import ScopeKind
 
@@ -134,9 +135,15 @@ async def send_private_notice(controller, event, *, text, route, transport=None)
         from astrbot.core.platform.message_type import MessageType
         lease = getattr(route, "connection_lease", None)
         if lease is not None:
-            controller.session.bridge.connections.assert_current(lease)
-        await platform.send_by_session(MessageSession(route.platform_id, MessageType.FRIEND_MESSAGE, peer),
-                                       MessageChain([Plain(str(text))]))
+            connections = controller.session.bridge.connections
+            if connections is not route.connections:
+                return {"state": "failed", "reason": "private_route_changed"}
+            # A running adapter may have rebuilt the client for the same pinned bot.
+            lease = connections.acquire(lease.account_key)
+            platform = lease.platform
+        session = MessageSession(route.platform_id, MessageType.FRIEND_MESSAGE, peer)
+        with redact_telegram_token(lease.client if platform_name == "telegram" else None):
+            await platform.send_by_session(session, MessageChain([Plain(str(text))]))
     except Exception:  # noqa: BLE001 - send outcome is unknown, never replayed here
         return {"state": "failed", "reason": "platform_call_failed"}
     receipt = digest(["private-session-notice.v1", route.platform_id, route.login, peer, str(text)])
@@ -208,6 +215,8 @@ async def notify_refusal(controller, session, event, *, context):
     application = session.application
     async with notice_cooldown_lock(controller, application.private_notice.owner_key(context)):
         at = controller.now()
+        if session is not controller.session or not application.private_access_gate.denied(context, at=at):
+            return None
         text = application.private_notice.due(context, at)
         if not text:
             return None
