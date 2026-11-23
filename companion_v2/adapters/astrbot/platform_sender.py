@@ -9,6 +9,7 @@ C2C/group openids and media upload rules inside AstrBot.
 
 import asyncio
 from datetime import datetime, timezone
+from contextlib import contextmanager, nullcontext
 import logging
 from time import perf_counter
 from uuid import uuid4
@@ -28,6 +29,26 @@ from companion_v2.foundation.refs import ScopeKind
 
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _redact_telegram_token(client):
+    """AstrBot can log the Bot API error text while sending a chat action."""
+    token = getattr(client, "token", None)
+
+    def redact(record):
+        if token:
+            message = record.getMessage()
+            if token in message:
+                record.msg, record.args = message.replace(token, "[redacted]"), ()
+        return True
+
+    host_logger = logging.getLogger("astrbot")
+    host_logger.addFilter(redact)
+    try:
+        yield
+    finally:
+        host_logger.removeFilter(redact)
 
 
 def _telegram_refusal(error, chain):
@@ -254,7 +275,8 @@ class AstrBotPlatformSender:
             platform = route_bridge.connections.assert_current(lease).platform
             stage = "platform_send"
             try:
-                await platform.send_by_session(session, chain)
+                with _redact_telegram_token(lease.client) if platform_name == "telegram" else nullcontext():
+                    await platform.send_by_session(session, chain)
             except Exception as error:
                 if platform_name == "telegram":
                     reason = _telegram_refusal(error, chain)

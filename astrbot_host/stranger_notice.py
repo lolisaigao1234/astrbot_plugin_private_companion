@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from companion_v2.adapters.astrbot.native import account_number
-from companion_v2.execution.models import encode, stamp
+from companion_v2.execution.models import TaskError, encode, stamp
 from companion_v2.foundation.refs import ScopeKind
 
 from .private_notice import notice_cooldown_lock, private_notice_allowed, send_private_notice
@@ -70,7 +70,10 @@ def stranger_route(controller, event):
     raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
     meta = getattr(event, "platform_meta", None)
     if getattr(meta, "name", None) == "telegram":
-        return telegram_private_message_route(controller, event, configured_peer=False)
+        try:
+            return telegram_private_message_route(controller, event, configured_peer=False)
+        except TaskError:
+            return None
     if not isinstance(raw, Mapping) or meta is None:
         return None
     if raw.get("post_type") != "message" or raw.get("message_type") != "private":
@@ -210,21 +213,21 @@ class StrangerNotice:
         session = controller.session
         replied = False
         try:
-            if stranger_blocked(controller, route):
-                # 被屏蔽的账号不收回执：既不回那句固定文案，也不占冷却与当天额度。
-                # finally 仍会记一条有界的联系记录，管理页据此显示「已屏蔽」。
-                return no_reply("stranger_blocked")
-            if session is None or controller.runtime is None or session.application.state != "running":
-                return no_reply("stranger_notice_session_unavailable")
-            defaults = self.defaults()
-            if defaults is None:
-                return no_reply("stranger_notice_settings_unavailable")
-            if not defaults["stranger_notice"]:
-                return no_reply("stranger_notice_disabled")
-            text = defaults["denied_reply"]
-            if not text or not private_notice_allowed(controller.settings):
-                return no_reply("stranger_notice_delivery_unavailable")
             async with notice_cooldown_lock(controller):
+                if stranger_blocked(controller, route):
+                    # 被屏蔽的账号不收回执：既不回那句固定文案，也不占冷却与当天额度。
+                    # finally 仍会记一条有界的联系记录，管理页据此显示「已屏蔽」。
+                    return no_reply("stranger_blocked")
+                if session is None or controller.runtime is None or session.application.state != "running":
+                    return no_reply("stranger_notice_session_unavailable")
+                defaults = self.defaults()
+                if defaults is None:
+                    return no_reply("stranger_notice_settings_unavailable")
+                if not defaults["stranger_notice"]:
+                    return no_reply("stranger_notice_disabled")
+                text = defaults["denied_reply"]
+                if not text or not private_notice_allowed(controller.settings):
+                    return no_reply("stranger_notice_delivery_unavailable")
                 at = controller.now()
                 if not self._cooldown_ok(route, at, defaults["notice_cooldown_seconds"]):
                     return no_reply("stranger_notice_cooldown")

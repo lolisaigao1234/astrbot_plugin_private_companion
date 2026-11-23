@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
+from weakref import WeakValueDictionary
 
 from companion_v2.execution.models import TaskError, digest
 from companion_v2.foundation.refs import ScopeKind
@@ -183,11 +184,14 @@ def private_notice_allowed(settings, *, group=False):
     return True
 
 
-def notice_cooldown_lock(controller):
-    """Serialize the quota check, delivery and receipt across concurrent events."""
-    lock = getattr(controller, "_notice_cooldown_lock", None)
+def notice_cooldown_lock(controller, owner=None):
+    """Strangers share the daily quota. Configured recipients have individual cooldowns."""
+    locks = getattr(controller, "_notice_cooldown_locks", None)
+    if locks is None:
+        locks = controller._notice_cooldown_locks = WeakValueDictionary()
+    lock = locks.get(owner)
     if lock is None:
-        lock = controller._notice_cooldown_lock = asyncio.Lock()
+        lock = locks[owner] = asyncio.Lock()
     return lock
 
 
@@ -201,8 +205,8 @@ async def notify_refusal(controller, session, event, *, context):
 
     if context is None or not private_notice_allowed(controller.settings):
         return None
-    async with notice_cooldown_lock(controller):
-        application = session.application
+    application = session.application
+    async with notice_cooldown_lock(controller, application.private_notice.owner_key(context)):
         at = controller.now()
         text = application.private_notice.due(context, at)
         if not text:
