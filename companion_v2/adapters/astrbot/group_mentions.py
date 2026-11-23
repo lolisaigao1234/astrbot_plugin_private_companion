@@ -31,6 +31,8 @@ def component_kind(part):
 
 
 def bot_mention_ids(event, account_id):
+    if _get(_get(event, "platform_meta"), "name") == "telegram":
+        return {event.message_obj.self_id}
     identifiers = {str(account_id)}
     if _get(_get(event, "platform_meta"), "name") in OFFICIAL_PLATFORMS:
         raw = getattr(event.message_obj, "raw_message", None)
@@ -82,6 +84,41 @@ def _official_original(event, identifiers):
     return parse_face(restored).strip()
 
 
+def telegram_reply_to_bot(event):
+    if _get(_get(event, "platform_meta"), "name") != "telegram":
+        return False
+    if _get(event.message_obj.type, "value") != "GroupMessage":
+        return False
+    original = _get(_get(event.message_obj, "raw_message"), "message")
+    author = _get(_get(original, "reply_to_message"), "from_user")
+    return (_get(author, "is_bot") is True
+            and _get(author, "id") == _get(_get(event, "client"), "id"))
+
+
+def telegram_plain_text(event, text):
+    if telegram_reply_to_bot(event):
+        for marker in ("/ ", f"/@{event.message_obj.self_id} "):
+            if text.startswith(marker):
+                return text[len(marker):]
+    return text
+
+
+def _telegram_parts(event, parts):
+    original = event.message_obj.raw_message.message
+    # AstrBot moves all At components ahead of Plain. Telegram entity offsets
+    # are UTF-16 code units, so preserve inline mentions even after emoji.
+    mentions = [entity for entity in original.entities if entity.type == "mention"
+                and original.parse_entity(entity)[1:].casefold() == event.message_obj.self_id.casefold()]
+    if mentions:
+        encoded = original.text.encode("utf-16-le")
+        for entity in reversed(mentions):
+            start, end = entity.offset * 2, (entity.offset + entity.length) * 2
+            encoded = encoded[:start] + SELF_MENTION.encode("utf-16-le") + encoded[end:]
+        return (SimpleNamespace(type="Plain", text=encoded.decode("utf-16-le")),)
+    return tuple(SimpleNamespace(type="Plain", text=telegram_plain_text(event, part.text))
+                 for part in parts if component_kind(part) == "Plain")
+
+
 def group_message_parts(event, account_id, *, native_parts=None):
     """Keep original order; fall back to native components on older hosts."""
     message = event.message_obj
@@ -90,6 +127,8 @@ def group_message_parts(event, account_id, *, native_parts=None):
     if native_parts is None and isinstance(segments, list):
         return segments
     parts = tuple(message.message if native_parts is None else native_parts)
+    if _get(_get(event, "platform_meta"), "name") == "telegram":
+        return _telegram_parts(event, parts)
     if _get(_get(event, "platform_meta"), "name") not in OFFICIAL_PLATFORMS:
         return parts
     identifiers = bot_mention_ids(event, account_id)

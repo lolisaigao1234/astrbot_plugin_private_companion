@@ -1,7 +1,7 @@
 """Group trigger facts from the authenticated native message components."""
 
 from collections.abc import Mapping
-from companion_v2.adapters.astrbot.group_mentions import bot_mention_ids, official_mention_targets
+from companion_v2.adapters.astrbot.group_mentions import bot_mention_ids, official_mention_targets, telegram_reply_to_bot
 
 
 def group_trigger_facts(event, account_id):
@@ -38,7 +38,9 @@ def group_trigger_facts(event, account_id):
             mentions_all = True
         else:
             mentions_others = True
-    quoted_bot = any(
+    # A Telegram instance id can coincide with an unrelated member's numeric id.
+    telegram = getattr(getattr(event, "platform_meta", None), "name", None) == "telegram"
+    quoted_bot = telegram_reply_to_bot(event) if telegram else any(
         getattr(getattr(part, "type", None), "value", getattr(part, "type", None)) == "Reply"
         and str(getattr(part, "id", "")) in replies
         and str(getattr(part, "sender_id", "")) == account_id

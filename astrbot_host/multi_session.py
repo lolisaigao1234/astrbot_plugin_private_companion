@@ -17,6 +17,7 @@ from companion_v2.adapters.astrbot.native import (
     platform_client_matches,
     supported_platform_name,
 )
+from companion_v2.adapters.astrbot.group_mentions import telegram_plain_text
 from companion_v2.adapters.astrbot.group import NativeGroupBridge, _is_sticker_segment
 from companion_v2.adapters.astrbot.onebot import OneBotPrivateSender
 from companion_v2.adapters.astrbot.onebot_group import OneBotGroupSender
@@ -1292,7 +1293,7 @@ class MultiHostSession:
                     raw_text = "".join(part.text for part in getattr(event.message_obj, "message", ())
                         if getattr(getattr(part, "type", None), "value", getattr(part, "type", None)) == "Plain"
                         and isinstance(getattr(part, "text", None), str))
-                    captured = replace(captured, text=raw_text,
+                    captured = replace(captured, text=telegram_plain_text(event, raw_text),
                         merged_event_ids=tuple((group_admission or {}).get("debounced_event_ids", ())))
                 segmentation_settings, presentation_settings = None, None
                 group_tool_profile = "full"

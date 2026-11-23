@@ -30,13 +30,21 @@
 | 显示名 | 我会永远陪着你 |
 | 当前版本 | `7.3.1`（7.x 架构线，内部领域标识 `private_companion.v2`） |
 | AstrBot 版本 | `>= 4.27.2` |
-| 声明支持平台 | `aiocqhttp`（OneBot v11）、`qq_official`、`qq_official_webhook`、`weixin_oc`（个人微信）、`wechat_native`（WeChat Native）、`telegram`（私聊文字） |
+| 声明支持平台 | `aiocqhttp`（OneBot v11）、`qq_official`、`qq_official_webhook`、`weixin_oc`（个人微信）、`wechat_native`（WeChat Native）、`telegram`（私聊、群聊与论坛话题文字） |
 | 管理入口 | AstrBot 插件扩展页「陪伴小屋」（支持低配设备开启「性能模式」切换为轻量状态页） |
 | 数据存储 | 独立 SQLite 运行库（覆盖升级自动隔离于 `companion-7` 子目录，支持备份快照与跨盘迁移） |
 | 内置原生扩展 | `Content`、`Image`、`Screen`、`Reality`、`Together`、`Game`、`Live` 七项能力随包内置 |
 | 开发者 | `menglimi` |
 
 WeChat Native 接入沿用 AstrBot 核心普通回复与适配器的原事件发送，后台投递使用 `send_by_session`。私聊、群聊及原生媒体／工具的配置与限制见 [WeChat Native 接入说明](docs/WECHAT_NATIVE_ADAPTATION.md)。首次主动发送前须接收并认证对应私聊会话；不支持时不会猜测联系人或改走独立通道。
+
+### Telegram 群聊与论坛话题
+
+把已接入 AstrBot 的机器人添加为群成员。要让它参与普通群聊，可在 BotFather 的 `/setprivacy` 中选择该机器人并选择 Disable，再将机器人移出并重新加入群；也可以将它设为该群管理员。开启隐私模式的普通成员机器人通常只收到发给它的命令、对它的回复及服务消息，看不到大部分普通讨论，因而无法根据这些消息接话。
+
+在多窗口配置 `multi_host.group_targets` 中添加群目标。`platform_id` 和 `account_id` 都填 AstrBot 的 Telegram 实例 ID，`bot_id` 与该账号映射一致，并为这个窗口选择已映射的人格。普通群、超级群和论坛的 General 使用负数群 ID（例如 `-100400`）；其他话题分别使用带话题号的 ID（例如 `-100400#23`）。为每个需要响应的窗口单独配置目标。群升级为超级群后需要添加新的群 ID。未配置的窗口保持静默，日志会显示“Telegram 群窗口未配置”。
+
+群内直接 @（包括单独 @）、回复机器人和普通文字沿用群参与设置。私聊和群里的同一成员按 Telegram 用户 ID 识别；群消息遵循群受众的记忆权限。
 
 ### 文档与支持
 

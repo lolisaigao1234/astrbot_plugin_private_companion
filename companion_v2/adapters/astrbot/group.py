@@ -78,14 +78,42 @@ def _has_self_mention_segment(segments, event, account_id):
     return False
 
 
+def _telegram_group_window(event):
+    message = event.message_obj
+    original = getattr(getattr(message, "raw_message", None), "message", None)
+    chat = getattr(original, "chat", None)
+    sender = getattr(original, "from_user", None)
+    if (getattr(chat, "type", None) not in {"group", "supergroup"}
+            or type(chat.id) is not int or chat.id >= 0
+            or message.self_id != getattr(getattr(event, "client", None), "username", None)
+            or getattr(original, "sender_chat", None) is not None
+            or getattr(sender, "is_bot", None) is not False
+            or type(sender.id) is not int or sender.id <= 0
+            or str(sender.id) != message.sender.user_id
+            or type(original.message_id) is not int or str(original.message_id) != message.message_id):
+        raise TaskError("host_route_mismatch", "Telegram group update does not match the authenticated sender and chat")
+    if not isinstance(original.text, str) or not original.text.strip():
+        raise TaskError("host_group_media_unsupported", "Telegram group capture requires original text")
+    window = str(chat.id)
+    if original.is_topic_message:
+        thread = original.message_thread_id
+        if type(thread) is not int or thread <= 0:
+            raise TaskError("host_route_mismatch", "Telegram topic identifier is invalid")
+        if not (chat.is_forum and thread == 1):
+            window += f"#{thread}"
+    return window
+
+
 def group_event_route(event):
     """Cross-check normalized fields against one supported authenticated event."""
     message, meta, session = event.message_obj, event.platform_meta, event.session
     if (getattr(message.type, "value", None) != "GroupMessage"
             or getattr(session.message_type, "value", None) != "GroupMessage"):
         raise TaskError("host_scene_unsupported", "group capture requires a native group event")
-    if meta.name == "telegram" or not supported_platform_name(meta.name):
+    if not supported_platform_name(meta.name):
         raise TaskError("host_route_mismatch", "the native group platform is unsupported")
+    if meta.name == "telegram" and _telegram_group_window(event) != message.group_id:
+        raise TaskError("host_route_mismatch", "Telegram group or topic differs from the original update")
     sender, login, group = event_peer_id(event), event_account_id(event), event_group_id(event)
     event_id = native_id(message.message_id)
     if meta.name == "aiocqhttp":

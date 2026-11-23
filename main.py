@@ -1138,6 +1138,10 @@ class PrivateCompanionV2StagingPlugin(Star):
             logger.debug("[CompanionV2] 外部 hear_voice/gemini_stt 已接管本轮语音回复，跳过重复受理")
             return
         if not self.staging.claims(event):
+            declines_group = getattr(self.staging, "declines_telegram_group", None)
+            if callable(declines_group) and declines_group(event):
+                suppress_default_reply(event)
+                return
             # 不是本插件的目标：这条消息从来没有进入它的预期范围，回复与否都不是
             # 它的失败，既不写台账也不出日志——平台日志不该被别人的群消息刷屏。
             if self._claims_target(event):

@@ -1529,6 +1529,26 @@ class AstrBotMultiController:
         except (ValueError, AttributeError, TypeError):
             return None
 
+    def declines_telegram_group(self, event):
+        """Keep default replies off for refused groups on a managed Telegram account."""
+        meta = getattr(event, "platform_meta", None)
+        if (getattr(meta, "name", None) != "telegram" or not self._accepting or self.session is None
+                or not isinstance(event, self.native_types.event)
+                or getattr(event.message_obj.type, "value", None) != "GroupMessage"
+                or (meta.id, meta.id) not in self.session.bridge.accounts):
+            return False
+        platform = self.context.get_platform_inst(meta.id)
+        if platform is None or platform.get_client() is not event_native_client(platform, event):
+            return False
+        try:
+            route = group_event_route(event)
+        except (ValueError, AttributeError, TypeError):
+            return True
+        if self.settings.group_target(*route.route_key) is None:
+            logger.info("[CompanionV2] Telegram 群窗口未配置 platform=%s group=%s", meta.id, route.group_id)
+            return True
+        return False
+
     async def persona_mapping_for_event(self, event):
         """Return the registered character from the installed window snapshot."""
         target = self.target_for_event(event)

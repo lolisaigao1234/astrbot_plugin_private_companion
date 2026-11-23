@@ -12,13 +12,16 @@ import wave
 from unittest.mock import AsyncMock, Mock, patch
 
 from telegram.error import BadRequest, Forbidden, InvalidToken, NetworkError, RetryAfter, TimedOut
-from telegram import Chat, Message, Update, User
+from telegram import Chat, Message, MessageEntity, Update, User
 from astrbot.core.message.components import Plain
 from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.platform.sources.telegram.tg_adapter import TelegramPlatformAdapter
 from astrbot.core.platform.sources.telegram.tg_event import TelegramPlatformEvent
 from astrbot_host.display_names import event_person_names
+from astrbot_host.group_admission import group_trigger_facts
+from companion_v2.adapters.astrbot.group_mentions import group_message_text
+from companion_v2.conversation.group_timing import SELF_MENTION
 from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA
 from astrbot_host.recalls import authenticate_notice_route
 from companion_v2.adapters.astrbot.group import group_event_route
@@ -34,12 +37,13 @@ OWNER = 5123456789012
 
 
 def telegram_bot(token="424242:synthetic"):
-    return NS(token=token)
+    return NS(token=token, username="synthetic_bot", id=424242)
 
 
 class TelegramPlatform(TelegramPlatformAdapter):
     def __init__(self):
         self.config = {"id": "tg-main"}
+        self._forum_topic_names = {}
         self.client = telegram_bot()
         self.application = NS(running=True, updater=NS(running=True))
         self._application_started = True
@@ -109,13 +113,80 @@ class TelegramPlatformTests(unittest.TestCase):
         self.assertTrue(supported_platform_name("telegram"))
         self.assertIs(event_native_client(None, event), event.client)
 
-    def test_group_messages_are_not_served(self):
+    def test_private_update_cannot_be_relabelled_as_group(self):
         event = telegram_event(TelegramPlatform())
         event.message_obj.type = MessageType.GROUP_MESSAGE
         event.session.message_type = MessageType.GROUP_MESSAGE
         with self.assertRaises(TaskError) as refused:
             group_event_route(event)
         self.assertEqual(refused.exception.code, "host_route_mismatch")
+
+
+async def group_event(platform, chat_id=-400, kind="group", topic=None, text="你好", **fields):
+    chat = Chat(chat_id, kind, is_forum=True if topic else None)
+    message = Message(22, date=datetime.now(timezone.utc), chat=chat, text=text,
+                      from_user=fields.pop("from_user", User(OWNER, "Synthetic", False)),
+                      message_thread_id=topic, is_topic_message=bool(topic), **fields)
+    native = await platform.convert_message(Update(12, message=message), NS(bot=platform.client))
+    return platform.create_event(native)
+
+
+class TelegramGroupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_sdk_group_and_topic_routes(self):
+        platform = TelegramPlatform()
+        for kind, topic, window in (("group", None, "-400"), ("supergroup", None, "-400"),
+                                    ("supergroup", 1, "-400"), ("supergroup", 23, "-400#23")):
+            with self.subTest(kind=kind, topic=topic):
+                event = await group_event(platform, kind=kind, topic=topic)
+                route = group_event_route(event)
+                self.assertEqual((route.group_id, route.session_id, route.sender_id),
+                                 (window, window, str(OWNER)))
+
+
+    async def test_sdk_addressing_uses_bot_username_and_original_reply_author(self):
+        platform = TelegramPlatform()
+        quote = Message(10, date=datetime.now(timezone.utc), chat=Chat(-400, "group"),
+                        from_user=User(platform.client.id, "Bot", True), text="之前")
+        for text, fields, mentioned, replied, expected in (
+            ("你好", {}, False, False, "你好"),
+            ("😀 @Synthetic_bot 好", {"entities": [MessageEntity("mention", 3, 14)]},
+             True, False, "😀 " + SELF_MENTION + " 好"),
+            ("@tg_main", {"entities": [MessageEntity("mention", 0, 8)]}, False, False, "@tg_main"),
+            ("@SYNTHETIC_BOT", {"entities": [MessageEntity("mention", 0, 14)]}, True, False, SELF_MENTION),
+            ("@synthetic_bot 你好", {"entities": [MessageEntity("mention", 0, 14)]},
+             True, False, SELF_MENTION + " 你好"),
+            ("/ 原文", {"reply_to_message": quote}, False, True, "/ 原文"),
+        ):
+            with self.subTest(text=text):
+                event = await group_event(platform, text=text, **fields)
+                facts = group_trigger_facts(event, "tg-main")
+                self.assertEqual((facts["mentioned"], facts["quoted_bot"]), (mentioned, replied))
+                self.assertEqual(group_message_text(event, "tg-main"), expected)
+
+    async def test_reply_to_member_whose_id_matches_the_instance_is_unaddressed(self):
+        platform = TelegramPlatform()
+        platform.config["id"] = str(OWNER)
+        quoted = Message(9, date=datetime.now(timezone.utc), chat=Chat(-400, "group"),
+                         from_user=User(OWNER, "Member", False), text="上文")
+        event = await group_event(platform, reply_to_message=quoted)
+        facts = group_trigger_facts(event, str(OWNER))
+        self.assertFalse(facts["quoted_bot"])
+
+    async def test_rejects_non_human_messages_and_mismatched_topic(self):
+        platform = TelegramPlatform()
+        for fields in ({"from_user": User(91, "Other", True)},
+                       {"sender_chat": Chat(-400, "supergroup")},
+                       {"kind": "channel"}):
+            with self.subTest(fields=fields), self.assertRaises(TaskError):
+                group_event_route(await group_event(platform, **fields))
+        event = await group_event(platform, kind="supergroup", topic=23)
+        event.message_obj.raw_message = (await group_event(platform, kind="supergroup", topic=24)).message_obj.raw_message
+        with self.assertRaises(TaskError):
+            group_event_route(event)
+        original = event.message_obj.raw_message.message
+        event.message_obj.raw_message = Update(33, channel_post=original)
+        with self.assertRaises(TaskError):
+            group_event_route(event)
 
 
 class TelegramHostFixture(MultiFixture):
@@ -276,6 +347,71 @@ class TelegramPresenceTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
     async def cancel_reply(task):
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        windows = ("-400", "-100400", "-100400#23")
+        config = self.controller.config
+        config["multi_host"]["group_targets"] = [
+            dict(target_id=f"group-{i}", platform_id="tg-main", account_id="tg-main",
+                 bot_id="bot-tg", group_id=window) for i, window in enumerate(windows)]
+        self.window_personas.update({f"tg-main:GroupMessage:{window}": "original" for window in windows})
+        self.controller = self.make_controller(config)
+        await self.start_host()
+        self.platform.client.send_chat_action = AsyncMock()
+        self.platform.client.send_message = AsyncMock()
+
+    async def test_group_delivery_and_collective_audience(self):
+        from astrbot.core.message.message_event_result import MessageChain
+
+        binding = ProviderBinding("message.delivery", "synthetic-sender", "1", digest("synthetic"))
+        sender = AstrBotPlatformSender(self.controller.session.bridge, binding=binding,
+            version="4.29.4", reverse_api_type=object, authorize=lambda: None)
+        for chat, kind, topic in ((-400, "group", None), (-100400, "supergroup", None),
+                                  (-100400, "supergroup", 23)):
+            quote = Message(17, date=datetime.now(timezone.utc), chat=Chat(chat, kind),
+                            from_user=User(424242, "Bot", True), text="上文")
+            text = "继续" if topic else "@synthetic_bot" if kind == "group" else "@synthetic_bot 你好"
+            fields = {"reply_to_message": quote} if topic else {"entities": [MessageEntity("mention", 0, 14)]}
+            event = await group_event(self.platform, chat, kind, topic, text=text, **fields)
+            event.created_at = self.clock.now().timestamp()
+            admission = require(await self.controller.group_reply_candidate(event))
+            self.assertEqual(admission["reason"], "native_quote" if topic else "mention")
+            prepared = require(await self.controller.prepare_core_reply(event, group_admission=admission))
+            context = prepared["context"]
+            self.assertEqual(prepared["group_trigger"]["bare_mention"], kind == "group")
+            if topic:
+                from astrbot_host.core_reply_mentions import restore_group_mentions
+                native = prepared["native_input"]
+                self.assertEqual((native.text, native.group_message_text), ("继续", "继续"))
+                request = NS(prompt=event.message_str)
+                restore_group_mentions(event, request, native, self.native)
+                self.assertEqual(request.prompt, "继续")
+            self.assertEqual(context.actor.subject.subject_id, self.bound_person())
+            self.assertEqual(context.scope.kind, ScopeKind.GROUP)
+            self.assertEqual({r.kind.value for r in context.audience.recipients}, {"human", "group"})
+            await event.send(MessageChain(chain=[Plain("前台")]))
+            receipt = await sender.send(DeliveryEnvelope("part", "op", context, 1, "后台", digest("后台"),
+                                        binding, before_dispatch=lambda: True))
+            self.assertEqual(receipt.status, "delivered", receipt)
+            calls = self.platform.client.send_message.await_args_list
+            self.assertEqual(len(calls), 2)
+            for call in calls:
+                self.assertEqual(call.kwargs["chat_id"], str(chat))
+                self.assertEqual(call.kwargs.get("message_thread_id"), str(topic) if topic else None)
+            self.platform.client.send_message.reset_mock()
+
+    async def test_unconfigured_and_migrated_windows_stay_silent(self):
+        plugin = self.started_plugin()
+        for chat, topic in ((-100401, None), (-100400, 24)):
+            event = await group_event(self.platform, chat, "supergroup", topic)
+            with self.assertLogs("astrbot_host.multi_controller", level="INFO") as logs:
+                await plugin.receive_companion_message(event)
+            self.assertIn("未配置", " ".join(logs.output))
+            self.assertTrue(event.call_llm)
+            self.assertIsNone(event.get_extra(CORE_REPLY_CONTEXT_EXTRA))
+        self.platform.client.send_message.assert_not_awaited()
 
 
 class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
