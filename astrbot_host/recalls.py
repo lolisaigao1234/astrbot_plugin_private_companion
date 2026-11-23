@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 import logging
 
-from companion_v2.adapters.astrbot.connections import NativeConnectionLease
+from companion_v2.adapters.astrbot.connections import NativeAccountConnections, NativeConnectionLease
 from companion_v2.adapters.astrbot.native import (
     account_number, event_account_id, event_native_client, event_peer_id, native_client_connected,
     platform_client_matches,
@@ -95,6 +95,7 @@ class NativeNoticeRoute:
     platform: object | None = None
     platform_name: str = ""
     connection_lease: NativeConnectionLease | None = None
+    connections: NativeAccountConnections | None = None
 
 
 def _lark_private_message_route(controller, event):
@@ -180,7 +181,7 @@ def telegram_private_message_route(controller, event, *, configured_peer):
         return None
     return NativeNoticeRoute(ScopeKind.PRIVATE, meta.id, account.bot_id, login, sender, sender,
                              native_session.session_id, lease.client, platform=lease.platform,
-                             platform_name="telegram", connection_lease=lease)
+                             platform_name="telegram", connection_lease=lease, connections=bridge.connections)
 
 
 def authenticate_notice_route(controller, event, kind, *, expected_post="notice"):
