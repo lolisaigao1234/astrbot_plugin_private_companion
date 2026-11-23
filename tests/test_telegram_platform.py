@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace as NS
 import unittest
 import wave
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from telegram.error import BadRequest, Forbidden, InvalidToken, NetworkError, RetryAfter, TimedOut
 from telegram import Chat, Message, Update, User
@@ -211,6 +211,13 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
         self.assertNotIn(token, " ".join(host_logs.output))
         self.assertIn("[redacted]", " ".join(host_logs.output))
 
+    async def test_unavailable_refusal_classifier_keeps_dispatch_unknown(self):
+        self.platform.client.send_message.side_effect = NetworkError("connection lost")
+        with patch("companion_v2.adapters.astrbot.platform_sender._telegram_refusal", side_effect=ImportError):
+            receipt = await self.send()
+        self.assertEqual((receipt.status, receipt.failure_code), ("unknown", None))
+        self.platform.client.send_message.assert_awaited_once()
+
     async def test_transport_errors_are_unknown(self):
         for error in (TimedOut(), NetworkError("connection lost")):
             with self.subTest(error=type(error).__name__):
@@ -315,6 +322,15 @@ class TelegramPrivateCommandTests(TelegramHostFixture, unittest.IsolatedAsyncioT
         await self.dispatch("你好", peer)
         self.assertEqual(self.platform.send_by_session.await_count, 2)
 
+    async def test_stranger_notice_uses_delivery_day_for_daily_cap(self):
+        defaults = {"stranger_notice": True, "denied_reply": "陌生人提示",
+                    "stranger_daily_cap": 1, "notice_cooldown_seconds": 60}
+        self.controller.session.application.private_access_settings.defaults_installation = Mock(return_value=defaults)
+        self.platform.send_by_session.side_effect = lambda *_: self.clock.advance(timedelta(days=1))
+        await self.dispatch("你好", OWNER + 1)
+        await self.dispatch("你好", OWNER + 2)
+        self.platform.send_by_session.assert_awaited_once()
+
     async def test_queued_stranger_notice_observes_new_mute(self):
         from astrbot_host.private_notice import notice_cooldown_lock
         from astrbot_host.stranger_notice import BLOCK_KIND, stranger_block_view_id
@@ -324,9 +340,12 @@ class TelegramPrivateCommandTests(TelegramHostFixture, unittest.IsolatedAsyncioT
         defaults = {"stranger_notice": True, "denied_reply": "陌生人提示",
                     "stranger_daily_cap": 3, "notice_cooldown_seconds": 60}
         self.controller.session.application.private_access_settings.defaults_installation = Mock(return_value=defaults)
-        async with notice_cooldown_lock(self.controller):
+        lock = notice_cooldown_lock(self.controller)
+        async with lock:
             queued = asyncio.create_task(self.dispatch("你好", peer))
-            await asyncio.sleep(0)
+            async with asyncio.timeout(30):
+                while not lock._waiters:
+                    await asyncio.sleep(0)
             key = stranger_block_view_id("tg-main", "tg-main", str(peer))
             with self.controller.runtime.transaction() as connection:
                 connection.execute("INSERT INTO memory_views VALUES (?, ?, ?, ?, 'active', ?, ?, ?)",
