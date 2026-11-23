@@ -212,6 +212,10 @@ class MultiPrivateBridge(NativePrivateBridge):
                     or not native_client_connected(platform, login)):
                 raise TaskError("host_client_mismatch", "private event did not originate from the connected account client")
 
+            telegram = None
+            if meta.name == "telegram":
+                from companion_v2.adapters.astrbot.telegram_references import private_references
+                telegram = private_references(event)
             connection_lease = self.connections.acquire(account)
             event_id = native_id(message.message_id)
             at = datetime.fromtimestamp(event.created_at, timezone.utc)
@@ -231,9 +235,15 @@ class MultiPrivateBridge(NativePrivateBridge):
             from .core_reply_forwards import combine_text_and_forward_summary, get_parsed_forwards
             text = combine_text_and_forward_summary(
                 self._core_reply_non_forward_text(event), get_parsed_forwards(event))
+            if telegram:
+                text = telegram.quote_availability(text)
+                if telegram.forward_origin:
+                    text = f"{telegram.forward_marker}\n{text}"
             return Outcome.success(NativeConversationInput(
                 event_id, principal, ConversationRoute(scope, user=actor.subject), recipients,
                 text, at, role, instruction,
+                quotes=(telegram.quote,) if telegram and telegram.quote else (),
+                forward_origin=telegram.forward_origin if telegram else "",
             ))
         except TaskError as error:
             return Outcome.failed(error.code, str(error))

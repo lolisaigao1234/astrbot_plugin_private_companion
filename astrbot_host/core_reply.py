@@ -791,6 +791,12 @@ def inject_core_reply_prompt(event: Any, req: Any) -> None:
         return
 
     prepared = state.get("prepared")
+    original = prepared.get("native_input") if isinstance(prepared, Mapping) else None
+    origin = getattr(original, "forward_origin", "")
+    if origin and isinstance(getattr(req, "prompt", None), str):
+        marker = f"[转发消息，来源：{origin}]\n"
+        if not req.prompt.startswith(marker):
+            req.prompt = marker + req.prompt
     system_prompt = getattr(req, "system_prompt", "") or ""
     # AstrBot already constructs the selected persona and its example dialogs.
     # The captured native instruction is only an authorization fingerprint.

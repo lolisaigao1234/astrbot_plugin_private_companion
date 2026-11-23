@@ -42,6 +42,9 @@ class _QuotedImages:
     event: object = field(repr=False, compare=False)
     client: object = field(repr=False, compare=False)
 
+    telegram_peer: str | None = None
+    telegram_bot: str | None = None
+
     @property
     def needs_lookup(self):
         return not self.images or self.sender_id is None or self.needs_resolved_images
@@ -73,10 +76,21 @@ def direct_image_locators(locators):
 def frozen_image_locators(event):
     """Freeze current attachments and quotes, in AstrBot's attachment order."""
     images, quotes = [], []
+    telegram = None
+    if (getattr(getattr(event, "platform_meta", None), "name", None) == "telegram"
+            and getattr(event.message_obj.type, "value", None) == "FriendMessage"):
+        from companion_v2.adapters.astrbot.telegram_references import private_references
+        telegram = private_references(event)
     for position, part in enumerate(getattr(getattr(event, "message_obj", None), "message", ())):
         if type(part) is Image:
             images.append(image_locator(position, part.file, part.url))
         elif type(part) is Reply:
+            if telegram is not None:
+                quote = telegram.quote
+                if quote and quote.position == position and telegram.images:
+                    quotes.append(_QuotedImages(position, quote.message_id, quote.sender_id, quote.sent_at,
+                        telegram.images, event, None, str(event.message_obj.sender.user_id), str(event.client.id)))
+                continue
             identifier = _identifier(part.id)
             if identifier is None:
                 continue
@@ -88,9 +102,9 @@ def frozen_image_locators(event):
     return (*images, *quotes)
 
 
-def _quote_sender(context, sender):
+def _quote_sender(context, sender, telegram_bot=None):
     if (sender is None or context.scope.kind is ScopeKind.PRIVATE
-            and sender not in (context.scope.native_scope_id, context.scope.account_id)):
+            and sender not in (context.scope.native_scope_id, context.scope.account_id, telegram_bot)):
         raise TaskError("host_quote_scope_mismatch", "quoted sender does not belong to this conversation")
 
 
@@ -108,7 +122,10 @@ async def _quoted_images(quote, context, check):
 async def _resolve_quoted_images(quote, context, check):
     sender, sent_at, images = quote.sender_id, quote.sent_at, quote.images
     resolve_from_original = not images or quote.needs_resolved_images
-    if quote.needs_lookup:
+    if quote.telegram_peer is not None:
+        if context.scope.kind is not ScopeKind.PRIVATE or quote.telegram_peer != context.scope.native_scope_id:
+            raise TaskError("host_quote_scope_mismatch", "Telegram quote belongs to another chat")
+    elif quote.needs_lookup:
         await check()
         if OneBotClient._resolve_call_action(quote.event) != quote.client._call_action:
             raise TaskError("host_quote_account_changed", "the original quote connection changed")
@@ -151,9 +168,10 @@ async def _resolve_quoted_images(quote, context, check):
             images = tuple(NativeImageLocator(index, value, host_resolved=True)
                            for index, value in enumerate(references))
         sent_at = raw.get("time") if type(raw.get("time")) is int and raw["time"] > 0 else sent_at
-    _quote_sender(context, sender)
+    _quote_sender(context, sender, quote.telegram_bot)
     return images, {"origin": "quoted_message", "original_message_id": quote.message_id,
-                    "original_sender": sender, "sent_at_unix": sent_at, "component_position": quote.position}
+                    "original_sender": sender, "sent_at_unix": sent_at, "component_position": quote.position,
+                    **({"telegram_bot": quote.telegram_bot} if quote.telegram_bot else {})}
 
 
 def bind_native_quoted_image_sources(application):
@@ -174,7 +192,7 @@ def bind_native_quoted_image_sources(application):
         application.messages.recalls.check(context.scope, document["event_id"], context.actor.principal.native_account_id)
         for source in document["image_sources"]:
             if source["origin"] == "quoted_message":
-                _quote_sender(context, source["original_sender"])
+                _quote_sender(context, source["original_sender"], source.get("telegram_bot"))
                 application.messages.recalls.check(context.scope, source["original_message_id"], source["original_sender"])
 
     guard = bind(application.runtime, QUOTED_IMAGE_OWNER, validate)

@@ -1,0 +1,147 @@
+"""Synthetic Telegram updates passed through AstrBot's installed converter."""
+
+import base64
+from dataclasses import replace
+import json
+from types import SimpleNamespace as NS
+import unittest
+from unittest.mock import AsyncMock, patch
+
+from tests.test_telegram_platform import OWNER, TelegramHostFixture
+from telegram import PhotoSize, Update
+from astrbot.core.platform.sources.telegram.tg_event import TelegramPlatformEvent
+from astrbot.core.message.components import Reply
+from companion_v2.execution.models import require
+
+
+class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.platform.client.id = 424242
+        self.platform.client.username = "synthetic_bot"
+        self.types = replace(self.types, reply=Reply, quote_loader=AsyncMock(side_effect=AssertionError("Telegram must not look up the quoted message")))
+        self.controller = self.make_controller(self.controller.config)
+        await self.start_host()
+        self.bridge = self.controller.session.bridge
+
+    def message(self, number, sender=OWNER, **fields):
+        return {"message_id": number, "date": 1700000000, "chat": {"id": OWNER, "type": "private"},
+                "from": {"id": sender, "is_bot": sender == 424242, "first_name": "Synthetic"}, **fields}
+
+    async def event(self, number=12, **fields):
+        raw = Update.de_json({"update_id": 12, "message": self.message(number, **fields)}, None)
+        message = await self.platform.convert_message(raw, NS(bot=self.platform.client))
+        event = TelegramPlatformEvent(message.message_str, message, self.platform.meta(), str(OWNER), self.platform.client)
+        event.created_at = self.clock.now().timestamp()
+        return event
+
+    def observe(self, original):
+        session = self.controller.session
+        context = session.authority.select(self.controller.settings.target("tg-owner"), original.route.scope, original.role)
+        reference = session.core_reply_observations.owner.capture_input(context, original, turn_id="test-" + original.event_id)
+        access = session.application.memory.writer.access
+        evidence = access.capture(context, reference)
+        return access.evidence(context, evidence), (evidence.speaker_id, evidence.source_kind)
+
+    def prompt(self, event, original, text):
+        from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA, inject_core_reply_prompt
+
+        event.set_extra(CORE_REPLY_CONTEXT_EXTRA, {"prepared": {"native_input": original}})
+        request = NS(prompt=text, system_prompt="")
+        inject_core_reply_prompt(event, request)
+        inject_core_reply_prompt(event, request)
+        return request.prompt + request.system_prompt
+
+    async def test_private_quotes_preserve_original_source_and_selected_text(self):
+        from astrbot.core.utils.quoted_message.chain_parser import ReplyChainParser
+
+        for index, (sender, selection) in enumerate(((OWNER, None), (424242, None), (OWNER, {"text": "片段", "position": 2}))):
+            fields = {"quote": selection} if selection else {}
+            event = await self.event(number=30 + index, text="说说看", reply_to_message=self.message(10, sender, text="😀片段原文"), **fields)
+            original = selection["text"] if selection else "😀片段原文"
+            for capture in (self.bridge.capture, self.bridge.capture_core_reply):
+                with self.subTest(sender=sender, capture=capture.__name__, selection=selection):
+                    result = require(await capture(event))
+                    quote, = result.quotes
+                    self.assertEqual((quote.message_id, quote.sender_id, quote.sent_at, quote.text),
+                                     ("10", str(sender), 1700000000, original))
+                    self.assertNotIn(original, result.text)
+            record, _ = self.observe(result)
+            self.assertIn(original, record)
+            self.assertIn(str(sender), record)
+            if selection:
+                self.assertNotIn("原文", record)
+            parser = ReplyChainParser()
+            sdk_text = parser.extract_text_from_reply_component(parser.find_first_reply_component(event))
+            self.assertEqual(self.prompt(event, result, sdk_text + event.message_str).count(original), 1)
+
+    async def test_missing_and_external_originals_are_unavailable(self):
+        for fields in ({"reply_to_message": self.message(10, date=0, **{"from": None})},
+                       {"quote": {"text": "不可见", "position": 0}},
+                       {"external_reply": {"origin": {"type": "hidden_user", "sender_user_name": "X",
+                                                       "date": 1700000000}}},
+                       {"reply_to_message": self.message(10, chat={"type": "private", "id": OWNER + 1},
+                                                         text="不可见")}):
+            event = await self.event(text="继续", **fields)
+            for capture in (self.bridge.capture, self.bridge.capture_core_reply):
+                result = require(await capture(event))
+                self.assertIn("引用消息不可用", result.text)
+                self.assertIn("继续", result.text)
+                self.assertNotIn("不可见", result.text)
+                self.assertFalse(result.quotes)
+
+    async def test_each_forward_origin_is_preserved_in_the_observation(self):
+        from astrbot_host.core_reply_forwards import private_debounce_input
+        origins = (
+            ({"type": "user", "sender_user": self.message(3, 42)["from"]}, "Synthetic (42)"),
+            ({"type": "hidden_user", "sender_user_name": "Hidden"}, "Hidden"),
+            ({"type": "chat", "sender_chat": {"type": "supergroup", "id": -100, "title": "Group"}}, "Group (-100)"),
+            ({"type": "channel", "message_id": 41, "author_signature": "Editor",
+              "chat": {"type": "channel", "id": -200, "title": "Channel"}}, "Channel (-200)，原消息 41，署名 Editor"),
+        )
+        for index, (origin, name) in enumerate(origins):
+            event = await self.event(number=40 + index, text="别人的话", forward_origin=dict(origin, date=1700000000))
+            self.assertIsNone(private_debounce_input(event))
+            full = require(await self.bridge.capture(event))
+            self.assertNotIn("别人的话", full.text)
+            node, = full.forwards[0].nodes
+            self.assertEqual((node.text, node.sender_name, node.sent_at), ("别人的话", name, 1700000000))
+            core = require(await self.bridge.capture_core_reply(event))
+            record, attribution = self.observe(core)
+            self.assertEqual(record, f"[转发消息，来源：{name}]\n别人的话")
+            self.assertEqual(attribution, (None, "observation"))
+            self.assertEqual(self.prompt(event, core, "别人的话"), record)
+
+    async def test_captioned_photos_keep_the_original_sender_and_image(self):
+        from astrbot_host.core_reply_media import frozen_image_locators, prepare_native_input_images
+        from tests.test_conversation_images import image_bytes
+        from astrbot_host.media import load_native_image
+        source = image_bytes("green")
+        self.bridge.image_loader = load_native_image
+        photo = [{"file_id": "file", "file_unique_id": "unique", "width": 2, "height": 2}]
+        for sender in (OWNER, 424242):
+            with patch.object(PhotoSize, "get_file", new=AsyncMock(return_value=NS(
+                    file_path="base64://" + base64.b64encode(source).decode()))):
+                event = await self.event(number=20 if sender == OWNER else 21, text="修改", reply_to_message=self.message(10, sender, photo=photo, caption="绿"))
+            quote, = require(await self.bridge.capture(event)).quotes
+            self.assertEqual((quote.text, quote.sender_id), ("\n[图片 1]\n绿", str(sender)))
+            self.assertEqual(len(quote.images), 1)
+            original = require(await self.bridge.capture_core_reply(event))
+            session = self.controller.session
+            target = self.controller.settings.target("tg-owner")
+            context = session.authority.select(target, original.route.scope, original.role)
+            tool = NS(application=session.application, prepared={"context": context, "native_input": original},
+                      image_locators=frozen_image_locators(event), authorize=AsyncMock(), turn_id=f"photo-{sender}")
+            await prepare_native_input_images(tool, None)
+            from companion_v2.conversation.native_tool_sources import native_input_images
+            saved = native_input_images(session.application.messages, context, tool.turn_id)
+            payload = session.application.messages._read_source(saved.source, context, "text", self.clock.now()).payload
+            self.assertEqual(json.loads(payload)["image_sources"][0]["original_sender"], str(sender))
+
+    async def test_selection_of_a_previously_admitted_message_can_be_replayed(self):
+        session = self.controller.session
+        target = self.controller.settings.target("tg-owner")
+        require(await session.receive(await self.event(number=10, text="😀片段原文"), target))
+        event = await self.event(number=11, text="再说说", quote={"text": "片段", "position": 2},
+                                 reply_to_message=self.message(10, text="😀片段原文"))
+        require(await session.receive(event, target))
+        require(await session.receive(event, target))

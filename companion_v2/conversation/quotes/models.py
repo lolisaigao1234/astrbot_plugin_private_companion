@@ -73,6 +73,16 @@ class CapturedQuote:
 
 
 @dataclass(frozen=True)
+class TelegramQuote(CapturedQuote):
+    companion_sender: bool = False
+    selection_offset: int | None = None
+
+    def observation_text(self):
+        sender = f"伙伴 ({self.sender_id})" if self.companion_sender else self.sender_id
+        return f"[引用消息 {self.message_id}，原发送者 {sender}，时间 {self.sent_at}]\n{self.text}"
+
+
+@dataclass(frozen=True)
 class QuoteDescriptor:
     position: int
     message_id: str
@@ -89,6 +99,8 @@ class QuoteDescriptor:
 
     @classmethod
     def restore(cls, data):
+        if "selection_offset" in data:
+            return TelegramQuoteDescriptor(**{**data, "images": tuple(image_descriptor(i) for i in data["images"])})
         if "forwards" in data:
             from .forward_models import ForwardQuoteDescriptor
             return ForwardQuoteDescriptor.restore(data)
@@ -96,6 +108,11 @@ class QuoteDescriptor:
             from .forward_models import QuoteMediaDescriptor
             return QuoteMediaDescriptor.restore(data)
         return cls(**{**data, "images": tuple(image_descriptor(i) for i in data["images"])})
+
+
+@dataclass(frozen=True)
+class TelegramQuoteDescriptor(QuoteDescriptor):
+    selection_offset: int | None = None
 
 
 def event_forwards(event):

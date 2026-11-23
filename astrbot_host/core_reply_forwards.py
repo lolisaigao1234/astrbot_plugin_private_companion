@@ -135,6 +135,10 @@ def private_debounce_input(event: Any) -> tuple[str, bool] | None:
                        getattr(message_obj, "type", None))
     if msg_type != "FriendMessage":
         return None
+    if getattr(getattr(event, "platform_meta", None), "name", None) == "telegram":
+        raw = getattr(getattr(message_obj, "raw_message", None), "message", None)
+        if any(getattr(raw, field, None) for field in ("reply_to_message", "external_reply", "quote", "forward_origin")):
+            return None
     parts = _message_components(event)
     if not parts:
         return None

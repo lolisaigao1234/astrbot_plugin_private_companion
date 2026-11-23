@@ -32,11 +32,12 @@ from .recalls import CONSUMER as RECALL_CONSUMER, MessageRecall
 
 INPUT_OWNER = "conversation.native_input"
 ASSISTANT_OWNER = "conversation.native_assistant"
+REFERENCE_OWNER = "conversation.native_reference"
 TOGETHER_INPUT_OWNER = "conversation.together_input"
 TOGETHER_ASSISTANT_OWNER = "conversation.together_assistant"
 TOGETHER_OWNERS = frozenset({TOGETHER_INPUT_OWNER, TOGETHER_ASSISTANT_OWNER})
 REALITY_ASSISTANT_OWNER = "conversation.reality_assistant"
-NATIVE_OWNERS = frozenset({INPUT_OWNER, ASSISTANT_OWNER, REALITY_ASSISTANT_OWNER}) | TOGETHER_OWNERS
+NATIVE_OWNERS = frozenset({INPUT_OWNER, REFERENCE_OWNER, ASSISTANT_OWNER, REALITY_ASSISTANT_OWNER}) | TOGETHER_OWNERS
 NATIVE_FEEDS = frozenset({"native_human", "native_reply"})
 logger = logging.getLogger(__name__)
 
@@ -135,6 +136,8 @@ def validate_observation(runtime, row, context, reference, *, original=None, rec
             ) is not None
         if is_recalled:
             raise TaskError("message_withdrawn", "the native input was withdrawn")
+        if reference.owner == REFERENCE_OWNER:
+            return None, "observation"
         return original.actor.subject.subject_id, "human_message"
     return (original.role_binding.role.subject_id,
             "bot_message" if row["delivery_state"] == "send_returned" else "observation")
@@ -208,13 +211,20 @@ class NativeConversationObservations:
         self.messages.recalls.check(context.scope, native_input.event_id,
                                    context.actor.principal.native_account_id)
         from .native_turns import NativeConversationTurns
-        if not native_input.text.strip():
+        text = native_input.text
+        from .quotes.models import TelegramQuote
+        references = [q.observation_text() for q in getattr(native_input, "quotes", ()) if isinstance(q, TelegramQuote)]
+        if references:
+            text = "\n".join((text, *references)).strip()
+        has_reference = references or getattr(native_input, "forward_origin", "")
+        if not text.strip():
             NativeConversationTurns(self.runtime).admit(context, native_input, turn_id, None)
             return None
         identifier = "core-input-" + digest([context.scope, context.role_binding.role,
                                              context.actor.subject, native_input.event_id])
-        reference = self._record(context, identifier, turn_id, native_input.event_id, native_input.text,
+        reference = self._record(context, identifier, turn_id, native_input.event_id, text,
                                  native_input.at, kind="input", state="input_observed",
+                                 source_owner=REFERENCE_OWNER if has_reference else INPUT_OWNER,
                                  awareness_enabled=self._awareness_enabled(context),
                                  peer_count=self._peer_count(context, native_input.at),
                                  quote_sender_ids=tuple(
@@ -300,7 +310,7 @@ class NativeConversationObservations:
                     VALUES (?, ?, ?, ?)""", (conversation_owner(context),
                     "native_human" if kind == "input" else "native_reply", identifier,
                     digest([reference, state, record.content_hash])))
-            if kind == "input" and existing is None:
+            if kind == "input" and existing is None and owner != REFERENCE_OWNER:
                 self._observe_input(connection, context, inbound_event({
                     "event_id": event_id, "context_json": encode(context), "source_json": encode(reference),
                     "content_hash": record.content_hash, "observed_at": stamp(issued_at)}), record.payload,

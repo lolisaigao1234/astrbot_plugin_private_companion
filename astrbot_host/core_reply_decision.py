@@ -114,7 +114,7 @@ def core_decision_facts(event, prepared, application, *, at):
     def quotes_bot(value, depth=0):
         if depth > 4:
             return False
-        if account and str(getattr(value, "sender_id", "")) == account:
+        if getattr(value, "companion_sender", False) or (account and str(getattr(value, "sender_id", "")) == account):
             return True
         return any(quotes_bot(child, depth + 1) for name in ("quotes", "forwards", "nodes")
                    for child in (getattr(value, name, ()) or ()))
