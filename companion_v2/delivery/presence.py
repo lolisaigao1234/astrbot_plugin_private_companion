@@ -215,18 +215,24 @@ class PresenceCoordinator:
                 turn = self.active_turn(context)
                 if turn is None:
                     raise TaskError("typing_turn_closed", "the original reply has ended")
+            started = asyncio.get_running_loop().time()
             result = await asyncio.wait_for(self.port.typing(context, before_dispatch=current), timeout=3)
             self._record_result("typing:" + self.route(context),
                                 {**result, "batch_id": turn["batch_id"] if turn else None}, context.key)
             batch = turn["batch_id"] if turn else None
             if batch != reported_batch or result.get("state") != "accepted":
-                logger.info("[CompanionV2] QQ 输入提示 recipient=%s turn_id=%s state=%s code=%s",
+                logger.info("[CompanionV2] 输入提示 recipient=%s turn_id=%s state=%s code=%s",
                             context.scope.native_scope_id, batch, result.get("state"), result.get("code", ""))
                 reported_batch = batch
             if result.get("state") != "accepted":
                 return
+            interval = values["typing_refresh_seconds"]
+            if "max_refresh_seconds" in result:
+                # A slow acknowledgement consumes part of the platform's typing lifetime.
+                remaining = started + result["max_refresh_seconds"] - asyncio.get_running_loop().time()
+                interval = min(interval, max(0, remaining))
             try:
-                await asyncio.wait_for(wake.wait(), timeout=values["typing_refresh_seconds"])
+                await asyncio.wait_for(wake.wait(), timeout=interval)
             except asyncio.TimeoutError:
                 pass
 

@@ -1,36 +1,90 @@
-"""Pinned QQ extension actions. No API-name guessing, account fallback or toggle loop."""
+"""Recipient-scoped platform presence actions."""
 
 from companion_v2.execution.models import require
 from companion_v2.foundation.outcome import Outcome
+from companion_v2.foundation.refs import ScopeKind
 from .native import route_id
 
 
-class OneBotPresencePort:
+def native_presence_port(bridge, scope, *, reverse_api_type, authorize, now):
+    if bridge.platform_name(scope) == "telegram":
+        return TelegramPresencePort(bridge, authorize=authorize, now=now)
+    return OneBotPresencePort(bridge, reverse_api_type=reverse_api_type, authorize=authorize, now=now)
+
+
+class _PresencePort:
+    def __init__(self, bridge, *, authorize, now):
+        self.bridge, self.authorize, self.now = bridge, authorize, now
+
+    def matches_recipient(self, context):
+        scope, principal = context.scope, context.actor.principal
+        return (context.audience.recipients == (context.actor.subject,)
+                and principal.host_id == self.bridge.host_id and principal.account_id == scope.account_id
+                and principal.bot_id == scope.bot_id and principal.platform == scope.platform
+                and route_id(principal.native_account_id) == scope.native_scope_id)
+
+    def check_access(self, context, capability):
+        check = self.authorize()
+        if isinstance(check, Outcome):
+            require(check)
+        require(self.bridge.identities.authorize(context.actor, scope=context.scope,
+                capability=capability, observed_at=self.now()))
+
+
+class TelegramPresencePort(_PresencePort):
+    async def typing(self, context, *, before_dispatch=None):
+        scope = context.scope
+        try:
+            if scope.kind is not ScopeKind.PRIVATE or not self.matches_recipient(context):
+                return {"state": "not_started", "code": "presence_scope_mismatch"}
+            chat_id = int(scope.native_scope_id)
+            if chat_id <= 0 or str(chat_id) != scope.native_scope_id:
+                return {"state": "not_started", "code": "presence_scope_mismatch"}
+            self.check_access(context, "platform.typing")
+            lease = self.bridge.connections.acquire(self.bridge.account(scope))
+            if lease.platform.meta().name != "telegram":
+                return {"state": "not_started", "code": "presence_transport_unavailable"}
+            await self.bridge.verify_role(scope, context.role_binding)
+            self.check_access(context, "platform.typing")
+            if before_dispatch is not None:
+                before_dispatch()
+            self.bridge.connections.assert_current(lease)
+        except Exception:
+            return {"state": "not_started", "code": "presence_authorization_changed"}
+        try:
+            accepted = await lease.client.send_chat_action(chat_id=chat_id, action="typing")
+        except Exception:
+            return {"state": "unknown", "code": "presence_ack_unknown"}
+        if accepted is True:
+            # Telegram clears chat actions after five seconds.
+            return {"state": "accepted", "max_refresh_seconds": 4}
+        return {"state": "failed", "code": "presence_action_rejected"}
+
+    async def custom_status(self, context, wording, *, before_dispatch=None):
+        return {"state": "not_started", "code": "presence_unsupported"}
+
+    async def online_status(self, context, mode, *, before_dispatch=None):
+        return {"state": "not_started", "code": "presence_unsupported"}
+
+
+class OneBotPresencePort(_PresencePort):
     def __init__(self, bridge, *, reverse_api_type, authorize, now):
-        self.bridge, self.reverse_api_type, self.authorize, self.now = bridge, reverse_api_type, authorize, now
+        super().__init__(bridge, authorize=authorize, now=now)
+        self.reverse_api_type = reverse_api_type
 
     async def _call(self, context, capability, action, *, before_dispatch=None, **parameters):
         try:
-            scope, principal = context.scope, context.actor.principal
-            if (context.audience.recipients != (context.actor.subject,)
-                    or principal.host_id != self.bridge.host_id or principal.account_id != scope.account_id
-                    or principal.bot_id != scope.bot_id or principal.platform != scope.platform
-                    or route_id(principal.native_account_id) != scope.native_scope_id):
+            scope = context.scope
+            if not self.matches_recipient(context):
                 return {"state": "not_started", "code": "presence_scope_mismatch"}
-            check = self.authorize()
-            if isinstance(check, Outcome):
-                require(check)
-            require(self.bridge.identities.authorize(context.actor, scope=scope, capability=capability, observed_at=self.now()))
+            self.check_access(context, capability)
             await self.bridge.verify_role(scope, context.role_binding)
             client = self.bridge.client(scope)
             api = client._api._wsr_api
             if (type(api) is not self.reverse_api_type or api._api_clients is not client._wsr_api_clients
                     or not client._wsr_api_clients.get(scope.account_id)):
                 return {"state": "not_started", "code": "presence_transport_unavailable"}
-            check = self.authorize()
-            if isinstance(check, Outcome):
-                require(check)
-            require(self.bridge.identities.authorize(context.actor, scope=scope, capability=capability, observed_at=self.now()))
+            self.check_access(context, capability)
             if before_dispatch is not None:
                 before_dispatch()
         except Exception:

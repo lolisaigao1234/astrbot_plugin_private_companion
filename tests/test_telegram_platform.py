@@ -161,6 +161,123 @@ class TelegramHostFixture(MultiFixture):
             await asyncio.wait_for(plugin._host_start_task, timeout=20)
 
 
+class TelegramPresenceTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.app = await self.start_host()
+        self.context, _ = await self.controller.session.synchronize(self.controller.settings.target("tg-owner"))
+        self.action = self.platform.client.send_chat_action = AsyncMock(return_value=True)
+        self.presence = self.app.presence
+
+    def enable_typing(self, interval=1):
+        from astrbot_host.management_identity import dashboard_operator
+        from companion_v2.role_work.state.management import StateManagement
+        manager = StateManagement(self.app, self.context)
+        operator = dashboard_operator(self.app.runtime, "synthetic", at=self.clock.now())
+        status = manager.status(operator).unwrap()
+        manager.command(operator, dict(action="configure", operation_key="typing-on",
+            edit_token=status["edit_token"], role_edit_token=status["role_edit_token"],
+            changes={"typing_enabled": True, "typing_refresh_seconds": interval})).unwrap()
+
+    async def test_long_reply_refreshes_until_finished(self):
+        self.enable_typing(interval=10)
+        renewed = asyncio.Event()
+
+        async def typing(**kwargs):
+            if self.action.await_count >= 2:
+                renewed.set()
+            return True
+
+        self.action.side_effect = typing
+        self.presence.begin_native_reply(self.context, "long-reply")
+        try:
+            await asyncio.wait_for(renewed.wait(), 8)
+            self.action.assert_awaited_with(chat_id=OWNER, action="typing")
+            worker = self.presence.typing[self.presence.route(self.context)][2]
+        finally:
+            self.presence.finish_native_reply(self.context, "long-reply")
+        await asyncio.wait_for(asyncio.gather(worker, return_exceptions=True), 3)
+        self.assertFalse(self.presence.active_handles)
+
+    async def test_setting_off_does_not_start_typing(self):
+        self.presence.begin_native_reply(self.context, "disabled")
+        self.assertIsNotNone(self.presence.active_turn(self.context))
+        self.assertFalse(self.presence.active_handles)
+        self.presence.finish_native_reply(self.context, "disabled")
+        self.action.assert_not_awaited()
+
+    async def test_disconnect_and_revoked_grant_prevent_dispatch(self):
+        self.enable_typing()
+        port = self.presence.port
+        self.platform.application.updater.running = False
+        self.assertEqual((await port.typing(self.context))["state"], "not_started")
+        self.platform.application.updater.running = True
+        identities = self.controller.session.bridge.identities
+        grant = next(g for g in identities.grants_for_subject(self.context.actor.subject)
+                     if g.capability == "platform.typing")
+        identities.revoke_grant(grant.grant_id, revoked_at=self.clock.now(), expected_revision=identities.revision)
+        self.assertEqual((await port.typing(self.context))["state"], "not_started")
+        self.action.assert_not_awaited()
+
+    async def test_account_status_is_unsupported(self):
+        port = self.presence.port
+        self.assertEqual((await port.online_status(self.context, "online"))["code"], "presence_unsupported")
+        self.assertEqual((await port.custom_status(self.context, "休息"))["code"], "presence_unsupported")
+        self.action.assert_not_awaited()
+
+    async def test_slow_rate_limited_action_is_independent_of_reply(self):
+        self.enable_typing()
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def limited(**kwargs):
+            entered.set()
+            await release.wait()
+            raise RetryAfter(42)
+
+        self.action.side_effect = limited
+        self.presence.begin_native_reply(self.context, "rate-limited")
+        await asyncio.wait_for(entered.wait(), 3)
+        release.set()
+        route = self.presence.route(self.context)
+        await asyncio.wait_for(self.presence.typing[route][2], 3)
+        self.assertIsNotNone(self.presence.active_turn(self.context))
+        self.assertEqual(self.presence.results_for(self.context)["typing:" + route]["state"], "unknown")
+        self.presence.finish_native_reply(self.context, "rate-limited")
+        self.action.assert_awaited_once()
+
+    async def test_failed_and_cancelled_reply_tasks_release_typing(self):
+        self.enable_typing()
+        plugin = self.started_plugin()
+        for number, cancel in enumerate((False, True), start=1):
+            with self.subTest(cancel=cancel):
+                prepared = asyncio.get_running_loop().create_future()
+                release = asyncio.Event()
+
+                async def reply():
+                    event = telegram_event(self.platform, number)
+                    event.created_at = self.clock.now().timestamp()
+                    await plugin.receive_companion_message(event)
+                    prepared.set_result(event.get_extra(CORE_REPLY_CONTEXT_EXTRA)["prepared"]["context"])
+                    await release.wait()
+                    raise RuntimeError("synthetic reply failure")
+
+                task = asyncio.create_task(reply())
+                self.addAsyncCleanup(self.cancel_reply, task)
+                context = await asyncio.wait_for(prepared, 30)
+                self.assertIsNotNone(self.presence.active_turn(context))
+                if cancel:
+                    task.cancel()
+                else:
+                    release.set()
+                with self.assertRaises(asyncio.CancelledError if cancel else RuntimeError):
+                    await task
+                self.assertIsNone(self.presence.active_turn(context))
+
+    @staticmethod
+    async def cancel_reply(task):
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
 class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         await self.start_host()

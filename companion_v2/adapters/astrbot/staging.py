@@ -55,7 +55,7 @@ from companion_v2.conversation.media.video.narration import video_narration_prof
 from companion_v2.conversation.media.understanding import intake_settings as file_intake_settings
 from companion_v2.conversation.relay_settings import configuration_fields as relay_configuration_fields
 from companion_v2.system_prompts.configuration import configuration_fields as system_prompt_configuration_fields
-from .presence import OneBotPresencePort
+from .presence import native_presence_port
 from companion_v2.storage.models import OperationState
 from companion_v2.storage.repositories import OperationRepository
 
@@ -383,7 +383,7 @@ class AstrBotStagingSession:
             news_port=news_port,
             search_port_factory=search_port_factory,
             qzone_transport=qzone_transport,
-            presence_port=OneBotPresencePort(self.bridge, reverse_api_type=native_types.reverse_api,
+            presence_port=native_presence_port(self.bridge, target.scope, reverse_api_type=native_types.reverse_api,
                 authorize=self.require_delivery_authorization, now=lambda: self.application.now())
                 if not self._uses_local_sender else None)
         self.application = self.host.application
