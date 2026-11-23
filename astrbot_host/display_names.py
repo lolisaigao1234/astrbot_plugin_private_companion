@@ -38,6 +38,17 @@ def event_person_names(event):
         return "", ""
     normalized_name = platform_label(getattr(sender, "nickname", None), peer)
     raw = getattr(message, "raw_message", None)
+    if getattr(getattr(event, "platform_meta", None), "name", "") == "telegram":
+        author = getattr(getattr(raw, "message", None), "from_user", None)
+        if str(getattr(author, "id", "") or "") != peer:
+            return "", ""
+
+        def part(field):
+            value = _name(getattr(author, field, None))
+            return "" if value.casefold() == "unknown" else value
+
+        full_name = " ".join(filter(None, (part("first_name"), part("last_name"))))
+        return _name(full_name) or part("username"), ""
     if getattr(getattr(event, "platform_meta", None), "name", "") in {"qq_official", "qq_official_webhook"}:
         payload = raw if isinstance(raw, Mapping) else getattr(raw, "raw_data", None)
         author = (payload.get("author") if isinstance(payload, Mapping) else None) or getattr(raw, "author", None)
@@ -53,6 +64,15 @@ def event_person_names(event):
     if not isinstance(sender_data, Mapping):
         return "", ""
     return platform_label(sender_data.get("nickname"), peer), platform_label(sender_data.get("card"), peer)
+
+
+def configured_platform_families(context):
+    """Adapter types keyed by instance ID, available before adapters connect."""
+    try:
+        return {row["id"]: row["type"] for row in context.get_config().get("platform", ())
+                if isinstance(row, Mapping) and row.get("id") and row.get("type")}
+    except (AttributeError, TypeError, ValueError):
+        return {}
 
 
 class PlatformDisplayNames:
@@ -143,20 +163,22 @@ class PlatformDisplayNames:
         except TimeoutError:
             return ""
 
-    def _platform_family(self, row, platform_id):
-        try:
-            platform = self.context.get_platform_inst(platform_id)
-            if platform.meta().name == "wechat_native" and platform.meta().id == platform_id:
-                row["platform_name"] = "wechat_native"
-        except (AttributeError, TypeError, ValueError):
-            pass
+    def with_platform_family(self, rows, platform_key, *, cached_only=False):
+        families = configured_platform_families(self.context)
+        if not cached_only:
+            for instance in {row.get(platform_key) for row in rows}:
+                try:
+                    meta = self.context.get_platform_inst(instance).meta()
+                    if meta.id == instance:
+                        families[instance] = meta.name
+                except (AttributeError, TypeError, ValueError):
+                    pass
+        return [dict(row, platform_name=families[row[platform_key]])
+                if row.get(platform_key) in families else dict(row) for row in rows]
 
     async def targets(self, targets, *, cached_only=False):
-        async def enrich(target):
-            row = dict(target)
+        async def enrich(row):
             platform, account = row.get("platform_id"), row.get("account_id")
-            if not cached_only:
-                self._platform_family(row, platform)
             kind = "group" if row.get("scope_kind") == "group" or row.get("group_id") else "private"
             native_id = row.get("group_id") if kind == "group" else row.get("participant_id")
             name, account_name = await asyncio.gather(
@@ -174,13 +196,11 @@ class PlatformDisplayNames:
             if kind == "group":
                 row["group_name"] = resolved or _name(row.get("group_name"))
             return row
-        return list(await asyncio.gather(*(enrich(row) for row in targets)))
+        rows = self.with_platform_family(targets, "platform_id", cached_only=cached_only)
+        return list(await asyncio.gather(*(enrich(row) for row in rows)))
 
     async def persons(self, persons, *, cached_only=False):
-        async def enrich(person):
-            row = dict(person)
-            if not cached_only:
-                self._platform_family(row, row.get("platform"))
+        async def enrich(row):
             if (row.get("admin_nickname") or row.get("name_basis") == "administrator"
                     or row.get("name_basis") == "legacy" and row.get("legacy_maintained")):
                 return row
@@ -189,7 +209,8 @@ class PlatformDisplayNames:
             if name:
                 row.update(display_name=name, name_basis="platform")
             return row
-        return list(await asyncio.gather(*(enrich(row) for row in persons)))
+        rows = self.with_platform_family(persons, "platform", cached_only=cached_only)
+        return list(await asyncio.gather(*(enrich(row) for row in rows)))
 
 
 def display_names(controller):

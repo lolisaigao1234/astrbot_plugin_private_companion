@@ -26,7 +26,7 @@ from companion_v2.execution.models import TaskError, digest
 from .identity_derivation import derive_bot_id, derive_role_id, role_display_name
 from .native import SESSION_SETTINGS_LOOKUP_BUDGET_SECONDS, load_session_settings
 from .multi_settings import find_persona_mapping
-from .display_names import event_person_names, platform_label
+from .display_names import configured_platform_families, event_person_names, platform_label
 
 
 logger = logging.getLogger(__name__)
@@ -218,7 +218,7 @@ class SessionTopology:
                 aliases[(row["platform_id"], row["account_id"])] = row["bot_id"]
                 rows.append(row)
         result = {}
-        platform_names = {}
+        platform_names = configured_platform_families(self.controller.context)
 
         def remember(platform_id, account_id, bot_id=None, *, platform_name=""):
             platform_id, account_id = str(platform_id or "").strip(), str(account_id or "").strip()
@@ -538,7 +538,8 @@ class SessionTopology:
                 row["group_name"] = group_name
         else:
             nickname, _ = event_person_names(event)
-            nickname = nickname or platform_label(getattr(getattr(message, "sender", None), "nickname", None), peer)
+            if not nickname and meta.name != "telegram":
+                nickname = platform_label(getattr(getattr(message, "sender", None), "nickname", None), peer)
             if nickname:
                 row["display_name"] = nickname
         async with self._write_lock:

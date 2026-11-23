@@ -10,7 +10,7 @@ function harness(windowKind="none",section="state") {
   const requests=[],scopes=[],statuses=[];
   const targets=[
     {target_id:"representative",bot_id:"bot-1",scope_kind:"private"},
-    {target_id:"selected",bot_id:windowKind==="other_bot"?"bot-2":"bot-1",scope_kind:windowKind==="group"?"group":"private"},
+    {target_id:"selected",platform_id:"default",platform_name:windowKind==="telegram"?"telegram":"aiocqhttp",bot_id:windowKind==="other_bot"?"bot-2":"bot-1",scope_kind:windowKind==="group"?"group":"private"},
   ].map(target=>({...target,roles:[{role_id:"role-1",state_api:`/astrbot_plugin_private_companion/state/${target.target_id}`}]}));
   const status={state:{values:{energy:70}},settings:{enabled:true,presence_enabled:true,online_status_enabled:false,
     typing_enabled:true,typing_refresh_seconds:7},sleep_schedule:{},role_edit_token:"role-edit",edit_token:"window-edit",
@@ -62,5 +62,13 @@ for(const kind of ["none","group","other_bot"])test(`contact state never reads a
   const h=harness(kind,"contact");await h.ready;
   assert.deepEqual(h.requests,[]);
   assert.match(h.root.innerHTML,/请先选择当前角色的私聊窗口/);
+  h.page.unmount();
+});
+
+test("a Telegram window explains QQ-only status on a direct presentation link",async()=>{
+  const h=harness("telegram");await h.ready;
+  assert.match(h.root.innerHTML,/Telegram/);
+  assert.doesNotMatch(h.root.innerHTML,/data-state-feature="presentation"|data-state-edit="settings"|QQ 状态/);
+  assert.equal(h.page.openEditor("settings","online_status_enabled"),false);
   h.page.unmount();
 });

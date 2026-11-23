@@ -1990,3 +1990,12 @@ test("成员重新读取保留未保存的目录昵称与身份选择",async()=>
   assert.equal(findInput(h.element("person-detail"),"目录显示名称").value,"尚未保存");
   assert.equal(h.element("person-detail").querySelectorAll(".member-tier-card").find(card=>card.dataset.tier==="important").getAttribute("aria-checked"),"true");
 });
+
+test("Telegram identity cards and member details identify numeric accounts by platform", async () => {
+  const h = harness({persons:[person("12345", "测试成员", {platform:"default", platform_name:"telegram", account_id:"6789"})]});
+  const detail = await open(h, "测试成员");
+  for (const node of [h.card("测试成员"), detail]) {
+    assert.match(flat(node), /Telegram 12345/);
+    assert.doesNotMatch(flat(node), /QQ (12345|6789)/);
+  }
+});
