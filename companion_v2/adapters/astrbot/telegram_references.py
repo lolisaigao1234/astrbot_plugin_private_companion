@@ -7,6 +7,7 @@ from companion_v2.conversation.quotes.models import TelegramQuote
 from companion_v2.execution.models import TaskError, digest
 
 from .quotes import image_locator
+from .telegram_media import freeze_attachment, safe_text
 
 
 @dataclass(frozen=True)
@@ -58,7 +59,7 @@ def private_references(event):
                 source += f"，署名 {origin.author_signature}"
         source = source or "未知"
     forwarded_at = int(origin.date.timestamp()) if origin else None
-    references = TelegramReferences(forward_origin=source, forwarded_at=forwarded_at,
+    references = TelegramReferences(forward_origin=safe_text(event, source), forwarded_at=forwarded_at,
                                     forward_user_id=str(origin.sender_user.id) if origin and origin.type == "user" else None)
     reply = next(((index, part) for index, part in enumerate(message.message)
                   if getattr(part.type, "value", part.type) == "Reply"), None)
@@ -78,9 +79,10 @@ def private_references(event):
     if original.photo and not raw.quote:
         text = "\n[图片 1]\n" + text
         if part and str(part.id) == str(original.message_id) and str(part.sender_id) == sender:
-            images = tuple(image_locator(index, item.file, item.url) for index, item in enumerate(part.chain or ())
+            images = tuple(freeze_attachment(event, image_locator(index, item.file, item.url))
+                           for index, item in enumerate(part.chain or ())
                            if getattr(item.type, "value", item.type) == "Image")
     quote = TelegramQuote(position, str(original.message_id), sender, int(original.date.timestamp()),
-                          text if text.strip() else "[附件]", companion_sender=sender != peer,
+                          safe_text(event, text) if text.strip() else "[附件]", companion_sender=sender != peer,
                           selection_offset=raw.quote.position if raw.quote else None)
     return replace(references, quote=quote, images=images)

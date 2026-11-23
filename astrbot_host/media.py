@@ -15,6 +15,7 @@ from yarl import URL
 
 from companion_v2.adapters.astrbot.native import NativeImageLocator
 from companion_v2.conversation.media.models import CapturedImage, ImageDescriptor, MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS
+from companion_v2.adapters.astrbot.telegram_media import fetch_location
 from companion_v2.execution.models import TaskError
 
 from .animation import inspect_animation
@@ -158,7 +159,7 @@ async def load_native_image(locator):
     if not isinstance(locator, NativeImageLocator):
         raise TaskError("host_image_location_invalid", "image intake needs a frozen host component")
     try:
-        value = locator.locator
+        value = fetch_location(locator)
         if value.startswith("base64://"):
             encoded = value[len("base64://"):]
             if len(encoded) > (MAX_IMAGE_BYTES + 2) // 3 * 4:

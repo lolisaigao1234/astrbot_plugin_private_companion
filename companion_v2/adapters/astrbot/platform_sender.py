@@ -128,6 +128,9 @@ class AstrBotPlatformSender:
                              else Face(id=int(component.value)))
             else:
                 raise ValueError("component kind is unsupported by the AstrBot session transport")
+        if platform_name == "telegram":
+            from .telegram_wire import telegram_component
+            chain = [telegram_component(part) for part in chain]
         return MessageChain(chain=chain)
 
     async def _render_voice(self, envelope, scope, context):
@@ -195,9 +198,10 @@ class AstrBotPlatformSender:
             if images:
                 envelope.__post_init__()
             has_message_content = bool(envelope.text.strip()) or bool(images)
+            face_only = not has_message_content and envelope.plan is not None and bool(envelope.plan.faces)
             if (envelope.sender != self.binding
                     or payload_hash(envelope.text, images, image_position=image_position) != envelope.payload_hash
-                    or (not has_message_content and envelope.poke is None)
+                    or (not has_message_content and not face_only and envelope.poke is None)
                     or (not envelope.text.strip() and envelope.text != "" and not images)
                     or len(envelope.text) > 65536
                     or principal.host_id != self.bridge.host_id
@@ -224,6 +228,8 @@ class AstrBotPlatformSender:
                 return not_sent("platform_session_transport_unavailable")
 
             platform_name = platform.meta().name
+            if face_only and platform_name != "telegram":
+                return not_sent("envelope_binding_mismatch")
             session = self._session(scope, platform_name=platform_name)
             stage = "voice_render"
             voice_plan, voice_segment, render_state = await self._render_voice(envelope, scope, context)
@@ -245,7 +251,8 @@ class AstrBotPlatformSender:
                 order=envelope.plan.order if envelope.plan is not None else (),
                 mentions=envelope.plan.mentions if envelope.plan is not None else (),
                 faces=envelope.plan.faces if envelope.plan is not None else (),
-            ) if has_message_content else None)
+                allow_face_only=face_only,
+            ) if has_message_content or face_only else None)
             if voice_plan is not None and component_plan is not None and not component_plan.voice_included:
                 if envelope.voice_required:
                     return not_sent("required_voice_unavailable")
@@ -257,9 +264,14 @@ class AstrBotPlatformSender:
                     envelope.part_id, render_state,
                     component_plan.kinds if component_plan is not None else (),
                     component_plan.text_hidden if component_plan is not None else False)
-            if not has_message_content:
+            if component_plan is None:
                 return not_sent("empty_message")
             chain = self._chain(component_plan, platform_name=platform_name)
+
+            if platform_name == "telegram":
+                from .telegram_wire import telegram_visible
+                if not telegram_visible(chain.chain):
+                    return not_sent("empty_message")
 
             # Re-read the live route and authorization immediately before the
             # platform-owned side effect. This mirrors the OneBot dispatch fence.
@@ -276,7 +288,9 @@ class AstrBotPlatformSender:
             stage = "platform_send"
             try:
                 with _redact_telegram_token(lease.client) if platform_name == "telegram" else nullcontext():
-                    await platform.send_by_session(session, chain)
+                    accepted = await platform.send_by_session(session, chain)
+                if platform_name == "telegram" and accepted is False:
+                    return not_sent("platform_session_transport_unavailable")
             except Exception as error:
                 if platform_name == "telegram":
                     try:

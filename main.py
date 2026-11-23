@@ -2335,6 +2335,10 @@ class PrivateCompanionV2StagingPlugin(Star):
             logger.warning("[CompanionV2] 视频输入状态重写失败 error_type=%s",
                            type(error).__name__)
 
+        if getattr(getattr(event, "platform_meta", None), "name", None) == "telegram":
+            from .astrbot_host.telegram_request import protect_telegram_request
+            protect_telegram_request(event, req)
+
     @filter.on_agent_begin(priority=-1000000)
     async def repair_companion_core_runner_history(self, event: AstrMessageEvent, run_context):
         from .astrbot_host.core_reply_history_guard import repair_run_context_history

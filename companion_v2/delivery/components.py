@@ -80,7 +80,7 @@ def order_rank(order):
 
 
 def build_component_plan(text, images=(), voice=None, *, position="after_media", image_position="after_text",
-                         voice_only=False, speech=None, order=(), mentions=(), faces=()):
+                         voice_only=False, speech=None, order=(), mentions=(), faces=(), allow_face_only=False):
     """Build the ordered text/image/voice/at/face components for one ACK.
 
     A malformed or empty voice is ignored, preserving the remaining text and
@@ -100,7 +100,8 @@ def build_component_plan(text, images=(), voice=None, *, position="after_media",
         # presentation pipeline already cleans ordinary replies; this catches
         # components that were rebuilt or forwarded after that stage.
         text = strip_internal_expression_protocol(text)
-    if not isinstance(text, str) or (not text.strip() and (text != "" or not images)):
+    standalone_faces = allow_face_only and any(_face_component_is_valid(face) for face in faces)
+    if not isinstance(text, str) or (not text.strip() and (text != "" or not (images or standalone_faces))):
         raise ValueError("outbound text must be nonempty unless sending images alone")
     if image_position not in ("after_text", "before_text"):
         raise ValueError("outbound image position is unsupported")

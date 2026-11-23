@@ -31,6 +31,7 @@ from __future__ import annotations
 from collections import OrderedDict
 import time
 
+from companion_v2.adapters.astrbot.telegram_media import freeze_attachment
 from companion_v2.adapters.astrbot.native import NativeVideoLocator
 from companion_v2.conversation.media.video.models import MAX_VIDEOS
 
@@ -152,7 +153,7 @@ def video_positions(event, *, video_type, component_reader=None):
         file = getattr(part, file_attr, None)
         value = file if type(file) is str and file.startswith("base64://") else getattr(part, "url", None) or file
         if type(value) is str and value:
-            found.append(NativeVideoLocator(position, value))
+            found.append(freeze_attachment(event, NativeVideoLocator(position, value)))
         if len(found) >= MAX_VIDEOS:
             break
     return tuple(found)

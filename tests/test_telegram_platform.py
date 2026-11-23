@@ -233,6 +233,20 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
         self.assertEqual((receipt.status, receipt.failure_code), ("unknown", None))
         self.assertEqual(self.platform.client.send_message.await_count, 2)
 
+    async def test_proactive_face_only_sends_visible_text(self):
+        from companion_v2.delivery.plan import OutboundPlan
+        envelope = DeliveryEnvelope("face-tg", "op-tg", self.context, 1, "", digest(""), self.binding,
+                                    before_dispatch=lambda: True, plan=OutboundPlan(faces=(14,)))
+        receipt = await self.sender.send(envelope)
+        self.assertEqual(receipt.status, "delivered")
+        self.assertIn("14", self.platform.client.send_message.await_args.kwargs["text"])
+
+    async def test_negative_session_ack_never_records_delivery(self):
+        self.platform.send_by_session = AsyncMock(return_value=False)
+        receipt = await self.send()
+        self.assertEqual(receipt.status, "not_sent")
+        self.assertIsNone(receipt.delivered_at)
+
     async def test_refusal_after_text_before_voice_is_unknown(self):
         audio = self.root / "synthetic.wav"
         with wave.open(str(audio), "wb") as stream:
@@ -243,6 +257,10 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
         receipt = await self.send()
         self.assertEqual((receipt.status, receipt.failure_code), ("unknown", None))
         self.platform.client.send_voice.assert_awaited_once()
+        from pathlib import Path
+        sent = Path(self.platform.client.send_voice.await_args.kwargs["voice"]).read_bytes()
+        self.assertEqual(sent[:4], b"OggS")
+        self.assertIn(b"OpusHead", sent[:100])
         self.platform.client.send_message.assert_awaited_once()
 
 

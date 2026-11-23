@@ -12,6 +12,7 @@ from tempfile import TemporaryDirectory
 from companion_v2.adapters.astrbot.native import NativeVideoLocator
 from companion_v2.conversation.media.models import CapturedImage, MAX_TURN_BYTES
 from companion_v2.conversation.media.video.models import CapturedVideo, VideoDescriptor, MAX_VIDEO_BYTES
+from companion_v2.adapters.astrbot.telegram_media import fetch_location
 from companion_v2.execution.models import TaskError
 from ..media import fetch_attachment
 
@@ -79,7 +80,7 @@ async def fetch_native_video_bytes(locator, *, maximum_bytes=MAX_VIDEO_BYTES):
         raise TaskError("host_video_location_invalid", "video needs its frozen original component")
     limit = max(1, int(maximum_bytes))
     try:
-        value = locator.locator
+        value = fetch_location(locator)
         if value.startswith("base64://"):
             encoded = value[9:]
             if len(encoded) > (limit + 2) // 3 * 4:

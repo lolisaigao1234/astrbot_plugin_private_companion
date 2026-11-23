@@ -159,6 +159,8 @@ class MultiPrivateBridge(NativePrivateBridge):
 
         message = getattr(event, "message_obj", None)
         stt_text = trusted_stt_transcript(event)
+        from companion_v2.adapters.astrbot.telegram_media import safe_text, sticker_marker
+        sticker = sticker_marker(event)
         stt_used = False
         pieces = []
         for part in getattr(message, "message", ()):
@@ -170,7 +172,8 @@ class MultiPrivateBridge(NativePrivateBridge):
                 else:
                     if stt_text and stt_text in part.text:
                         stt_used = True
-                    pieces.append(part.text)
+                    if not (sticker and part.text.startswith("Sticker: ")):
+                        pieces.append(part.text)
             elif kind in ("Face", "Mface"):
                 # A sticker is an emotional expression, not an empty message:
                 # keep a bounded marker so the model can answer the feeling
@@ -184,7 +187,9 @@ class MultiPrivateBridge(NativePrivateBridge):
             for segment in raw_segments:
                 if _is_sticker_segment(segment):
                     pieces.append("[表情包]")
-        return "".join(pieces)
+        if sticker:
+            pieces.append(sticker)
+        return safe_text(event, "".join(pieces))
 
     async def capture_core_reply(self, event):
         """Authenticate a private route for AstrBot's reply path without reading attachments."""

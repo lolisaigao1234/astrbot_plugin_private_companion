@@ -1,16 +1,19 @@
-"""Frozen network/base64 locators only; cancellable native decoding in a child."""
+"""Bounded original audio capture and cancellable decoding in a child."""
 
 import asyncio
 import base64
+from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import sys
 
 from companion_v2.adapters.astrbot.native import NativeAudioLocator
 from companion_v2.conversation.media.audio.models import AudioDescriptor, CapturedAudio, MAX_AUDIO_BYTES, MAX_WAVE_BYTES
 from companion_v2.conversation.media.models import MAX_IMAGE_BYTES
+from companion_v2.adapters.astrbot.telegram_media import fetch_location
 from companion_v2.execution.models import TaskError
 from ..media import fetch_image as fetch_public_attachment
 
@@ -52,16 +55,51 @@ async def decode_audio(content, position):
             await process.communicate()
 
 
+def _read_temp_record(value):
+    from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
+    root = Path(get_astrbot_temp_path()).resolve()
+    try:
+        if value.startswith(("//", "\\")):
+            raise ValueError
+        path = Path(value).resolve(strict=True)
+        if not path.is_relative_to(root) or not path.is_file():
+            raise ValueError
+        if os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW"):
+            # Hold each directory open so a symlink swap cannot redirect a later open.
+            with ExitStack() as stack:
+                flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                directory = os.open(root, flags)
+                stack.callback(os.close, directory)
+                relative = path.relative_to(root)
+                for name in relative.parts[:-1]:
+                    directory = os.open(name, flags, dir_fd=directory)
+                    stack.callback(os.close, directory)
+                fd = os.open(relative.name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=directory)
+                with os.fdopen(fd, "rb") as stream:
+                    if not stat.S_ISREG(os.fstat(fd).st_mode):
+                        raise ValueError
+                    return stream.read(MAX_AUDIO_BYTES + 1)
+        with path.open("rb") as stream:
+            if not path.resolve(strict=True).is_relative_to(root) or not os.path.samestat(
+                    os.fstat(stream.fileno()), path.stat()):
+                raise ValueError
+            return stream.read(MAX_AUDIO_BYTES + 1)
+    except (OSError, ValueError, RuntimeError):
+        raise TaskError("host_audio_location_invalid", "voice requires an AstrBot temporary file") from None
+
+
 async def load_native_audio(locator):
     if type(locator) is not NativeAudioLocator:
         raise TaskError("host_audio_location_invalid", "voice requires a frozen original component")
     try:
-        value = locator.locator
+        value = fetch_location(locator)
         if value.startswith("base64://"):
             encoded = value[9:]
             if len(encoded) > (MAX_AUDIO_BYTES + 2) // 3 * 4:
                 raise TaskError("host_audio_limit", "voice exceeds the intake byte budget")
             content = base64.b64decode(encoded, validate=True)
+        elif locator.telegram_temp and Path(value).is_absolute():
+            content = await asyncio.to_thread(_read_temp_record, value)
         else:
             # The existing public attachment transport enforces this same byte
             # ceiling and checks redirects plus the actual connector DNS result.

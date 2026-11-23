@@ -11,6 +11,7 @@ from astrbot.core.utils.quoted_message.onebot_client import OneBotClient
 
 from companion_v2.adapters.astrbot.history import extract_history_messages
 from companion_v2.adapters.astrbot.native import NativeImageLocator
+from companion_v2.adapters.astrbot.telegram_media import TelegramFile, freeze_attachment
 from companion_v2.adapters.astrbot.quotes import image_locator
 from companion_v2.conversation.media.models import ImageConversationEvent, MAX_INPUT_IMAGES
 from companion_v2.conversation.native_tool_sources import native_input_images
@@ -52,7 +53,7 @@ class _QuotedImages:
     @property
     def needs_resolved_images(self):
         for image in self.images:
-            if image.locator.startswith("base64://"):
+            if isinstance(image.locator, TelegramFile) or image.locator.startswith("base64://"):
                 continue
             try:
                 public_url(image.locator)
@@ -83,7 +84,7 @@ def frozen_image_locators(event):
         telegram = private_references(event)
     for position, part in enumerate(getattr(getattr(event, "message_obj", None), "message", ())):
         if type(part) is Image:
-            images.append(image_locator(position, part.file, part.url))
+            images.append(freeze_attachment(event, image_locator(position, part.file, part.url)))
         elif type(part) is Reply:
             if telegram is not None:
                 quote = telegram.quote
@@ -94,7 +95,7 @@ def frozen_image_locators(event):
             identifier = _identifier(part.id)
             if identifier is None:
                 continue
-            embedded = tuple(image_locator(index, item.file, item.url)
+            embedded = tuple(freeze_attachment(event, image_locator(index, item.file, item.url))
                              for index, item in enumerate(part.chain or ()) if type(item) is Image)
             quotes.append(_QuotedImages(position, identifier, _identifier(part.sender_id),
                 part.time if type(part.time) is int and part.time > 0 else None,

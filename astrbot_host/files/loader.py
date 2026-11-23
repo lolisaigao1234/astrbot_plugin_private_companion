@@ -9,6 +9,7 @@ import subprocess
 import sys
 
 from companion_v2.adapters.astrbot.files import NativeFileLocator, FileText, TEXT_SUFFIXES, DOCUMENT_SUFFIXES
+from companion_v2.adapters.astrbot.telegram_media import TelegramFile, fetch_location
 from companion_v2.execution.models import TaskError
 from companion_v2.foundation.refs import ScopeKind
 from ..media import fetch_attachment
@@ -41,9 +42,14 @@ async def load_native_file(locator, *, client, scope, maximum_bytes, maximum_cha
     if type(locator) is not NativeFileLocator:
         raise TaskError("host_file_location_invalid", "file intake requires a frozen native attachment")
     suffix = Path(locator.name).suffix.lower()
+    if isinstance(locator.locator, TelegramFile) and isinstance(formats, frozenset):
+        # The capture bridge supplies selected suffixes. The worker takes one CLI mode.
+        if suffix not in formats:
+            raise TaskError("host_file_format_unsupported", "document format is not selected")
+        formats = "text_and_documents"
     if suffix not in TEXT_SUFFIXES | (DOCUMENT_SUFFIXES if formats == "text_and_documents" else frozenset()):
         raise TaskError("host_file_format_unsupported", "document format is not selected or supported")
-    value = locator.locator
+    value = fetch_location(locator)
     if not value:
         raise TaskError("host_file_unavailable", "file has no original native attachment locator")
     if value.startswith("base64://"):

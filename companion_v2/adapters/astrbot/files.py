@@ -6,6 +6,7 @@ import json
 import logging
 import re
 
+from .telegram_media import TelegramFile
 from companion_v2.execution.models import TaskError
 from companion_v2.conversation.media.understanding import (
     DOCUMENT_SUFFIXES,
@@ -28,7 +29,7 @@ def safe_name(value):
 class NativeFileLocator:
     position: int
     name: str
-    locator: str
+    locator: str | TelegramFile
 
 
 @dataclass(frozen=True)
