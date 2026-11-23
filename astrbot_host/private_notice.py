@@ -21,6 +21,7 @@ import asyncio
 from collections.abc import Mapping
 from weakref import WeakValueDictionary
 
+from companion_v2.adapters.astrbot.telegram_logging import redact_telegram_token
 from companion_v2.execution.models import TaskError, digest
 from companion_v2.foundation.refs import ScopeKind
 
@@ -135,8 +136,9 @@ async def send_private_notice(controller, event, *, text, route, transport=None)
         lease = getattr(route, "connection_lease", None)
         if lease is not None:
             controller.session.bridge.connections.assert_current(lease)
-        await platform.send_by_session(MessageSession(route.platform_id, MessageType.FRIEND_MESSAGE, peer),
-                                       MessageChain([Plain(str(text))]))
+        session = MessageSession(route.platform_id, MessageType.FRIEND_MESSAGE, peer)
+        with redact_telegram_token(lease.client if platform_name == "telegram" else None):
+            await platform.send_by_session(session, MessageChain([Plain(str(text))]))
     except Exception:  # noqa: BLE001 - send outcome is unknown, never replayed here
         return {"state": "failed", "reason": "platform_call_failed"}
     receipt = digest(["private-session-notice.v1", route.platform_id, route.login, peer, str(text)])
