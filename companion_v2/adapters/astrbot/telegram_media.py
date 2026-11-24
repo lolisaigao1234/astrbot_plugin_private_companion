@@ -47,6 +47,10 @@ def fetch_location(locator):
     return value
 
 
+def sticker_label(sticker):
+    return f"[贴纸 {sticker.emoji}]" if sticker.emoji else "[贴纸]"
+
+
 def sticker_marker(event):
     if getattr(getattr(event, "platform_meta", None), "name", None) != "telegram":
         return ""
@@ -54,4 +58,4 @@ def sticker_marker(event):
     sticker = getattr(message, "sticker", None)
     if sticker is None:
         return ""
-    return f"[贴纸 {sticker.emoji}]" if sticker.emoji else "[贴纸]"
+    return sticker_label(sticker)

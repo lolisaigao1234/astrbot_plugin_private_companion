@@ -116,21 +116,32 @@ def telegram_plain_text(event, text):
     return text
 
 
+def _telegram_mentioned_text(body, entities, parse, bot_name):
+    # AstrBot moves mentions before Plain and expands text links inline. Apply
+    # both transformations in Telegram's original UTF-16 coordinate space.
+    edits = []
+    mentioned = False
+    for entity in entities:
+        end = entity.offset + entity.length
+        if entity.type == "mention" and parse(entity)[1:].casefold() == bot_name.casefold():
+            edits.append((entity.offset, end, SELF_MENTION))
+            mentioned = True
+        elif entity.type == "text_link" and entity.url:
+            edits.append((end, end, f" ({entity.url})"))
+    if not mentioned:
+        return None
+    encoded = bytearray(body.encode("utf-16-le"))
+    for start, end, value in sorted(edits, reverse=True):
+        encoded[start * 2:end * 2] = value.encode("utf-16-le")
+    return encoded.decode("utf-16-le")
+
+
 def _telegram_parts(event, parts):
     original = event.message_obj.raw_message.message
-    # AstrBot moves all At components ahead of Plain. Telegram entity offsets
-    # are UTF-16 code units, so preserve inline mentions even after emoji.
     body = original.text or original.caption or ""
     entities = original.entities if original.text else original.caption_entities
     parse = original.parse_entity if original.text else original.parse_caption_entity
-    mentions = [entity for entity in entities if entity.type == "mention"
-                and parse(entity)[1:].casefold() == event.message_obj.self_id.casefold()]
-    if mentions:
-        encoded = body.encode("utf-16-le")
-        for entity in reversed(mentions):
-            start, end = entity.offset * 2, (entity.offset + entity.length) * 2
-            encoded = encoded[:start] + SELF_MENTION.encode("utf-16-le") + encoded[end:]
-        body = encoded.decode("utf-16-le")
+    mentioned_text = _telegram_mentioned_text(body, entities, parse, event.message_obj.self_id)
     from .telegram_media import sticker_marker
     sticker = sticker_marker(event)
     result = []
@@ -141,14 +152,14 @@ def _telegram_parts(event, parts):
             continue
         if kind == "Plain":
             text = telegram_plain_text(event, part.text)
-            if mentions:
-                text, mentions = body, ()
+            if mentioned_text is not None:
+                text, mentioned_text = mentioned_text, None
             if sticker and text.startswith("Sticker: "):
                 text = ""
             part = SimpleNamespace(type="Plain", text=text)
         result.append(part)
-    if mentions:
-        result.append(SimpleNamespace(type="Plain", text=body))
+    if mentioned_text is not None:
+        result.append(SimpleNamespace(type="Plain", text=mentioned_text))
     if sticker:
         result.append(SimpleNamespace(type="Plain", text=sticker))
     return tuple(result)
