@@ -310,12 +310,21 @@ class SessionTopology:
     async def services(self, umo):
         return await load_session_settings(umo)
 
+    def _exact_group_window(self, platform, kind):
+        return (kind == "group" and self.controller._multi_host
+                and self.controller._configured_platform_name(platform) == "telegram")
+
     def persona_selection_snapshot(self, umo, account_id):
         """Return the last installed window-to-persona/role mapping."""
+        route = self.route(umo)
+        if route and self._exact_group_window(route[0], route[1]):
+            settings = self.controller.settings
+            if settings is None or settings.group_target(route[0], account_id, route[2], allow_template=False) is None:
+                return None
+            return self._persona_role_snapshot.get((umo, account_id))
         snapshot = self._persona_role_snapshot.get((umo, account_id))
         if snapshot is not None:
             return snapshot
-        route = self.route(umo)
         if route is None:
             return None
         platform, kind, _peer = route
@@ -331,7 +340,8 @@ class SessionTopology:
             return
         platform, kind, peer = route
         target = (settings.private_target(platform, account_id, peer) if kind == "private"
-                  else settings.group_target(platform, account_id, peer))
+                  else settings.group_target(platform, account_id, peer,
+                                             allow_template=not self._exact_group_window(platform, kind)))
         mapping = find_persona_mapping(settings.personas, bot_id, persona_id)
         if mapping is not None and mapping.role_id != role_id:
             mapping = None
@@ -389,7 +399,8 @@ class SessionTopology:
         windows.extend((target, f"{target.platform_id}:FriendMessage:*", "private")
                        for target in settings.targets if target.participant_id == "*")
         windows.extend((target, f"{target.platform_id}:GroupMessage:*", "group")
-                       for target in settings.group_targets if target.group_id == "*")
+                       for target in settings.group_targets if target.group_id == "*"
+                       and not self._exact_group_window(target.platform_id, "group"))
         for target, umo, kind in windows:
             if scope_kind is not None and kind != scope_kind:
                 continue
@@ -761,8 +772,9 @@ class SessionTopology:
         if not candidates:
             return result
         peer_field = "group_id" if kind == "group" else "participant_id"
+        peers = (peer,) if self._exact_group_window(platform, kind) else (peer, "*")
         account_matches = [row for row in configured if row["platform_id"] == platform
-                           and row["scope_kind"] == kind and row.get(peer_field) in (peer, "*")]
+                           and row["scope_kind"] == kind and row.get(peer_field) in peers]
         exact = {row["account_id"] for row in observed.get(umo, [])}
         if exact:
             candidates = [row for row in candidates if row["account_id"] in exact]

@@ -179,3 +179,66 @@ class TelegramOfflineDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncio
         self.assertEqual([method for method, _ in self.requests], ["sendMessage"])
         self.assertIs(context.platform_manager.platform_insts[0], self.platform)
         self.assertIs(self.platform.client, self.bot)
+
+    async def test_subclass_sends_keep_override_state_and_isolate_typing(self):
+        from astrbot.core.platform.sources.telegram.tg_event import TelegramPlatformEvent
+        from companion_v2.adapters.astrbot.telegram_send import send_private_session, suppress_private_event_typing
+        from tests.test_telegram_platform import TelegramPlatform
+
+        class Adapter(TelegramPlatform):
+            async def send_by_session(self, session, message):
+                self.session_calls += 1
+                await super().send_by_session(session, message)
+                return "session result"
+
+        class Event(TelegramPlatformEvent):
+            async def send(self, message):
+                self.event_calls += 1
+                await super().send(message)
+                return "event result"
+
+            async def send_streaming(self, *args, **kwargs):
+                self.event_calls += 1
+                await self._ensure_typing(self.get_sender_id(), None)
+                await super().send_streaming(*args, **kwargs)
+                return "stream result"
+
+        platform = Adapter()
+        platform.client, platform.session_calls = self.bot, 0
+        native = telegram_event(platform)
+        event = Event(native.message_str, native.message_obj, platform.meta(), str(OWNER), self.bot)
+        event.event_calls = 0
+        suppress_private_event_typing(event)
+        message = MessageChain([Plain("managed")])
+
+        async def chunks():
+            yield message
+
+        for send, expected in (
+            (lambda: send_private_session(platform, event.session, message), "session result"),
+            (lambda: event.send(message), "event result"),
+            (lambda: event.send_streaming(chunks()), "stream result"),
+        ):
+            with self.subTest(expected=expected):
+                self.requests.clear()
+                entered, release = asyncio.Event(), asyncio.Event()
+
+                async def pause(method, request):
+                    if method == "sendMessage" and b"text=managed" in request.content:
+                        entered.set()
+                        await release.wait()
+
+                self.before_response = pause
+                task = asyncio.create_task(send())
+                try:
+                    await asyncio.wait_for(entered.wait(), 5)
+                    await telegram_event(platform, peer=OWNER + 1).send(MessageChain([Plain("other")]))
+                finally:
+                    release.set()
+                    result = await task
+                self.assertEqual(result, expected)
+                actions = [parse_qs(body.decode())["chat_id"] for method, body in self.requests
+                           if method == "sendChatAction"]
+                self.assertEqual(actions, [[str(OWNER + 1)]])
+        self.assertEqual((platform.session_calls, event.event_calls), (1, 2))
+        self.assertTrue(event._has_send_oper)

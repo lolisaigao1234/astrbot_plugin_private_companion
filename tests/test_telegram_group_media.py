@@ -50,6 +50,70 @@ class TelegramGroupMediaTests(TelegramHostFixture, unittest.IsolatedAsyncioTestC
         self.assertNotIn(self.platform.client.token, repr(captured))
         return captured
 
+    async def test_captioned_group_photo_budget(self):
+        originals = [image_bytes("red"), image_bytes("blue")]
+        items = [(self.update(n, photo=[dict(file_id=str(n), file_unique_id=str(n), width=2, height=3)],
+                              media_group_id="album", caption="keep caption" if n == 1 else None),
+                  NS(bot=self.platform.client)) for n in (1, 3)]
+        self.platform.media_group_cache = {"album": {"items": items}}
+        self.platform.handle_msg = AsyncMock()
+        await self.platform.process_media_group("album")
+        message = self.platform.handle_msg.await_args.args[0]
+        with patch("astrbot_host.media.fetch_image", AsyncMock(side_effect=originals)), patch(
+                "companion_v2.conversation.media.models.MAX_TURN_BYTES", max(map(len, originals))):
+            captured = await self.capture(message)
+        self.assertEqual([item.content for item in captured.images], originals[:1])
+        self.assertIn("keep caption", captured.text)
+        self.assertIn("附件超过读取上限", captured.text)
+
+        import base64
+        from astrbot.core.astr_main_agent import collect_initial_request
+        event = self.platform.create_event(message)
+        event.created_at = self.clock.now().timestamp()
+        target = self.controller.settings.target("test-group")
+        downloads = iter(originals)
+        async def download(url, dest):
+            Path(dest).write_bytes(next(downloads))
+        with patch("astrbot_host.media.fetch_image", AsyncMock(side_effect=originals)), patch(
+                "companion_v2.conversation.media.models.MAX_TURN_BYTES", max(map(len, originals))), patch(
+                "astrbot.core.utils.media_utils.download_file", download), patch(
+                "astrbot.core.astr_main_agent._get_session_conv", AsyncMock(return_value=NS(history="[]"))):
+            (await self.controller.session.prepare_core_reply(event, target)).unwrap()
+            request, _ = await collect_initial_request(event, NS(), NS(provider_wake_prefix="", provider_settings={}))
+            payload = await request.assemble_context()
+        self.assertEqual([base64.b64decode(part["image_url"]["url"].split(",")[1])
+                          for part in payload["content"] if part["type"] == "image_url"], originals[:1])
+        self.assertIn("附件超过读取上限", request.prompt)
+        self.assertIn("keep caption", request.prompt)
+
+    async def test_group_oversized_video_keeps_caption(self):
+        from companion_v2.execution.models import TaskError
+        update = self.update(1, video=dict(file_id="v", file_unique_id="v1", width=64, height=48, duration=1),
+                             caption="keep caption")
+        message = await self.platform.convert_message(update, NS(bot=self.platform.client))
+        with patch("astrbot_host.video.loader.fetch_attachment",
+                   AsyncMock(side_effect=TaskError("host_image_limit", "synthetic transport limit"))):
+            captured = await self.capture(message)
+        self.assertEqual(captured.videos, ())
+        self.assertIn("keep caption", captured.text)
+        self.assertIn("附件超过读取上限", captured.text)
+
+    async def test_group_quote_yields_photo_budget_to_current_sender(self):
+        photo = [dict(file_id="photo", file_unique_id="p", width=2, height=2)]
+        original = self.update(10, photo=photo, caption="source caption")
+        reply = self.update(11, photo=photo, caption="current caption", reply_to_message=original.message.to_dict())
+        message = await self.platform.convert_message(reply, NS(bot=self.platform.client))
+        direct, quoted = image_bytes("red"), image_bytes("blue")
+        with patch("astrbot_host.media.fetch_image", AsyncMock(side_effect=[direct, quoted])), patch(
+                "companion_v2.conversation.media.models.MAX_TURN_BYTES", max(len(direct), len(quoted))):
+            captured = await self.capture(message)
+        self.assertEqual([image.content for image in captured.images], [direct])
+        self.assertIn("current caption", captured.text)
+        quote, = captured.quotes
+        self.assertEqual((quote.message_id, quote.sender_id, quote.sent_at, quote.images),
+                         ("10", str(OWNER), 1700000000, ()))
+        self.assertIn("source caption", quote.text)
+
     async def test_group_attachments_retain_the_speaking_member(self):
         async def download(url, *, path):
             Path(path).parent.mkdir(parents=True, exist_ok=True)

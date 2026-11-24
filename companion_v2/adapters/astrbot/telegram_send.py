@@ -1,6 +1,8 @@
 """Keep implicit Telegram typing out of Companion's private message delivery."""
 
 from copy import copy
+from functools import wraps
+from types import MethodType
 
 from .telegram_logging import redact_telegram_token
 
@@ -20,6 +22,37 @@ class _DeliveryClient:
         return await self._client.send_chat_action(chat_id=chat_id, action=action, **kwargs)
 
 
+class _DeliveryReceiver:
+    """Bind SDK methods to a per-send client while keeping state on the owner."""
+
+    def __init__(self, owner):
+        object.__setattr__(self, "_owner", owner)
+        object.__setattr__(self, "client", _DeliveryClient(owner.client))
+
+    @property
+    def __class__(self):
+        # Python's super() accepts a proxy reporting the receiver's class.
+        return type(self._owner)
+
+    def __getattr__(self, name):
+        value = getattr(self._owner, name)
+        if isinstance(value, MethodType) and value.__self__ is self._owner:
+            return MethodType(value.__func__, self)
+        return value
+
+    def __setattr__(self, name, value):
+        if name == "client":
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._owner, name, value)
+
+    def __delattr__(self, name):
+        if name == "client":
+            object.__delattr__(self, name)
+        else:
+            delattr(self._owner, name)
+
+
 def _private_adapter_for_delivery(platform, session):
     from astrbot.core.platform.message_type import MessageType
 
@@ -27,13 +60,9 @@ def _private_adapter_for_delivery(platform, session):
         return platform
     from astrbot.core.platform.sources.telegram.tg_adapter import TelegramPlatformAdapter
 
-    if getattr(platform.send_by_session, "__func__", None) is not TelegramPlatformAdapter.send_by_session:
+    if not isinstance(platform, TelegramPlatformAdapter):
         return platform
-    # The native adapter reads self.client and then delegates to the SDK
-    # converter and Platform metric hook. Keep that entire path per send.
-    local = copy(platform)
-    local.client = _DeliveryClient(platform.client)
-    return local
+    return _DeliveryReceiver(platform)
 
 
 async def send_private_session(platform, session, message):
@@ -75,30 +104,28 @@ async def send_context_message(context, session, message):
 
 def suppress_private_event_typing(event):
     """Use a delivery-only bot view for the managed event's native sends."""
-    from astrbot.core.platform.astr_message_event import AstrMessageEvent
+    from astrbot.core.platform.astr_message_event import streaming_response_event
     from astrbot.core.platform.sources.telegram.tg_event import TelegramPlatformEvent
 
-    if getattr(event.send, "__func__", None) is TelegramPlatformEvent.send:
-        async def send(message):
-            client = event.client
-            with redact_telegram_token(client):
-                await event.send_with_client(
-                    _DeliveryClient(client), message, event.get_sender_id(),
-                )
-            # Keep the original event's trace, metric and send flag.
-            return await AstrMessageEvent.send(event, message)
+    if not isinstance(event, TelegramPlatformEvent):
+        return
 
-        event.send = send
+    def wrap(method):
+        @wraps(method)
+        async def send(*args, **kwargs):
+            local = _DeliveryReceiver(event)
+            # The SDK uses receiver identity to avoid recording a stream twice.
+            token = streaming_response_event.set(local) if streaming_response_event.get() is event else None
+            try:
+                with redact_telegram_token(event.client):
+                    return await method.__func__(local, *args, **kwargs)
+            finally:
+                if token is not None:
+                    streaming_response_event.reset(token)
 
-    original_stream = getattr(event, "send_streaming", None)
-    if getattr(original_stream, "__func__", None) is TelegramPlatformEvent.send_streaming:
-        async def send_streaming(*args, **kwargs):
-            local = copy(event)
-            local.client = _DeliveryClient(event.client)
-            with redact_telegram_token(event.client):
-                result = await TelegramPlatformEvent.send_streaming(local, *args, **kwargs)
-            if local._has_send_oper:
-                event._has_send_oper = True
-            return result
+        return send
 
-        event.send_streaming = send_streaming
+    for name in ("send", "send_streaming"):
+        method = getattr(event, name, None)
+        if isinstance(method, MethodType) and method.__self__ is event:
+            setattr(event, name, wrap(method))

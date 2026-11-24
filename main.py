@@ -1226,7 +1226,10 @@ class PrivateCompanionV2StagingPlugin(Star):
                 # 名单在决策页管理；命中后本条不再进入模型或记忆。
                 suppress_default_reply(event)
                 return
-        if channel == "private" and getattr(target, "participant_id", None):
+        forwarded = channel == "private" and telegram_private_forward(event)
+        if forwarded:
+            self._private_reply_followups().seal(target.target_id)
+        elif channel == "private" and getattr(target, "participant_id", None):
             processor = getattr(self.staging, "process_private_relay_receipts", None)
             if callable(processor):
                 await processor(event, target)
@@ -1260,7 +1263,7 @@ class PrivateCompanionV2StagingPlugin(Star):
                 self._record_no_reply(event, "group_llm_blocked", origin_key=origin_key,
                                       channel=channel, event_ref=event_ref, stage="admission")
                 return
-        if channel == "private":
+        if channel == "private" and not forwarded:
             phone_command = await receive_phone_confirmation(self.staging, event, target=target)
             if phone_command is not None:
                 suppress_default_reply(event)
@@ -1283,7 +1286,7 @@ class PrivateCompanionV2StagingPlugin(Star):
                 else:
                     logger.info("[CompanionV2] 全部重置由专用流程处理 event_ref=%s", event_ref)
                 return
-        is_calendar_command = (channel == "private"
+        is_calendar_command = (channel == "private" and not forwarded
                                and parse_calendar_command(str(getattr(event, "message_str", "") or "")))
         debounce_input = (private_debounce_input(event)
                           if channel == "private" and not is_calendar_command else None)
@@ -1294,7 +1297,7 @@ class PrivateCompanionV2StagingPlugin(Star):
                           if event_has_forward else None)
         target_key = getattr(target, "target_id", None) if channel == "private" else None
         if (plain_text is not None and isinstance(target_key, str) and target_key
-                and not telegram_private_forward(event)
+                and not forwarded
                 and self._private_reply_followups().active_for(target_key) is not None):
             if event_has_forward:
                 await parse_event_forwards(
@@ -1310,7 +1313,7 @@ class PrivateCompanionV2StagingPlugin(Star):
             debounce_manager = self._private_debounce_manager()
             debounce_pending = debounce_manager.reserve(target_key, event, plain_text)
         forward_parse_task = None
-        if event_has_forward and not telegram_private_forward(event):
+        if event_has_forward and not forwarded:
             if debounce_pending is not None:
                 forward_parse_task = ensure_event_forwards_parsed(
                     event, policy=forward_policy,
