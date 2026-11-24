@@ -985,7 +985,12 @@ class NativePrivateBridge:
             telegram_caption = meta.name == "telegram" and any(
                 getattr(part, "text", "").strip() for part in parts
                 if getattr(part.type, "value", part.type) == "Plain" and isinstance(part.text, str))
-            for position, part in enumerate(parts):
+            if telegram and telegram.quote and not any(getattr(part.type, "value", part.type) == "Reply" for part in parts):
+                # The SDK replaces some reply chains with Record. Reserve position zero for the verified quote.
+                if len(parts) >= 128:
+                    raise TaskError("host_media_unsupported", "message components exceed the intake budget")
+                text_parts.append("\n[引用消息]\n")
+            for position, part in enumerate(parts, start=len(text_parts)):
                 kind = getattr(part.type, "value", part.type)
                 if kind == "Plain" and isinstance(part.text, str):
                     text_parts.append("" if sticker and part.text.startswith("Sticker: ") else part.text)
@@ -1181,9 +1186,6 @@ class NativePrivateBridge:
                             self.platform(scope), event_client):
                     raise TaskError("host_image_owner_changed", "original image sender or client changed")
                 self.client(scope)
-            if telegram and telegram.quote and not any(getattr(part.type, "value", part.type) == "Reply" for part in parts):
-                # The SDK replaces a voice reply's chain with Record, losing the reply marker.
-                text = "\n[引用消息]\n" + text
             if telegram and telegram.forward_origin:
                 forward = telegram.capture_forward(event_id, safe_text(event, text), images, audios, videos)
                 self._check_shared_forwards((forward,), quotes, intake, "Telegram forward exceeds intake budget")
