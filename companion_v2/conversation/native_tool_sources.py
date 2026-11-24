@@ -20,7 +20,7 @@ def input_row(messages, context, turn_id, *, references=False):
         raise TaskError("native_tool_source_unavailable", "the native message observation is unavailable")
     row = messages.runtime.read_one("""SELECT * FROM conversation_native_observations
         WHERE turn_id = ? AND context_key = ? AND kind = 'input' AND delivery_state = 'input_observed'
-        ORDER BY json_extract(source_json, '$.owner') = ?, rowid DESC LIMIT 1""",
+        ORDER BY json_extract(source_json, '$.owner') IS ?, rowid DESC LIMIT 1""",
         (turn_id, context.key, REFERENCE_OWNER))
     if row is None or not references and json.loads(row["source_json"])["owner"] == REFERENCE_OWNER:
         raise TaskError("native_tool_source_unavailable", "this native tool turn has no authenticated input")
