@@ -140,8 +140,10 @@ async def send_private_notice(controller, event, *, text, route, transport=None)
             # A running adapter may have rebuilt the client for the same pinned bot.
             lease = connections.acquire(lease.account_key)
             platform = lease.platform
-        await platform.send_by_session(MessageSession(route.platform_id, MessageType.FRIEND_MESSAGE, peer),
-                                       MessageChain([Plain(str(text))]))
+        session = MessageSession(route.platform_id, MessageType.FRIEND_MESSAGE, peer)
+        accepted = await platform.send_by_session(session, MessageChain(chain=[Plain(str(text))]))
+        if platform_name == "telegram" and accepted is False:
+            return {"state": "failed", "reason": "platform_call_failed"}
     except Exception:  # noqa: BLE001 - send outcome is unknown, never replayed here
         return {"state": "failed", "reason": "platform_call_failed"}
     receipt = digest(["private-session-notice.v1", route.platform_id, route.login, peer, str(text)])
