@@ -197,14 +197,14 @@ class MultiPrivateBridge(NativePrivateBridge):
         import base64
         from astrbot.core.message.components import Image, Plain, Video
         from companion_v2.conversation.media.models import MAX_INPUT_IMAGES
-        from companion_v2.conversation.media.video.models import MAX_TURN_BYTES, MAX_VIDEO_BYTES
+        from companion_v2.conversation.media.video.models import MAX_TURN_BYTES, MAX_VIDEO_BYTES, MAX_VIDEOS
         from .core_reply_media import direct_image_locators, frozen_image_locators
         from .core_reply_video_sources import video_positions
         from .video.loader import fetch_native_video_bytes
 
         images = direct_image_locators(frozen_image_locators(event))
         message = event.message_obj
-        videos = {v.position: v for v in video_positions(event, video_type=Video)}
+        videos = {v.position: v for v in video_positions(event, video_type=Video, limit=None)}
         limited = "[附件超过读取上限，本轮未读取]"
         replacements = {item.position: Plain(limited) for item in images[MAX_INPUT_IMAGES:]}
 
@@ -218,11 +218,12 @@ class MultiPrivateBridge(NativePrivateBridge):
         admitted = await self._capture_images(images[:MAX_INPUT_IMAGES], load_optional=load_photo)
         remaining = MAX_TURN_BYTES - sum(photo.descriptor.retained_bytes for photo in admitted)
         replacements.update((photo.descriptor.position, Image.fromBytes(photo.content)) for photo in admitted)
+        kept_videos = 0
         for position, part in enumerate(message.message):
             if type(part) is not Video:
                 continue
             locator = videos.get(position)
-            if locator is None or remaining <= 0:
+            if locator is None or remaining <= 0 or kept_videos >= MAX_VIDEOS:
                 replacements[position] = Plain(limited)
                 continue
             try:
@@ -230,6 +231,7 @@ class MultiPrivateBridge(NativePrivateBridge):
             except TaskError as exc:
                 replacements[position] = Plain(limited if exc.code == "host_video_limit" else "[附件不可用]")
                 continue
+            kept_videos += 1
             remaining -= len(content)
             replacements[position] = Video(file="base64://" + base64.b64encode(content).decode("ascii"))
         notes = list(dict.fromkeys(part.text for part in replacements.values() if isinstance(part, Plain)))
@@ -1332,8 +1334,10 @@ class MultiHostSession:
                     context = self._select_core_reply_context(target, captured)
                 self.bridge.connections.assert_current(connection_lease)
                 self._validate_core_group_admission(group_admission, context, captured)
-                if (event.platform_meta.name == "telegram"
-                        and getattr(event.message_obj.raw_message.message, "media_group_id", None)):
+                if event.platform_meta.name == "telegram" and (
+                    getattr(event.message_obj.raw_message.message, "media_group_id", None)
+                    or (context.scope.kind is ScopeKind.PRIVATE and captured.telegram_burst)
+                ):
                     await self.bridge.prepare_telegram_album(event)
                     self.bridge.connections.assert_current(connection_lease)
                 turn_id = "core-reply:" + digest([context.key, captured.event_id])

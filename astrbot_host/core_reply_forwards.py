@@ -34,6 +34,7 @@ from urllib.parse import urlsplit
 
 from companion_v2.conversation.forwards.models import ForwardIntakePolicy
 
+from .binding import telegram_forward_message
 from .core_reply_mentions import _resolve_session_conversation
 
 
@@ -122,10 +123,8 @@ def event_will_enter_astrbot_llm(event: Any) -> bool:
 
 
 def telegram_private_forward(event):
-    if getattr(getattr(event, "platform_meta", None), "name", None) != "telegram":
-        return False
-    raw = getattr(getattr(getattr(event, "message_obj", None), "raw_message", None), "message", None)
-    return bool(getattr(raw, "forward_origin", None) and getattr(getattr(raw, "chat", None), "type", "") == "private")
+    raw = telegram_forward_message(event)
+    return getattr(getattr(raw, "chat", None), "type", "") == "private"
 
 
 def private_debounce_input(event: Any) -> tuple[str, bool] | None:

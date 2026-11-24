@@ -112,6 +112,61 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual([row["owner"] for row in rows],
                          ["conversation.native_reference"] * 3 + ["conversation.native_input"])
 
+    async def test_forwarded_command_stays_reference_text(self):
+        from astrbot_host.binding import message_text
+        from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA
+
+        command = "陪伴 全部重置"
+        forward = await self.event(number=95, text=command, forward_origin={
+            "type": "hidden_user", "sender_user_name": "Ada", "date": 1700000000})
+        direct = await self.event(number=96, text=command)
+        self.assertEqual(message_text(direct), command)
+        self.assertEqual(message_text(forward), "")
+
+        plugin = self.started_plugin()
+        receipts = AsyncMock()
+        with patch.object(self.controller, "process_private_relay_receipts", receipts, create=True):
+            await plugin.receive_companion_message(forward)
+        receipts.assert_not_awaited()
+        original = forward.get_extra(CORE_REPLY_CONTEXT_EXTRA)["prepared"]["native_input"]
+        self.assertEqual(original.forward_origin, "Ada")
+        self.assertIn(command, original.text)
+
+    async def test_forward_closes_earlier_followup_before_command_processing(self):
+        plugin = self.started_plugin()
+        earlier = await self.event(number=86, text="earlier turn")
+        first = await self.event(number=87, text="first comment")
+        later = await self.event(number=89, text="later comment")
+        forward = await self.event(number=88, text="excerpt", forward_origin={
+            "type": "hidden_user", "sender_user_name": "Ada", "date": 1700000000})
+        manager = plugin._private_reply_followups()
+        manager.start("tg-owner", earlier, "86", ((earlier, earlier.message_str, earlier.created_at),))
+        self.assertIsNotNone(manager.fold("tg-owner", first, first.message_str))
+        reserve = plugin._private_debounce_manager().reserve
+
+        def check_boundary(*args):
+            self.assertIsNone(manager.fold("tg-owner", later, later.message_str))
+            pending, _ = manager.for_request(earlier)
+            self.assertEqual([entry[1] for entry in pending], ["first comment"])
+            return reserve(*args)
+
+        with patch.object(plugin._private_debounce_manager(), "reserve", side_effect=check_boundary) as called:
+            await plugin.receive_companion_message(forward)
+        called.assert_called_once()
+
+    def test_many_forwards_share_the_prompt_budget(self):
+        from astrbot_host.telegram_forward_burst import _bounded_sections
+        from companion_v2.conversation.private_debounce import MAX_MERGED_CHARS
+
+        originals = [NS(forward_origin=f"{i:03d}-" + "x" * 55, text="paper" * 800) for i in range(100)]
+        originals.append(NS(forward_origin="", text="my comment"))
+        sections = list(_bounded_sections(originals))
+        self.assertEqual([i for i, _ in sections], list(range(101)))
+        self.assertLessEqual(len("\n\n".join(section for _, section in sections)), MAX_MERGED_CHARS)
+        for i, section in sections[:-1]:
+            self.assertIn(f"{i:03d}-", section)
+        self.assertIn("my comment", sections[-1][1])
+
     async def test_long_forward_burst_keeps_each_source_and_owner_comment(self):
         from astrbot_host.telegram_forward_burst import merge_forward_burst
         from companion_v2.conversation.private_debounce import MAX_MERGED_CHARS
@@ -385,6 +440,54 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
             saved = native_input_images(session.application.messages, context, tool.turn_id)
             payload = session.application.messages._read_source(saved.source, context, "text", self.clock.now()).payload
             self.assertEqual(json.loads(payload)["image_sources"][0]["original_sender"], str(sender))
+
+    async def test_shared_photo_budget(self):
+        from tests.test_conversation_images import image_bytes
+        photo = dict(file_id="quoted", file_unique_id="x", width=2, height=2)
+        direct, quoted = image_bytes("red"), image_bytes("blue")
+        async def get_file(size, *args, **kwargs):
+            data = direct if size.file_id == "direct" else quoted
+            return NS(file_path="base64://" + base64.b64encode(data).decode())
+        with patch.object(PhotoSize, "get_file", get_file):
+            event = await self.event(photo=[dict(photo, file_id="direct")], caption="current",
+                reply_to_message=self.message(10, 424242, photo=[photo], caption="original"))
+        with patch("companion_v2.conversation.media.models.MAX_TURN_BYTES", max(len(direct), len(quoted))):
+            captured = require(await self.bridge.capture(event))
+        self.assertEqual([image.content for image in captured.images], [direct])
+        self.assertIn("current", captured.text)
+        quote, = captured.quotes
+        self.assertEqual((quote.message_id, quote.sender_id, quote.sent_at, quote.images),
+                         ("10", "424242", 1700000000, ()))
+        self.assertIn("original", quote.text)
+
+    async def test_forward_provider_budget(self):
+        from astrbot.core.astr_main_agent import collect_initial_request
+        from tests.test_conversation_images import image_bytes
+        photos = [image_bytes("red"), image_bytes("blue")]
+        events = []
+        for index, content in enumerate(photos):
+            with patch.object(PhotoSize, "get_file", AsyncMock(return_value=NS(
+                    file_path="base64://" + base64.b64encode(content).decode()))):
+                events.append(await self.event(number=80+index, caption=f"caption-{index}",
+                    photo=[dict(file_id="x", file_unique_id="x", width=2, height=2)],
+                    forward_origin=dict(type="hidden_user", sender_user_name=f"source-{index}", date=1700000000)))
+        comment = await self.event(number=82, text="compare these")
+        from astrbot_host.telegram_forward_burst import merge_forward_burst
+        target = self.controller.settings.target("tg-owner")
+        prepare = self.controller.prepare_core_reply_context
+        plan = require(await prepare(comment, target))
+        entries = [(event, "", None) for event in (*events, comment)]
+        plan = await merge_forward_burst(comment, target, plan, entries, prepare)
+        self.assertEqual([item.event_id for item in plan.captured.telegram_burst], ["80", "81", "82"])
+        with patch("companion_v2.conversation.media.models.MAX_TURN_BYTES", max(map(len, photos))):
+            require(await self.controller.prepare_core_reply(comment, target, plan=plan))
+        with patch("astrbot.core.astr_main_agent._get_session_conv", AsyncMock(return_value=NS(history="[]"))):
+            request, _ = await collect_initial_request(comment, NS(), NS(provider_wake_prefix="", provider_settings={}))
+        payload = await request.assemble_context()
+        self.assertEqual([base64.b64decode(p["image_url"]["url"].split(",")[1])
+                          for p in payload["content"] if p["type"] == "image_url"], photos[:1])
+        for text in ("source-0", "source-1", "caption-0", "caption-1", "compare these", "附件超过读取上限"):
+            self.assertIn(text, json.dumps(payload, ensure_ascii=False))
 
     async def test_oversized_quoted_photo_keeps_original_attribution_and_caption(self):
         from astrbot_host.media import load_native_image
