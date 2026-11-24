@@ -195,11 +195,12 @@ class MultiPrivateBridge(NativePrivateBridge):
     def needs_telegram_media_budget(event):
         from astrbot.core.message.components import File, Image, Record, Reply, Video
 
-        parts = event.message_obj.message
-        return any(isinstance(part, (File, Video)) or
+        # Photos and stickers carry a download address; music arrives as an unbounded local recording.
+        music = getattr(event.message_obj.raw_message.message, "audio", None)
+        return any(isinstance(part, (File, Image, Video)) or music and isinstance(part, Record) or
                    isinstance(part, Reply) and any(isinstance(child, (Image, Record, File, Video))
                                                    for child in part.chain or ())
-                   for part in parts)
+                   for part in event.message_obj.message)
 
     async def prepare_telegram_album(self, event, context, *, quotes=()):
         """Budget direct attachments and embedded quote photos before SDK request collection."""

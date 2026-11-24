@@ -10,6 +10,7 @@ import json
 import time
 from typing import Any
 
+from companion_v2.adapters.astrbot.telegram_logging import redact_event_token
 from companion_v2.execution.models import TaskContext, TaskError, encode, require
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.sources.privacy import redact_text
@@ -251,7 +252,8 @@ def prepare_core_reply_event(
 
         async def authorized_send(message: Any, *args: Any, **kwargs: Any) -> Any:
             try:
-                return await guarded_send(message, *args, **kwargs)
+                with redact_event_token(event):
+                    return await guarded_send(message, *args, **kwargs)
             except BaseException as error:
                 finish_core_reply_presence(event, force=True)
                 if _is_silent_send_denial(error):
@@ -458,7 +460,8 @@ def prepare_core_reply_event(
 
         async def authorized_streaming(*args: Any, **kwargs: Any) -> Any:
             try:
-                return await guarded_streaming(*args, **kwargs)
+                with redact_event_token(event):
+                    return await guarded_streaming(*args, **kwargs)
             except BaseException as error:
                 finish_core_reply_presence(event, force=True)
                 if _is_silent_send_denial(error):

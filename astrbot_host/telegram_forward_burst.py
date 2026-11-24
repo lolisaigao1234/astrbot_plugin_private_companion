@@ -137,7 +137,7 @@ async def bounded_file_component(event, locator, remaining, preferences, scope, 
     except TimeoutError:
         # A cancelled prefetch can have consumed at most the offered document allowance.
         return Plain(f"[文件 {locator.name}：文件读取超时，本轮未读取]"), maximum_bytes
-    except (aiohttp.ClientError, OSError):
+    except (aiohttp.ClientError, OSError, RuntimeError):
         raise TaskError("host_file_unavailable", "document could not be retrieved") from None
     directory = Path(get_astrbot_temp_path())
     directory.mkdir(parents=True, exist_ok=True)
