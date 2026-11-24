@@ -79,6 +79,7 @@ from .astrbot_host.core_reply_forwards import (
     parse_event_forwards,
     prepare_forward_only_request,
     private_debounce_input,
+    telegram_private_forward,
     resolve_forward_intake_policy,
 )
 from .astrbot_host.core_reply_native_send import inject_core_reply_send_tool
@@ -1290,6 +1291,7 @@ class PrivateCompanionV2StagingPlugin(Star):
                           if event_has_forward else None)
         target_key = getattr(target, "target_id", None) if channel == "private" else None
         if (plain_text is not None and isinstance(target_key, str) and target_key
+                and not telegram_private_forward(event)
                 and self._private_reply_followups().active_for(target_key) is not None):
             if event_has_forward:
                 await parse_event_forwards(
@@ -1305,7 +1307,7 @@ class PrivateCompanionV2StagingPlugin(Star):
             debounce_manager = self._private_debounce_manager()
             debounce_pending = debounce_manager.reserve(target_key, event, plain_text)
         forward_parse_task = None
-        if event_has_forward:
+        if event_has_forward and not telegram_private_forward(event):
             if debounce_pending is not None:
                 forward_parse_task = ensure_event_forwards_parsed(
                     event, policy=forward_policy,
@@ -1474,7 +1476,7 @@ class PrivateCompanionV2StagingPlugin(Star):
                 else:
                     policy = None
                 burst_has_forwards = event_has_forward or any(
-                    event_has_top_level_forwards(item[0])
+                    event_has_top_level_forwards(item[0]) or telegram_private_forward(item[0])
                     for item in debounce_pending.pending.entries
                 )
                 effective_policy = forward_burst_debounce_policy(
@@ -1488,7 +1490,14 @@ class PrivateCompanionV2StagingPlugin(Star):
                         debounced_entries = await debounce_manager.finish(debounce_pending, event)
                         if debounced_entries is None:
                             status = "superseded"
-                    if status == "ready" and debounced_entries:
+                    telegram_burst = debounced_entries and any(
+                        telegram_private_forward(entry[0]) for entry in debounced_entries)
+                    if status == "ready" and telegram_burst:
+                        if len(debounced_entries) > 1 and core_reply_plan is not None:
+                            from .astrbot_host.telegram_forward_burst import merge_forward_burst
+                            core_reply_plan = await merge_forward_burst(
+                                event, target, core_reply_plan, debounced_entries, prepare_context)
+                    elif status == "ready" and debounced_entries:
                         merged_text = debounce_manager.combined(debounce_pending, debounced_entries)
                         aggregated_forwards = await coalesce_debounced_forwards(
                             event, debounced_entries,
