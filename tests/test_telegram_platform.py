@@ -549,6 +549,17 @@ class TelegramPrivateCommandTests(TelegramHostFixture, unittest.IsolatedAsyncioT
         await self.dispatch("你好", peer)
         self.assertEqual(self.platform.send_by_session.await_count, 2)
 
+    async def test_refused_stranger_notice_remains_due(self):
+        peer = OWNER + 1
+        self.controller.session.application.private_access_settings.defaults_installation = Mock(return_value={
+            "stranger_notice": True, "denied_reply": "陌生人提示",
+            "stranger_daily_cap": 1, "notice_cooldown_seconds": 60,
+        })
+        self.platform.send_by_session.side_effect = [False, None]
+        for _ in range(3):
+            await self.dispatch("你好", peer)
+        self.assertEqual(self.platform.send_by_session.await_count, 2)
+
     async def test_stranger_cooldown_keeps_legacy_notice_on_its_own_platform(self):
         from astrbot_host.stranger_notice import COOLDOWN_KIND, StrangerNotice
         from companion_v2.execution.models import stamp

@@ -301,7 +301,7 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
         require(await self.controller.session.receive(original, target))
         capture = require(await self.bridge.capture(quoted))
         quote, = capture.quotes
-        self.assertEqual(quote.text, "\n[图片 1]\nSticker: 🍀")
+        self.assertEqual(quote.text, "\n[图片 1]\n[贴纸 🍀]")
         self.assertEqual(len(quote.images), 1)
         self.assertEqual(len(frozen_image_locators(quoted)[0].images), 1)
         require(await self.controller.session.receive(quoted, target))
