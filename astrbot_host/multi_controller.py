@@ -1535,13 +1535,19 @@ class AstrBotMultiController:
     def declines_telegram_group(self, event):
         """Keep default replies off for refused groups on a managed Telegram account."""
         meta = getattr(event, "platform_meta", None)
-        if (getattr(meta, "name", None) != "telegram" or not self._accepting or self.session is None
+        if (getattr(meta, "name", None) != "telegram" or self._terminated
+                or self.settings is None or not self.settings.enabled
                 or not isinstance(event, self.native_types.event)
-                or getattr(event.message_obj.type, "value", None) != "GroupMessage"
-                or (meta.id, meta.id) not in self.session.bridge.accounts):
+                or getattr(event.message_obj.type, "value", None) != "GroupMessage"):
             return False
-        platform = self.context.get_platform_inst(meta.id)
-        if platform is None or platform.get_client() is not event_native_client(platform, event):
+        # The account registry exists before a session starts and between sessions.
+        # Polling may be restarting, but the event must still carry its current bot.
+        try:
+            lease = self._connections_for().acquire((meta.id, meta.id), connected=False)
+            if (lease.platform.meta().name != "telegram" or lease.client is None
+                    or lease.client is not event_native_client(lease.platform, event)):
+                return False
+        except (ValueError, AttributeError, TypeError, RuntimeError):
             return False
         try:
             route = group_event_route(event)
