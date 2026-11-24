@@ -80,17 +80,26 @@ def _has_self_mention_segment(segments, event, account_id):
     return False
 
 
-def _telegram_group_window(event):
+def telegram_rename_message(event):
+    """Return the native service message that renames a Telegram group or topic."""
+    original = getattr(getattr(event.message_obj, "raw_message", None), "message", None)
+    return original if any(getattr(original, field, None) is not None for field in (
+        "forum_topic_created", "forum_topic_edited", "new_chat_title")) else None
+
+
+def _telegram_group_window(event, *, rename=False):
     message = event.message_obj
     original = getattr(getattr(message, "raw_message", None), "message", None)
     chat = getattr(original, "chat", None)
     sender = getattr(original, "from_user", None)
+    # A rename names a window, not a speaker, so an anonymous administrator or a bot may send it.
+    rename = rename and telegram_rename_message(event) is not None
     if (getattr(chat, "type", None) not in {"group", "supergroup"}
             or type(chat.id) is not int or chat.id >= 0
             or message.self_id != getattr(getattr(event, "client", None), "username", None)
-            or getattr(original, "sender_chat", None) is not None
-            or getattr(sender, "is_bot", None) is not False
-            or type(sender.id) is not int or sender.id <= 0
+            or not rename and (getattr(original, "sender_chat", None) is not None
+                               or getattr(sender, "is_bot", None) is not False)
+            or type(getattr(sender, "id", None)) is not int or sender.id <= 0
             or str(sender.id) != message.sender.user_id
             or type(original.message_id) is not int or str(original.message_id) != message.message_id):
         raise TaskError("host_route_mismatch", "Telegram group update does not match the authenticated sender and chat")
@@ -104,15 +113,18 @@ def _telegram_group_window(event):
     return window
 
 
-def group_event_route(event):
-    """Cross-check normalized fields against one supported authenticated event."""
+def group_event_route(event, *, rename=False):
+    """Cross-check normalized fields against one supported authenticated event.
+
+    ``rename`` also accepts Telegram renames that no member sent. Such a route identifies a window only.
+    """
     message, meta, session = event.message_obj, event.platform_meta, event.session
     if (getattr(message.type, "value", None) != "GroupMessage"
             or getattr(session.message_type, "value", None) != "GroupMessage"):
         raise TaskError("host_scene_unsupported", "group capture requires a native group event")
     if not supported_platform_name(meta.name):
         raise TaskError("host_route_mismatch", "the native group platform is unsupported")
-    if meta.name == "telegram" and _telegram_group_window(event) != message.group_id:
+    if meta.name == "telegram" and _telegram_group_window(event, rename=rename) != message.group_id:
         raise TaskError("host_route_mismatch", "Telegram group or topic differs from the original update")
     sender, login, group = event_peer_id(event), event_account_id(event), event_group_id(event)
     event_id = native_id(message.message_id)

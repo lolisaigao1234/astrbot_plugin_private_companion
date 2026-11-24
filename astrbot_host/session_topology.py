@@ -133,15 +133,15 @@ class SessionTopology:
                             continue
         return None
 
-    def schedule_observe(self, event, *, parent_rename=False):
+    def schedule_observe(self, event, *, rename=False):
         """Keep optional directory IO outside native reply hooks."""
         if self._closed or self.controller._terminated:
             return None
 
         async def record():
             try:
-                if parent_rename:
-                    await self.observe(event, parent_rename=True)
+                if rename:
+                    await self.observe(event, rename=True)
                 else:
                     await self.observe(event)
             except Exception as error:
@@ -496,7 +496,7 @@ class SessionTopology:
             return True
         return services.get("session_enabled", True)
 
-    async def observe(self, event, *, parent_rename=False):
+    async def observe(self, event, *, rename=False):
         controller = self.controller
         if controller._terminated or not isinstance(event, controller.native_types.event):
             return
@@ -529,7 +529,7 @@ class SessionTopology:
             logger.debug("[CompanionV2] 跳过事件：账号 %s 没有可用的原生连接", login)
             return
         if kind == "group":
-            native = group_event_route(event)
+            native = group_event_route(event, rename=rename)
             if (native.platform_id, native.account_id, native.group_id) != (platform_id, login, peer):
                 return
         elif (message.group_id or event_peer_id(event) != peer
@@ -538,10 +538,12 @@ class SessionTopology:
               or session.session_id != event_session_id(event) or session.platform_id != platform_id
               or session.platform_name != platform_id or meta.id != platform_id):
             return
-        if parent_rename:
+        if rename:
             if meta.name != "telegram" or kind != "group" or not controller._accepting:
                 return
             original = message.raw_message.message
+        # An unconfigured parent chat only supplies the title of its configured topics.
+        if rename and controller.settings.group_target(*native.route_key, allow_template=False) is None:
             title = platform_label(original.new_chat_title)
             if not title or str(original.chat.id) != peer:
                 return
@@ -606,11 +608,10 @@ class SessionTopology:
             rename = row.pop("telegram_topic_rename", None)
             message_id = row.pop("telegram_message_id")
             last_rename = previous.get("telegram_topic_rename_id", 0)
-            if rename and message_id > last_rename:
+            renamed = rename and message_id > last_rename
+            if renamed:
                 row["telegram_topic_name"] = rename
                 last_rename = message_id
-            else:
-                row["telegram_topic_name"] = previous.get("telegram_topic_name") or row.get("telegram_topic_name")
             if last_rename:
                 row["telegram_topic_rename_id"] = last_rename
             platform_prefix = row["unified_msg_origin"].partition(":")[0] + ":"
@@ -638,7 +639,8 @@ class SessionTopology:
             topic_hint = row.get("telegram_topic_name")
             old_label = previous.get("group_name", "")
             recovered_title = None
-            if topic_hint and not rename and old_label.endswith("-" + topic_hint):
+            if (topic_hint and not rename and "telegram_chat_id" not in previous
+                    and old_label.endswith("-" + topic_hint)):
                 recovered_title = old_label[:-(len(topic_hint) + 1)]
             # Decode an old label with the title that belonged to it. A rename
             # whose native chat already carries the new title cannot identify
@@ -657,14 +659,17 @@ class SessionTopology:
                     titles = (*historical_titles, incoming_title)
                 prefix = next((title for title in titles if title and
                                (label == title or label.startswith(title + "-"))), None)
-                if prefix and label != prefix:
+                parent = item.get("unified_msg_origin") == chat_origin
+                if prefix and label != prefix and not parent:
                     item["telegram_topic_name"] = label[len(prefix) + 1:]
-                elif not prefix and label and item.get("unified_msg_origin") != chat_origin:
+                elif not prefix and label and not parent:
                     item["telegram_legacy_title_unknown"] = True
                     continue
                 item.pop("telegram_legacy_title_unknown", None)
                 item["telegram_chat_id"] = chat_id
-            row["telegram_topic_name"] = row["telegram_topic_name"] or previous.get("telegram_topic_name")
+            # A stored or recovered name is newer than the creation name that the adapter may cache.
+            if not renamed and not recovered_title:
+                row["telegram_topic_name"] = previous.get("telegram_topic_name") or topic_hint
             title = row["telegram_chat_title"]
             title_id = message_id
             if not title or message_id < latest.get("telegram_chat_title_id", 0):
