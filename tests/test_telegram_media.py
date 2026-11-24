@@ -29,6 +29,21 @@ class TelegramCaptureTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase
         self.event = telegram_event(self.platform)
         self.event.created_at = self.clock.now().timestamp()
 
+    async def test_failed_reads_reduce_capture_and_sdk_allowance(self):
+        from astrbot_host.files.loader import load_native_file
+        from astrbot_host.media import load_native_image
+        from astrbot_host.video.loader import load_native_video
+        from tests.telegram_failed_read_support import check_failed_reads
+
+        self.bridge.image_type, self.bridge.image_loader = Image, load_native_image
+        self.bridge.video_type, self.bridge.video_loader = Video, load_native_video
+        self.bridge.file_type, self.bridge.file_loader = File, load_native_file
+        self.bridge.file_settings = lambda *_: {"file_understanding_enabled": True}
+        for sdk in (False, True):
+            with self.subTest(sdk=sdk):
+                await self.convert(text="caption")
+                await check_failed_reads(self, self.event, self.bridge, sdk=sdk)
+
     async def test_voice_reads_only_astrbot_temp_recordings(self):
         temp = Path(get_astrbot_temp_path())
         temp.mkdir(parents=True, exist_ok=True)

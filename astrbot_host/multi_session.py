@@ -237,6 +237,7 @@ class MultiPrivateBridge(NativePrivateBridge):
             size = photo.descriptor.retained_bytes
             if (photo.descriptor.position != locator.position or size > remaining
                     or not fits_budget((*photos, photo.descriptor))):
+                remaining = max(0, remaining - len(photo.content))
                 raise TaskError("host_image_limit", "image exceeds turn limits")
             remaining -= size
             photos.append(photo.descriptor)
@@ -271,6 +272,7 @@ class MultiPrivateBridge(NativePrivateBridge):
                     locator = freeze_attachment(event, file_locator(position, part))
                     replacement, size = await bounded_file_component(event, locator, remaining)
                 if size > remaining:
+                    remaining = 0
                     replacements[position] = Plain(limited)
                     continue
                 remaining -= size
