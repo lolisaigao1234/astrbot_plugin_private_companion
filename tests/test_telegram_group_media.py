@@ -51,9 +51,15 @@ class TelegramGroupMediaTests(TelegramHostFixture, unittest.IsolatedAsyncioTestC
         return captured
 
     async def test_captioned_group_photo_budget(self):
+        await self.check_group_photo_budget("keep caption")
+
+    async def test_uncaptioned_group_photo_budget(self):
+        await self.check_group_photo_budget(None)
+
+    async def check_group_photo_budget(self, caption):
         originals = [image_bytes("red"), image_bytes("blue")]
         items = [(self.update(n, photo=[dict(file_id=str(n), file_unique_id=str(n), width=2, height=3)],
-                              media_group_id="album", caption="keep caption" if n == 1 else None),
+                              media_group_id="album", caption=caption if n == 1 else None),
                   NS(bot=self.platform.client)) for n in (1, 3)]
         self.platform.media_group_cache = {"album": {"items": items}}
         self.platform.handle_msg = AsyncMock()
@@ -63,7 +69,8 @@ class TelegramGroupMediaTests(TelegramHostFixture, unittest.IsolatedAsyncioTestC
                 "companion_v2.conversation.media.models.MAX_TURN_BYTES", max(map(len, originals))):
             captured = await self.capture(message)
         self.assertEqual([item.content for item in captured.images], originals[:1])
-        self.assertIn("keep caption", captured.text)
+        if caption:
+            self.assertIn(caption, captured.text)
         self.assertIn("附件超过读取上限", captured.text)
 
         import base64
@@ -84,7 +91,8 @@ class TelegramGroupMediaTests(TelegramHostFixture, unittest.IsolatedAsyncioTestC
         self.assertEqual([base64.b64decode(part["image_url"]["url"].split(",")[1])
                           for part in payload["content"] if part["type"] == "image_url"], originals[:1])
         self.assertIn("附件超过读取上限", request.prompt)
-        self.assertIn("keep caption", request.prompt)
+        if caption:
+            self.assertIn(caption, request.prompt)
 
     async def test_group_oversized_video_keeps_caption(self):
         from companion_v2.execution.models import TaskError

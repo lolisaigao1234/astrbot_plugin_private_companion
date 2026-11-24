@@ -606,10 +606,10 @@ class NativeGroupBridge(NativePrivateBridge):
                             raise TaskError("host_group_media_unsupported", "group media differs from its original component")
             elif onebot and (audio_locators or video_locators):
                 raise TaskError("host_group_media_unsupported", "group media requires original OneBot components")
-            captioned = telegram is not None and any(
-                getattr(part.type, "value", part.type) == "Plain" and part.text.strip() for part in parts)
+            partial_media = telegram is not None and (bool(event.message_obj.raw_message.message.media_group_id) or any(
+                getattr(part.type, "value", part.type) == "Plain" and part.text.strip() for part in parts))
             if (len(quote_locators) > 1 or len(forward_locators) > intake.max_forwards
-                    or not captioned and (len(image_locators) > MAX_INPUT_IMAGES
+                    or not partial_media and (len(image_locators) > MAX_INPUT_IMAGES
                                           or len(audio_locators) > MAX_INPUT_AUDIOS or len(video_locators) > MAX_VIDEOS)):
                 raise TaskError("host_group_media_limit", "group attachments exceed the input budget")
             text = "".join(text_parts)
@@ -655,7 +655,7 @@ class NativeGroupBridge(NativePrivateBridge):
                 if telegram is not None:
                     from .telegram_media import capture_turn_media
                     return await capture_turn_media(self, telegram, frozen_images, frozen_audios, frozen_videos,
-                                                    text_parts, captioned)
+                                                    text_parts, partial_media)
                 images = await self._capture_images(frozen_images)
                 quotes = []
                 for locator in frozen_quotes:
@@ -723,7 +723,7 @@ class NativeGroupBridge(NativePrivateBridge):
                     images, quotes, forwards, audios, videos = await asyncio.wait_for(prepare(), MEDIA_PREPARE_TIMEOUT)
                 except asyncio.TimeoutError:
                     raise TaskError("host_media_timeout", "group attachment preparation exceeded its intake time") from None
-            if captioned:
+            if partial_media:
                 text = "".join(text_parts)
             if frozen_files:
                 file_text = await prepare_file_text(frozen_files, self.file_loader, file_preferences,
