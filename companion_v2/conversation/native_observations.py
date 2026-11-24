@@ -214,32 +214,38 @@ class NativeConversationObservations:
         return min(64, len(accounts))
 
     def capture_input(self, context, native_input, *, turn_id):
+        from .native_turns import NativeConversationTurns
+        inputs = getattr(native_input, "telegram_burst", ()) or (native_input,)
+        with self.runtime.transaction():
+            for original in inputs:
+                reference = self._capture_input_source(context, original, turn_id)
+            NativeConversationTurns(self.runtime).admit(context, native_input, turn_id, reference)
+        return reference
+
+    def _capture_input_source(self, context, native_input, turn_id):
         if (context.scope != native_input.route.scope or context.actor.principal != native_input.principal
                 or context.role_binding.role != native_input.role or context.audience != native_input.recipients):
             raise TaskError("native_observation_context_changed", "native input must keep its verified identity and route")
         self.messages.recalls.check(context.scope, native_input.event_id,
                                    context.actor.principal.native_account_id)
-        from .native_turns import NativeConversationTurns
         text = native_input.text
         from .quotes.models import TelegramQuote
         references = [q.observation_text() for q in getattr(native_input, "quotes", ()) if isinstance(q, TelegramQuote)]
         forwarded = bool(getattr(native_input, "forward_origin", ""))
         identifier = "core-input-" + digest([context.scope, context.role_binding.role,
                                              context.actor.subject, native_input.event_id])
-        with self.runtime.transaction():
-            reference = None
-            if references:
-                reference = self._record(context, identifier + "-quote", turn_id, native_input.event_id,
-                    "\n".join(references), native_input.at, kind="input", state="input_observed",
-                    source_owner=REFERENCE_OWNER)
-            if text.strip():
-                reference = self._record(context, identifier, turn_id, native_input.event_id, text,
-                    native_input.at, kind="input", state="input_observed",
-                    source_owner=REFERENCE_OWNER if forwarded else INPUT_OWNER,
-                    awareness_enabled=self._awareness_enabled(context),
-                    peer_count=self._peer_count(context, native_input.at),
-                    quote_sender_ids=tuple(q.sender_id for q in getattr(native_input, "quotes", ())))
-            NativeConversationTurns(self.runtime).admit(context, native_input, turn_id, reference)
+        reference = None
+        if references:
+            reference = self._record(context, identifier + "-quote", turn_id, native_input.event_id,
+                "\n".join(references), native_input.at, kind="input", state="input_observed",
+                source_owner=REFERENCE_OWNER)
+        if text.strip():
+            reference = self._record(context, identifier, turn_id, native_input.event_id, text,
+                native_input.at, kind="input", state="input_observed",
+                source_owner=REFERENCE_OWNER if forwarded else INPUT_OWNER,
+                awareness_enabled=self._awareness_enabled(context),
+                peer_count=self._peer_count(context, native_input.at),
+                quote_sender_ids=tuple(q.sender_id for q in getattr(native_input, "quotes", ())))
         return reference
 
     def capture_output(self, context, *, turn_id, event_id, text, at, state="output_observed"):
