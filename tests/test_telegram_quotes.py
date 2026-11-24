@@ -141,6 +141,32 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
             for rows in (page, shared):
                 self.assertEqual([r["speaker"] for r in rows if r["text"] == record], ["observation"])
 
+    async def test_dialogue_and_journal_only_attribute_original_words_to_the_owner(self):
+        from companion_v2.conversation.native_history import dialogue
+        from companion_v2.execution.models import stamp
+        from companion_v2.foundation.refs import RoleOwnerRef
+        from companion_v2.memory.episodes import recent_dialogue_lines
+        from companion_v2.role_work.journal.models import JournalContext, JournalKey, JournalKind
+
+        session = self.controller.session
+        app = session.application
+        reply = await self.event(number=91, text="我喜欢绿色", reply_to_message=self.message(89, 424242, text="蓝色"))
+        forward = await self.event(number=92, text="红色", forward_origin={
+            "type": "hidden_user", "sender_user_name": "Hidden", "date": 1700000000})
+        for event in (reply, forward):
+            captured = require(await self.bridge.capture_core_reply(event))
+            self.observe(captured)
+        context = session.authority.select(self.controller.settings.target("tg-owner"), captured.route.scope, captured.role)
+        now = self.clock.now()
+        manifest = {"start": stamp(now - timedelta(seconds=1)), "end": stamp(now + timedelta(seconds=1))}
+        for lines in (recent_dialogue_lines(app.runtime, app.memory.writer.access, context, manifest, limit=1),
+                      dialogue(app.messages, context, now, limit=1)):
+            self.assertEqual([(row["speaker"], row["text"]) for row in lines], [("user", "我喜欢绿色")])
+        owner = RoleOwnerRef(context.scope.installation_id, context.scope.bot_id, context.role_binding.role.subject_id)
+        key = JournalKey.at(owner, JournalKind.DIARY, now, timezone="Asia/Shanghai")
+        page = app.journal_conversation_material_producer.for_day(context, JournalContext(key, context.scope, "Asia/Shanghai"))
+        self.assertEqual([item.text for item in page.materials], ["对方当时表达：我喜欢绿色"])
+
     async def test_captioned_photos_keep_the_original_sender_and_image(self):
         from astrbot_host.core_reply_media import frozen_image_locators, prepare_native_input_images
         from tests.test_conversation_images import image_bytes

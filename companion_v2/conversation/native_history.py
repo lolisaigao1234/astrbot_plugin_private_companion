@@ -13,6 +13,7 @@ from companion_v2.storage.runtime import table_exists
 from .messages import ConversationMessages, source_from_document
 from .native_observations import (
     REALITY_ASSISTANT_OWNER,
+    REFERENCE_OWNER,
     TOGETHER_OWNERS,
     observations_available,
     validate_observation,
@@ -40,7 +41,8 @@ def rows(runtime, context, *, start=None, end=None, kind=None, limit=32):
         return ()
     has_sends = table_exists(runtime, "conversation_native_sends")
     where = ["n.context_key = ?", "n.delivery_state IN ('input_observed', 'send_returned')"]
-    values = [context.key]
+    where.append("json_extract(n.source_json, '$.owner') != ?")
+    values = [context.key, REFERENCE_OWNER]
     if start is not None:
         where.append("n.effective_at >= ?")
         values.append(start)
@@ -64,7 +66,7 @@ def _format_body(row, source, record, at, *, sent_at, has_sent_row):
         origin = {"execution_path": "reality_local_audio" if local else "reality_chat",
                   "source_label": "现实设备已播放的话" if local else "现实提醒聊天副本"}
     if row["kind"] == "input":
-        return {"role": "user", "received_at": row["observed_at"], "text": record.payload,
+        return {"role": "observation" if source.owner == REFERENCE_OWNER else "user", "received_at": row["observed_at"], "text": record.payload,
                 "owner": source.owner, **origin}
     resolved_sent_at = sent_at if has_sent_row else row["observed_at"]
     if resolved_sent_at > stamp(at):

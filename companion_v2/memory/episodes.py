@@ -183,7 +183,7 @@ def recent_dialogue_lines(runtime, access, context, manifest, *, limit=MAX_SOURC
         if plain:
             lines.append({"speaker": "bot", "at": row["delivered_at"], "text": plain[:MAX_LINE_CHARS]})
     from companion_v2.conversation.native_observations import rows_for_context, validate_observation
-    for row in rows_for_context(runtime, context, start=start, end=end, limit=limit):
+    for row in rows_for_context(runtime, context, start=start, end=end, limit=limit, include_references=False):
         try:
             reference = codec.source(json.loads(row["source_json"]))
             _, source_kind = validate_observation(runtime, row, context, reference)
