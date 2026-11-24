@@ -2000,6 +2000,16 @@ test("Telegram identity cards and member details identify numeric accounts by pl
   }
 });
 
+test("Telegram route selector retains the adapter family for both roles", async () => {
+  const route = {platform: "default", platform_name: "telegram", account_id: "6789", persona_ids: ["璃"]};
+  const h = harness({persons: ["role-a", "role-b"].map(role_id =>
+    person("12345", "测试成员", {...route, role_id}))});
+  await open(h, "测试成员");
+  const selector = findInput(h.element("person-detail"), "选择角色与账号");
+  assert.equal(selector.children.length, 3);
+  for (const option of selector.children.slice(1)) assert.match(flat(option), /Telegram 6789/);
+});
+
 test("offline account-link preview opens its member editor", t => {
   const {execFileSync} = require("node:child_process");
   const {tmpdir} = require("node:os");
