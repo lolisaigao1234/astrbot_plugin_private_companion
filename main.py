@@ -598,8 +598,14 @@ class PrivateCompanionV2StagingPlugin(Star):
         extra_text = "\n".join(str(item[1]).strip() for item in pending if str(item[1]).strip())
         if not extra_text and not forwards_updated:
             return
+        prepared = prepared_state.get("prepared") if isinstance(prepared_state, dict) else None
         if extra_text:
             prompt = getattr(request, "prompt", None)
+            query_text = extra_text
+            original = prepared.get("native_input") if isinstance(prepared, dict) else None
+            if getattr(original, "forward_origin", "") or getattr(original, "telegram_burst", ()):
+                from .astrbot_host.telegram_forward_burst import sender_section
+                prompt, extra_text = sender_section(original, prompt, extra_text)
             if isinstance(prompt, str) and prompt.strip():
                 request.prompt = prompt.rstrip() + "\n" + extra_text
             else:
@@ -607,10 +613,9 @@ class PrivateCompanionV2StagingPlugin(Star):
             if hasattr(request, "retrieval_query"):
                 current_query = getattr(request, "retrieval_query", None)
                 if isinstance(current_query, str) and current_query.strip():
-                    request.retrieval_query = current_query.rstrip() + "\n" + extra_text
+                    request.retrieval_query = current_query.rstrip() + "\n" + query_text
                 else:
                     request.retrieval_query = request.prompt
-        prepared = prepared_state.get("prepared") if isinstance(prepared_state, dict) else None
         if isinstance(prepared, dict):
             base = str(prepared.get("text") or "").rstrip()
             if forwards_updated:
