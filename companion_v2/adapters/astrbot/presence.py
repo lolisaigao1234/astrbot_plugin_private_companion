@@ -1,5 +1,8 @@
 """Recipient-scoped platform presence actions."""
 
+import asyncio
+from datetime import timedelta
+
 from companion_v2.execution.models import require
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.foundation.refs import ScopeKind
@@ -52,9 +55,19 @@ class TelegramPresencePort(_PresencePort):
             self.bridge.connections.assert_current(lease)
         except Exception:
             return {"state": "not_started", "code": "presence_authorization_changed"}
+        from telegram.error import BadRequest, NetworkError, RetryAfter
         try:
             with redact_telegram_token(lease.client):
-                accepted = await lease.client.send_chat_action(chat_id=chat_id, action="typing")
+                accepted = await asyncio.wait_for(
+                    lease.client.send_chat_action(chat_id=chat_id, action="typing"), timeout=2)
+        except RetryAfter as exc:
+            delay = exc.retry_after
+            seconds = delay.total_seconds() if isinstance(delay, timedelta) else delay
+            return {"state": "failed", "code": "telegram_rate_limited", "retry_after": max(1, seconds)}
+        except BadRequest:
+            return {"state": "failed", "code": "presence_action_rejected"}
+        except (NetworkError, asyncio.TimeoutError):
+            return {"state": "unknown", "code": "presence_ack_unknown", "retry_after": 4}
         except Exception:
             return {"state": "unknown", "code": "presence_ack_unknown"}
         if accepted is True:

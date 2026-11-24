@@ -224,6 +224,10 @@ class PresenceCoordinator:
                 logger.info("[CompanionV2] 输入提示 recipient=%s turn_id=%s state=%s code=%s",
                             context.scope.native_scope_id, batch, result.get("state"), result.get("code", ""))
                 reported_batch = batch
+            if "retry_after" in result:
+                # A delivery-stage wake must not shorten Telegram's flood-control delay.
+                await asyncio.sleep(result["retry_after"])
+                continue
             if result.get("state") != "accepted":
                 return
             interval = values["typing_refresh_seconds"]
