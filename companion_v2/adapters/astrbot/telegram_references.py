@@ -7,7 +7,7 @@ from companion_v2.conversation.quotes.models import TelegramForwardOrigin, Teleg
 from companion_v2.execution.models import TaskError, digest
 
 from .quotes import image_locator
-from .telegram_media import freeze_attachment, safe_text
+from .telegram_media import freeze_attachment, safe_text, sticker_label
 
 
 @dataclass(frozen=True)
@@ -82,8 +82,8 @@ def private_references(event):
     images = ()
     static_sticker = original.sticker and not (original.sticker.is_animated or original.sticker.is_video)
     if (original.photo or static_sticker) and not raw.quote:
-        if static_sticker and original.sticker.emoji:
-            text = f"Sticker: {original.sticker.emoji}"
+        if static_sticker:
+            text = sticker_label(original.sticker)
         text = "\n[图片 1]\n" + text
         if part and str(part.id) == str(original.message_id) and str(part.sender_id) == sender:
             images = tuple(freeze_attachment(event, image_locator(index, item.file, item.url))
