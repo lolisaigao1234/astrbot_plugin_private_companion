@@ -1999,3 +1999,19 @@ test("Telegram identity cards and member details identify numeric accounts by pl
     assert.doesNotMatch(flat(node), /QQ (12345|6789)/);
   }
 });
+
+test("offline account-link preview opens its member editor", t => {
+  const {execFileSync} = require("node:child_process");
+  const {tmpdir} = require("node:os");
+  const dir = fs.mkdtempSync(path.join(tmpdir(), "account-link-preview-"));
+  t.after(() => fs.rmSync(dir, {recursive: true, force: true}));
+  const file = path.join(dir, "preview.html");
+  execFileSync("python3", [path.resolve(__dirname, "../tools/build_account_link_preview.py"), file]);
+  const panel = element("div");
+  const document = {createElement: element, getElementById: () => panel, body: element("body")};
+  const context = vm.createContext({window: {document}, document, setTimeout, clearTimeout, queueMicrotask});
+  for (const [, script] of fs.readFileSync(file, "utf8").matchAll(/<script>([\s\S]*?)<\/script>/g)) {
+    vm.runInContext(script, context);
+  }
+  assert.match(flat(panel), /示例 QQ 账号/);
+});
