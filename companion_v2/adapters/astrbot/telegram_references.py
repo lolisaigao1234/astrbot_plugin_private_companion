@@ -1,6 +1,7 @@
 """Freeze Telegram references from the delivered update and its converted chain."""
 
 from dataclasses import dataclass, replace
+from types import SimpleNamespace
 
 from companion_v2.conversation.forwards.models import CapturedForward, CapturedForwardNode
 from companion_v2.conversation.quotes.models import TelegramForwardOrigin, TelegramQuote
@@ -54,6 +55,57 @@ def _origin(event, origin):
             source += f"，署名 {origin.author_signature}"
     return TelegramForwardOrigin(str(origin.type), safe_text(event, source or "未知"), int(origin.date.timestamp()),
                                  str(origin.sender_user.id) if origin.type == "user" else None)
+
+
+def private_text_parts(message, parts):
+    """Restore self mentions only when the authenticated update matches AstrBot's chain."""
+    raw = message.raw_message.message
+    if not raw.text or not any(entity.type == "mention" for entity in raw.entities):
+        return parts
+    # Text messages have optional Reply, ordered At components, then optional Plain.
+    # Captions already contain their mentions. Leave transformed or stale chains alone.
+    kinds = [getattr(part.type, "value", part.type) for part in parts]
+    mentions = [part for part, kind in zip(parts, kinds) if kind == "At"]
+    plain = [part.text for part, kind in zip(parts, kinds) if kind == "Plain"]
+    expected = (["Reply"] if "Reply" in kinds else []) + ["At"] * len(mentions) + ["Plain"] * len(plain)
+    if not mentions or len(plain) > 1 or kinds != expected:
+        return parts
+
+    source = raw.text.encode("utf-16-le")
+    projected, restored, targets = [], [], []
+    cursor = 0
+    for entity in raw.entities:
+        if entity.type not in ("mention", "text_link"):
+            continue
+        start, end = entity.offset * 2, (entity.offset + entity.length) * 2
+        if not cursor <= start < end <= len(source):
+            return parts
+        label = source[start:end]
+        visible = label
+        if entity.type == "mention":
+            name = raw.parse_entity(entity)
+            if not name.startswith("@"):
+                return parts
+            name = name[1:]
+            target = name
+            if name.lower() == message.self_id.lower():
+                target = message.self_id
+                visible = b""
+            targets.append((name, target))
+        elif entity.url:
+            label += f" ({entity.url})".encode("utf-16-le")
+            visible = label
+        restored.extend((source[cursor:start], label))
+        projected.extend((source[cursor:start], visible))
+        cursor = end
+    if targets != [(part.name, part.qq) for part in mentions]:
+        return parts
+    projected.append(source[cursor:])
+    restored.append(source[cursor:])
+    if projected == restored or b"".join(projected) != "".join(plain).encode("utf-16-le"):
+        return parts
+    # Keep earlier indices (notably Reply) stable, including for mention-only text.
+    return (*parts[:-1], SimpleNamespace(type="Plain", text=b"".join(restored).decode("utf-16-le")))
 
 
 def private_references(event):
