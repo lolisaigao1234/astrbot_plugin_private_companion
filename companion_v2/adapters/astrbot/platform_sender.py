@@ -18,6 +18,7 @@ from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.platform.message_session import MessageSession
 from astrbot.core.platform.message_type import MessageType
 
+from companion_v2.adapters.astrbot.telegram_logging import redact_telegram_token
 from companion_v2.conversation.delivery import DeliveryReceipt, LocalSender
 from companion_v2.delivery.components import build_component_plan
 from companion_v2.delivery.media import ImageDeliveryEnvelope, payload_hash
@@ -28,6 +29,28 @@ from companion_v2.foundation.refs import ScopeKind
 
 
 logger = logging.getLogger(__name__)
+
+
+def _telegram_refusal(error, chain):
+    # send_by_session exposes no per-call progress. Earlier components or text
+    # chunks may already be visible when a later Bot API call is refused.
+    from astrbot.core.platform.sources.telegram.tg_event import TelegramPlatformEvent
+    from telegram.error import BadRequest, Forbidden, InvalidToken, RetryAfter
+
+    if len(chain.chain) != 1:
+        return None
+    component = chain.chain[0]
+    if isinstance(component, Plain) and len(component.text) > TelegramPlatformEvent.MAX_MESSAGE_LENGTH:
+        return None
+    if isinstance(error, Forbidden):
+        return "telegram_bot_blocked" if "bot was blocked" in error.message.lower() else "telegram_forbidden"
+    if isinstance(error, BadRequest):
+        return "telegram_chat_not_found" if error.message.lower() == "chat not found" else "telegram_bad_request"
+    if isinstance(error, InvalidToken):
+        return "telegram_invalid_token"
+    if isinstance(error, RetryAfter):
+        return "telegram_rate_limited"
+    return None
 
 
 class AstrBotPlatformSender:
@@ -180,7 +203,8 @@ class AstrBotPlatformSender:
             if not callable(getattr(platform, "send_by_session", None)):
                 return not_sent("platform_session_transport_unavailable")
 
-            session = self._session(scope, platform_name=platform.meta().name)
+            platform_name = platform.meta().name
+            session = self._session(scope, platform_name=platform_name)
             stage = "voice_render"
             voice_plan, voice_segment, render_state = await self._render_voice(envelope, scope, context)
             if voice_plan is not None and voice_segment is None:
@@ -215,7 +239,7 @@ class AstrBotPlatformSender:
                     component_plan.text_hidden if component_plan is not None else False)
             if not has_message_content:
                 return not_sent("empty_message")
-            chain = self._chain(component_plan, platform_name=platform.meta().name)
+            chain = self._chain(component_plan, platform_name=platform_name)
 
             # Re-read the live route and authorization immediately before the
             # platform-owned side effect. This mirrors the OneBot dispatch fence.
@@ -231,8 +255,19 @@ class AstrBotPlatformSender:
             platform = route_bridge.connections.assert_current(lease).platform
             stage = "platform_send"
             try:
-                await platform.send_by_session(session, chain)
+                with redact_telegram_token(lease.client if platform_name == "telegram" else None):
+                    accepted = await platform.send_by_session(session, chain)
+                if platform_name == "telegram" and accepted is False:
+                    return not_sent("platform_session_transport_unavailable")
             except Exception as error:
+                if platform_name == "telegram":
+                    try:
+                        reason = _telegram_refusal(error, chain)
+                    except Exception:
+                        # Dispatch already started. Only a recognized refusal proves non-delivery.
+                        reason = None
+                    if reason:
+                        return not_sent(reason)
                 logger.warning("V2 platform delivery outcome unknown part=%s error_type=%s",
                                envelope.part_id, type(error).__name__)
                 return self._receipt(envelope, "unknown")

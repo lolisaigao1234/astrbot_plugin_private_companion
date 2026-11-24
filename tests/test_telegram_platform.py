@@ -7,18 +7,25 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace as NS
 import unittest
-from unittest.mock import AsyncMock, Mock
+import wave
+from unittest.mock import AsyncMock, Mock, patch
 
+import httpx
+
+from telegram.error import BadRequest, Forbidden, InvalidToken, NetworkError, RetryAfter, TimedOut
 from telegram import Chat, Message, Update, User
 from astrbot.core.message.components import Plain
 from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
 from astrbot.core.platform.message_type import MessageType
+from astrbot.core.platform.sources.telegram.tg_adapter import TelegramPlatformAdapter
 from astrbot.core.platform.sources.telegram.tg_event import TelegramPlatformEvent
 from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA
 from astrbot_host.recalls import authenticate_notice_route
 from companion_v2.adapters.astrbot.group import group_event_route
-from companion_v2.adapters.astrbot.native import event_native_client, supported_platform_name
-from companion_v2.execution.models import TaskError, require
+from companion_v2.adapters.astrbot.native import event_native_client, native_client_connected, supported_platform_name
+from companion_v2.adapters.astrbot.platform_sender import AstrBotPlatformSender
+from companion_v2.delivery.models import DeliveryEnvelope
+from companion_v2.execution.models import ProviderBinding, TaskError, digest, require
 from companion_v2.foundation.refs import ScopeKind
 from tests.multi_host_support import MultiFixture, multi_config
 from tests.test_main_no_reply import ENTRY
@@ -30,19 +37,13 @@ def telegram_bot(token="424242:synthetic"):
     return NS(token=token)
 
 
-class TelegramPlatform:
+class TelegramPlatform(TelegramPlatformAdapter):
     def __init__(self):
-        self.metadata = NS(name="telegram", id="tg-main")
+        self.config = {"id": "tg-main"}
         self.client = telegram_bot()
-        self._terminating = False
-        self._application_started = True
         self.application = NS(running=True, updater=NS(running=True))
-
-    def meta(self):
-        return self.metadata
-
-    def get_client(self):
-        return self.client
+        self._application_started = True
+        self._terminating = False
 
 
 def telegram_event(platform, number=1, text="你好 😀", peer=OWNER):
@@ -59,6 +60,21 @@ def telegram_event(platform, number=1, text="你好 😀", peer=OWNER):
 
 
 class TelegramPlatformTests(unittest.TestCase):
+    def test_connection_tracks_polling_shutdown_and_rebuild(self):
+        platform = TelegramPlatform()
+        for started, running, polling, terminating, expected in (
+            (True, True, True, False, True),
+            (True, True, False, False, False),
+            (True, True, True, True, False),
+            (False, True, True, False, False),
+            (True, False, True, False, False),
+            (True, True, True, False, True),
+        ):
+            with self.subTest(started=started, running=running, polling=polling, terminating=terminating):
+                platform._application_started, platform._terminating = started, terminating
+                platform.application.running, platform.application.updater.running = running, polling
+                self.assertEqual(native_client_connected(platform, "tg-main"), expected)
+
     def test_running_application_without_start_flag_requires_the_right_account(self):
         from companion_v2.adapters.astrbot.native import native_client_connected
 
@@ -124,6 +140,159 @@ class TelegramHostFixture(MultiFixture):
         await plugin.on_companion_platform_loaded()
         if plugin._host_start_task is not None:
             await asyncio.wait_for(plugin._host_start_task, timeout=20)
+
+
+class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        await self.start_host()
+        self.context, _ = await self.controller.session.synchronize(self.controller.settings.target("tg-owner"))
+        self.binding = ProviderBinding("message.delivery", "synthetic-sender", "1", digest("synthetic"))
+        self.sender = AstrBotPlatformSender(self.controller.session.bridge, binding=self.binding,
+            version="4.29.4", reverse_api_type=object, authorize=lambda: None)
+        self.platform.client.send_chat_action = AsyncMock()
+        self.platform.client.send_message = AsyncMock()
+
+    async def send(self, text="你好"):
+        envelope = DeliveryEnvelope("part-tg", "op-tg", self.context, 1, text, digest(text),
+                                    self.binding, before_dispatch=lambda: True)
+        return await self.sender.send(envelope)
+
+    async def test_background_send_waits_for_polling(self):
+        self.platform.application.updater.running = False
+        receipt = await self.send()
+        self.assertEqual((receipt.status, receipt.failure_code), ("not_sent", "host_account_offline"))
+        self.platform.client.send_chat_action.assert_not_awaited()
+        self.platform.client.send_message.assert_not_awaited()
+        self.platform.application.updater.running = True
+        self.assertEqual((await self.send()).status, "delivered")
+        self.platform.client.send_message.assert_awaited_once()
+
+    async def test_definite_telegram_refusals_have_safe_reasons(self):
+        token = self.platform.client.token
+        for error, reason in (
+            (Forbidden("Bot was blocked by the user"), "telegram_bot_blocked"),
+            (BadRequest("Chat not found"), "telegram_chat_not_found"),
+            (InvalidToken(token), "telegram_invalid_token"),
+            (RetryAfter(42), "telegram_rate_limited"),
+        ):
+            with self.subTest(reason=reason):
+                self.platform.client.send_message.side_effect = error
+                with self.assertLogs("companion_v2.adapters.astrbot.platform_sender", "WARNING") as logs:
+                    receipt = await self.send()
+                self.assertEqual((receipt.status, receipt.failure_code), ("not_sent", reason))
+                self.assertNotIn(token, " ".join(logs.output))
+
+    async def test_chat_action_warning_redacts_the_bot_token(self):
+        token = self.platform.client.token
+        self.platform.client.send_chat_action.side_effect = InvalidToken(token)
+        self.platform.client.send_message.side_effect = InvalidToken(token)
+        with self.assertLogs("astrbot", level="WARNING") as host_logs:
+            receipt = await self.send()
+        self.assertEqual((receipt.status, receipt.failure_code), ("not_sent", "telegram_invalid_token"))
+        self.assertNotIn(token, " ".join(host_logs.output))
+        self.assertIn("[redacted]", " ".join(host_logs.output))
+
+    async def test_private_notice_redacts_host_chat_action_warning(self):
+        from astrbot_host.private_notice import send_private_notice
+
+        event = telegram_event(self.platform)
+        route = authenticate_notice_route(self.controller, event, ScopeKind.PRIVATE, expected_post="message")
+        token = self.platform.client.token
+        self.platform.client.send_chat_action.side_effect = InvalidToken(token)
+        with self.assertLogs("astrbot", level="WARNING") as logs:
+            receipt = await send_private_notice(self.controller, event, text="验证", route=route)
+        self.assertEqual(receipt["state"], "delivered")
+        self.assertNotIn(token, " ".join(logs.output))
+        self.assertIn("[redacted]", " ".join(logs.output))
+
+    async def test_relay_receipt_uses_the_telegram_client_without_an_event_lease(self):
+        from astrbot_host.relay_pending_events import _send_private
+
+        event = telegram_event(self.platform)
+        token = self.platform.client.token
+        self.platform.client.send_chat_action.side_effect = InvalidToken(token)
+        with self.assertLogs("astrbot", level="WARNING") as logs:
+            receipt = await _send_private(self.controller, event, platform_id="tg-main",
+                                          login="tg-main", peer=str(OWNER), text="送达回执")
+        self.assertEqual(receipt["state"], "delivered")
+        self.platform.client.send_message.assert_awaited_once()
+        self.assertNotIn(token, " ".join(logs.output))
+
+    async def test_httpx_logs_redact_delivery_notice_and_relay_requests(self):
+        from astrbot_host.private_notice import send_private_notice
+        from astrbot_host.relay_pending_events import _send_private
+
+        token = self.platform.client.token
+        event = telegram_event(self.platform)
+        route = authenticate_notice_route(self.controller, event, ScopeKind.PRIVATE, expected_post="message")
+        paths = []
+
+        def respond(request):
+            paths.append(request.url.path)
+            return httpx.Response(200)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+            async def chat_action(*args, **kwargs):
+                await http.post(f"https://telegram.invalid/bot{token}/sendChatAction")
+
+            async def message(*args, **kwargs):
+                await http.post(f"https://telegram.invalid/bot{token}/sendMessage")
+
+            self.platform.client.send_chat_action.side_effect = chat_action
+            self.platform.client.send_message.side_effect = message
+            with self.assertLogs("httpx", "INFO") as logs:
+                self.assertEqual((await self.send()).status, "delivered")
+                notice = await send_private_notice(self.controller, event, text="验证", route=route)
+                relay = await _send_private(self.controller, event, platform_id="tg-main",
+                                            login="tg-main", peer=str(OWNER), text="回执")
+                self.assertEqual((notice["state"], relay["state"]), ("delivered", "delivered"))
+
+        methods = ["sendChatAction", "sendMessage"] * 3
+        self.assertEqual(paths, [f"/bot{token}/{method}" for method in methods])
+        self.assertEqual(len(logs.records), len(methods))
+        for record, method in zip(logs.records, methods):
+            self.assertIn(f"/bot[redacted]/{method}", record.getMessage())
+            self.assertNotIn(token, repr(record.args))
+
+    async def test_unavailable_refusal_classifier_keeps_dispatch_unknown(self):
+        self.platform.client.send_message.side_effect = NetworkError("connection lost")
+        with patch("companion_v2.adapters.astrbot.platform_sender._telegram_refusal", side_effect=ImportError):
+            receipt = await self.send()
+        self.assertEqual((receipt.status, receipt.failure_code), ("unknown", None))
+        self.platform.client.send_message.assert_awaited_once()
+
+    async def test_transport_errors_are_unknown(self):
+        for error in (TimedOut(), NetworkError("connection lost")):
+            with self.subTest(error=type(error).__name__):
+                self.platform.client.send_message.reset_mock()
+                self.platform.client.send_message.side_effect = error
+                receipt = await self.send()
+                self.assertEqual((receipt.status, receipt.failure_code), ("unknown", None))
+                self.platform.client.send_message.assert_awaited_once()
+
+    async def test_refusal_after_first_text_chunk_is_unknown(self):
+        self.platform.client.send_message.side_effect = [None, Forbidden("bot was blocked by the user")]
+        receipt = await self.send("x" * 4097)
+        self.assertEqual((receipt.status, receipt.failure_code), ("unknown", None))
+        self.assertEqual(self.platform.client.send_message.await_count, 2)
+
+    async def test_negative_session_ack_never_records_delivery(self):
+        self.platform.send_by_session = AsyncMock(return_value=False)
+        receipt = await self.send()
+        self.assertEqual(receipt.status, "not_sent")
+        self.assertIsNone(receipt.delivered_at)
+
+    async def test_refusal_after_text_before_voice_is_unknown(self):
+        audio = self.root / "synthetic.wav"
+        with wave.open(str(audio), "wb") as stream:
+            stream.setparams((1, 2, 8000, 0, "NONE", ""))
+            stream.writeframes(bytes(160))
+        self.sender.voice = AsyncMock(return_value={"type": "record", "data": {"file": str(audio)}})
+        self.platform.client.send_voice = AsyncMock(side_effect=RetryAfter(42))
+        receipt = await self.send()
+        self.assertEqual((receipt.status, receipt.failure_code), ("unknown", None))
+        self.platform.client.send_voice.assert_awaited_once()
+        self.platform.client.send_message.assert_awaited_once()
 
 
 class TelegramPrivateCommandTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):

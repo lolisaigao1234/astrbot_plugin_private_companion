@@ -290,10 +290,11 @@ def native_client_connected(platform, account_id, client=None):
         return False
     if meta.name == "telegram":
         application = getattr(platform, "application", None)
-        return (meta.id == account_id and not getattr(platform, "_terminating", False)
-                and getattr(platform, "_application_started", True)
-                and getattr(application, "running", False)
-                and bool(getattr(getattr(application, "updater", None), "running", False)))
+        if (meta.id != account_id or getattr(platform, "_terminating", False)
+                or not getattr(platform, "_application_started", True)
+                or not getattr(application, "running", False)
+                or not getattr(getattr(application, "updater", None), "running", False)):
+            return False
     if meta.name == "wechat_native":
         return (meta.id == account_id and not getattr(platform, "stopped", True)
                 and not getattr(client, "closed", True)
