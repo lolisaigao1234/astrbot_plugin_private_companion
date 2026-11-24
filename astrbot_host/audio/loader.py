@@ -55,6 +55,16 @@ async def decode_audio(content, position):
             await process.communicate()
 
 
+def _read_record_bytes(stream):
+    # AstrBot has already downloaded and converted the Telegram file at this point.
+    info = os.fstat(stream.fileno())
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError
+    if info.st_size > MAX_AUDIO_BYTES:
+        raise TaskError("host_audio_limit", "voice exceeds the intake byte budget")
+    return stream.read(MAX_AUDIO_BYTES + 1)
+
+
 def _read_temp_record(value):
     from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
     root = Path(get_astrbot_temp_path()).resolve()
@@ -76,14 +86,12 @@ def _read_temp_record(value):
                     stack.callback(os.close, directory)
                 fd = os.open(relative.name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=directory)
                 with os.fdopen(fd, "rb") as stream:
-                    if not stat.S_ISREG(os.fstat(fd).st_mode):
-                        raise ValueError
-                    return stream.read(MAX_AUDIO_BYTES + 1)
+                    return _read_record_bytes(stream)
         with path.open("rb") as stream:
             if not path.resolve(strict=True).is_relative_to(root) or not os.path.samestat(
                     os.fstat(stream.fileno()), path.stat()):
                 raise ValueError
-            return stream.read(MAX_AUDIO_BYTES + 1)
+            return _read_record_bytes(stream)
     except (OSError, ValueError, RuntimeError):
         raise TaskError("host_audio_location_invalid", "voice requires an AstrBot temporary file") from None
 
