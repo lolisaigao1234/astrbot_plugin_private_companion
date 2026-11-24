@@ -265,6 +265,7 @@ class MultiPrivateBridge(NativePrivateBridge):
             return Image.fromBytes(photo.content)
 
         file_preferences = None
+        file_deadline = None
         for position, part in enumerate(message.message):
             kind = type(part)
             if kind not in limits:
@@ -296,8 +297,9 @@ class MultiPrivateBridge(NativePrivateBridge):
                     if file_preferences is None:
                         values = self.file_settings(context.scope, context.role_binding.role) if self.file_settings else {}
                         file_preferences = understanding_settings(values)
+                        file_deadline = asyncio.get_running_loop().time() + file_preferences["file_understanding_timeout_seconds"]
                     replacement, size = await read_attachment(bounded_file_component(
-                        event, locator, remaining, file_preferences, context.scope))
+                        event, locator, remaining, file_preferences, context.scope, file_deadline))
                 if size > remaining:
                     remaining = 0
                     replacements[position] = Plain(limited)
