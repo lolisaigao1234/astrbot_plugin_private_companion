@@ -192,10 +192,12 @@ class MultiPrivateBridge(NativePrivateBridge):
         return safe_text(event, "".join(pieces))
 
     @staticmethod
-    def has_attachment_and_quoted_photo(event):
+    def needs_telegram_media_budget(event):
         from astrbot.core.message.components import File, Image, Record, Reply, Video
 
         parts = event.message_obj.message
+        if any(isinstance(part, Video) for part in parts):
+            return True
         return (any(isinstance(part, (File, Image, Record, Video)) for part in parts)
                 and any(isinstance(child, Image) for part in parts if isinstance(part, Reply)
                         for child in part.chain or ()))
@@ -1398,7 +1400,7 @@ class MultiHostSession:
                 self._validate_core_group_admission(group_admission, context, captured)
                 if (context.scope.kind is ScopeKind.PRIVATE and event.platform_meta.name == "telegram"
                         and (captured.telegram_burst or getattr(event.message_obj.raw_message.message, "media_group_id", None)
-                             or self.bridge.has_attachment_and_quoted_photo(event))):
+                             or self.bridge.needs_telegram_media_budget(event))):
                     await self.bridge.prepare_telegram_album(event)
                     self.bridge.connections.assert_current(connection_lease)
                 turn_id = "core-reply:" + digest([context.key, captured.event_id])

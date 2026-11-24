@@ -164,6 +164,26 @@ class TelegramCaptureTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase
             else:
                 self.assertEqual(oversized.failure.code, "host_video_limit")
 
+    async def test_standalone_video_respects_turn_limit_before_sdk_request(self):
+        from astrbot.core.astr_main_agent import collect_initial_request
+        from companion_v2.conversation.media.video.models import MAX_VIDEO_BYTES
+        from companion_v2.execution.models import TaskError
+        await self.convert(video=dict(file_id="v", file_unique_id="v", duration=1, width=64, height=48),
+                           caption="my video caption")
+        self.event = self.platform.create_event(self.event.message_obj)
+        self.event.created_at = self.clock.now().timestamp()
+        target = self.controller.settings.target("tg-owner")
+        load = AsyncMock(side_effect=TaskError("host_video_limit", "synthetic oversized video"))
+        with patch("astrbot_host.video.loader.fetch_native_video_bytes", load), patch(
+                "astrbot.core.astr_main_agent._get_session_conv", AsyncMock(return_value=NS(history="[]"))):
+            (await self.controller.session.prepare_core_reply(self.event, target)).unwrap()
+            request, _ = await collect_initial_request(self.event, NS(), NS(provider_wake_prefix="", provider_settings={}))
+            payload = json.dumps(await request.assemble_context(), ensure_ascii=False)
+        self.assertEqual(load.await_args.kwargs["maximum_bytes"], MAX_VIDEO_BYTES)
+        self.assertIn("my video caption", payload)
+        self.assertIn("附件超过读取上限", payload)
+        self.assertFalse(any(isinstance(part, Video) for part in self.event.message_obj.message))
+
     async def test_album_keeps_two_original_photos_and_caption(self):
         from astrbot_host.media import load_native_image
         from tests.test_conversation_images import image_bytes

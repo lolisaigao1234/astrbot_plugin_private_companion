@@ -24,7 +24,7 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
         for attachment in (File(name="note.txt", file="note.txt"), Record(file="voice.wav"), Video(file="clip.mp4")):
             with self.subTest(kind=type(attachment).__name__):
                 event = NS(message_obj=NS(message=[reply, attachment]))
-                self.assertTrue(self.controller.session.bridge.has_attachment_and_quoted_photo(event))
+                self.assertTrue(self.controller.session.bridge.needs_telegram_media_budget(event))
 
     async def test_provider_photo_budget(self):
         from tests.telegram_provider_photo_support import check_provider_photo_budget
