@@ -1281,14 +1281,15 @@ class PrivateCompanionV2StagingPlugin(Star):
                 return
         is_calendar_command = (channel == "private" and not forwarded
                                and parse_calendar_command(str(getattr(event, "message_str", "") or "")))
-        debounce_input = (private_debounce_input(event)
+        target_key = getattr(target, "target_id", None) if channel == "private" else None
+        debounce_input = (private_debounce_input(event, collecting=self._private_debounce_manager().collecting_event,
+                                                  target_key=target_key)
                           if channel == "private" and not is_calendar_command else None)
         plain_text = debounce_input[0] if debounce_input is not None else None
         event_has_forward = (debounce_input[1] if debounce_input is not None
                              else event_has_top_level_forwards(event))
         forward_policy = (resolve_forward_intake_policy(self.staging)
                           if event_has_forward else None)
-        target_key = getattr(target, "target_id", None) if channel == "private" else None
         followups = self._private_reply_followups() if plain_text is not None and target_key else None
         earlier_reply = followups.active_for(target_key) if followups is not None else None
         # Telegram can send the requester's comment before the forwarded updates.

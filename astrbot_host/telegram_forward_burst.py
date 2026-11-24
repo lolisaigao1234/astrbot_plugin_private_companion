@@ -10,8 +10,17 @@ from .core_reply_forwards import MAX_CORE_FORWARD_IMAGES, component_kind
 
 
 def _bounded_sections(originals):
-    headers = [f"[转发消息，来源：{item.forward_origin}]\n" if item.forward_origin else "[发起人的留言]\n"
-               for item in originals]
+    forward_ids = {item.event_id for item in originals if item.forward_origin}
+    replied_to = set()
+    headers = []
+    for item in originals:
+        if item.forward_origin:
+            headers.append(f"[转发消息，来源：{item.forward_origin}]\n")
+        else:
+            reply_id = next((q.message_id for q in getattr(item, "quotes", ()) if q.message_id in forward_ids), None)
+            if reply_id:
+                replied_to.add(reply_id)
+            headers.append(f"[发起人的留言，回复转发消息 {reply_id}]\n" if reply_id else "[发起人的留言]\n")
     bodies = [item.text.removeprefix(header) if item.forward_origin else item.text
               for item, header in zip(originals, headers)]
     # Preserve attribution even for a hundred long messages. Shorten labels only
@@ -25,6 +34,10 @@ def _bounded_sections(originals):
                 tail = label_limit // 2
                 suffix = name[-tail:] if tail else ""
                 headers[i] = f"[转发消息，来源：{name[:label_limit-tail]}…{suffix}]\n"
+
+    for i, item in enumerate(originals):
+        if item.event_id in replied_to:
+            headers[i] = f"[消息 {item.event_id}]" + headers[i]
 
     remaining = MAX_MERGED_CHARS
     sizes = {}
