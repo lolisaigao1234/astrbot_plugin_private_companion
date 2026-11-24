@@ -121,7 +121,8 @@ class TelegramGroupMediaTests(TelegramHostFixture, unittest.IsolatedAsyncioTestC
             event.created_at = self.clock.now().timestamp()
             return (await self.controller.session.receive(event, self.controller.settings.target("test-group"))).unwrap()
 
-        original = self.update(10, voice=dict(file_id="voice", file_unique_id="v1", duration=1),
+        original = self.update(10, reply_to_message=self.update(7, text="先前的原文").message.to_dict(),
+                               voice=dict(file_id="voice", file_unique_id="v1", duration=1),
                                caption="😀 guide", caption_entities=[
                                    dict(type="text_link", offset=3, length=5, url="https://example.org/guide")])
         with (patch("astrbot.core.platform.sources.telegram.tg_adapter.download_file", download),
@@ -129,6 +130,34 @@ class TelegramGroupMediaTests(TelegramHostFixture, unittest.IsolatedAsyncioTestC
             await receive(original)
             for number, extra in ((11, {}), (12, {"quote": dict(text="guide", position=3)})):
                 await receive(self.update(number, text="怎么看", reply_to_message=original.message.to_dict(), **extra))
+
+    async def test_provider_prompt_preserves_forward_and_discards_unavailable_quote(self):
+        import json
+        from astrbot.core.astr_main_agent import MainAgentBuildConfig, _process_quote_message, collect_initial_request
+        from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA, inject_core_reply_prompt
+        from astrbot_host.core_reply_mentions import restore_group_mentions
+
+        anonymous = self.update(8, text="匿名引用原文", sender_chat={"id": -400, "type": "group"}).message
+        for fields, marker in (
+            ({"forward_origin": {"type": "hidden_user", "sender_user_name": "原作者", "date": 1600000000}}, "[转发消息，来源：原作者]"),
+            ({"reply_to_message": anonymous.to_dict()}, "[引用消息不可用]"),
+        ):
+            update = self.update(12, text="看 @Synthetic_bot 正文", entities=[
+                dict(type="mention", offset=2, length=14)], **fields)
+            message = await self.platform.convert_message(update, NS(bot=self.platform.client))
+            event = self.platform.create_event(message)
+            event.created_at = self.clock.now().timestamp()
+            native = (await self.bridge.capture_text_only(event)).unwrap()
+            with patch("astrbot.core.astr_main_agent._get_session_conv", AsyncMock(return_value=NS(history="[]"))):
+                request, _ = await collect_initial_request(event, NS(), MainAgentBuildConfig(tool_call_timeout=5))
+                await _process_quote_message(event, request, "", NS())
+            event.set_extra(CORE_REPLY_CONTEXT_EXTRA, {"prepared": {"native_input": native}})
+            inject_core_reply_prompt(event, request)
+            restore_group_mentions(event, request, native, NS())
+            payload = json.dumps(await request.assemble_context(), ensure_ascii=False)
+            self.assertEqual(payload.count(marker), 1)
+            self.assertIn("看 <提及自己> 正文", payload)
+            self.assertNotIn("匿名引用原文", payload)
 
     async def test_caption_keeps_mention_link_and_photo(self):
         from companion_v2.conversation.group_timing import SELF_MENTION

@@ -792,19 +792,10 @@ def inject_core_reply_prompt(event: Any, req: Any) -> None:
 
     prepared = state.get("prepared")
     original = prepared.get("native_input") if isinstance(prepared, Mapping) else None
-    origin = getattr(original, "forward_origin", "")
-    markers = [f"[转发消息，来源：{origin}]"] if origin else []
-    for quote in getattr(original, "quotes", ()):
-        raw = getattr(getattr(getattr(event, "message_obj", None), "raw_message", None), "message", None)
-        if getattr(raw, "voice", None) and not any(
-                getattr(part.type, "value", part.type) == "Reply" for part in event.message_obj.message):
-            markers.append(quote.observation_text())
-        elif getattr(quote, "forward_origin", None):
-            markers.append(f"[引用消息 {quote.message_id}，{quote.forward_origin.attribution(quote.sender_id)}]")
-    if markers and isinstance(getattr(req, "prompt", None), str):
-        marker = "\n".join(markers) + "\n"
-        if not req.prompt.startswith(marker):
-            req.prompt = marker + req.prompt
+    from .core_reply_mentions import telegram_reference_prefix
+    marker = telegram_reference_prefix(event, original)
+    if marker and isinstance(getattr(req, "prompt", None), str) and not req.prompt.startswith(marker):
+        req.prompt = marker + req.prompt
     system_prompt = getattr(req, "system_prompt", "") or ""
     # AstrBot already constructs the selected persona and its example dialogs.
     # The captured native instruction is only an authorization fingerprint.
