@@ -129,16 +129,19 @@ class QuoteDescriptor:
             fields = {**data, "images": tuple(image_descriptor(i) for i in data["images"])}
             if "link_suffixes" in fields:
                 fields["link_suffixes"] = tuple(tuple(item) for item in fields["link_suffixes"])
+                if "self_mentions" in fields:
+                    fields["self_mentions"] = tuple(tuple(item) for item in fields["self_mentions"])
                 if "attachment" in fields:
                     fields["attachment"] = TelegramAttachmentQuote(**fields["attachment"])
                     if fields.get("forward_origin"):
                         fields["forward_origin"] = TelegramForwardOrigin(**fields["forward_origin"])
-                    return TelegramAttachmentDescriptor(**fields)
+                    kind = TelegramMentionedAttachmentDescriptor if "self_mentions" in fields else TelegramAttachmentDescriptor
+                    return kind(**fields)
                 if "forward_origin" in fields:
                     fields["forward_origin"] = TelegramForwardOrigin(**fields["forward_origin"])
-                    return TelegramForwardedQuoteDescriptor(**fields)
+                    kind = TelegramMentionedForwardDescriptor if "self_mentions" in fields else TelegramForwardedQuoteDescriptor
+                    return kind(**fields)
                 if "self_mentions" in fields:
-                    fields["self_mentions"] = tuple(tuple(item) for item in fields["self_mentions"])
                     return TelegramMentionQuoteDescriptor(**fields)
                 return TelegramLinkedQuoteDescriptor(**fields)
             return TelegramQuoteDescriptor(**fields)
@@ -177,6 +180,16 @@ class TelegramAttachmentDescriptor(TelegramLinkedQuoteDescriptor):
     attachment: TelegramAttachmentQuote
     forward_origin: TelegramForwardOrigin | None = None
     origin_resource_hash: str = ""
+
+
+@dataclass(frozen=True, kw_only=True)
+class TelegramMentionedAttachmentDescriptor(TelegramAttachmentDescriptor):
+    self_mentions: tuple
+
+
+@dataclass(frozen=True, kw_only=True)
+class TelegramMentionedForwardDescriptor(TelegramForwardedQuoteDescriptor):
+    self_mentions: tuple
 
 
 def event_forwards(event):
