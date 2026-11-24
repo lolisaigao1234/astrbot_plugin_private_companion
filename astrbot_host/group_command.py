@@ -151,7 +151,7 @@ async def receive_group_llm_command(controller, event, *, target=None):
     elif command.intent == "group_llm_status":
         text = _status_text(block.status(key))
     else:
-        if not telegram and not _core_sender(session, route, target, at=at):
+        if not _core_sender(session, route, target, at=at):
             text = "未执行：只有安装管理员可以更改本群 LLM 开关。"
         elif command.intent == "group_llm_block":
             value = block.block(key, operator=route.sender)

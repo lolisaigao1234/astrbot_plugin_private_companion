@@ -582,6 +582,11 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
         from companion_v2.execution.models import require
         platform, controller = self.platform, self.controller
         platform.client.get_chat_member = AsyncMock()
+        for status, text in (("administrator", "陪伴群 关闭LLM"), ("creator", "陪伴群 开启LLM")):
+            platform.client.get_chat_member.return_value = NS(user=NS(id=OWNER), status=status)
+            event = await group_event(platform, -100400, "supergroup", 23, text=text)
+            result = require(await receive_group_llm_command(controller, event))
+            self.assertIn("只有安装管理员", result["text"])
         authority = controller.authority
         context = authority.context("tg-owner", "role-tg")
         authority.provision_scope(authority.settings.target("tg-owner"), context.scope,
