@@ -100,19 +100,29 @@ def _bounded_sections(originals, budget=MAX_MERGED_CHARS):
         yield i, prefix + headers[i] + body
 
 
-async def bounded_file_component(event, locator, remaining):
+async def bounded_file_component(event, locator, remaining, preferences, scope):
     import aiohttp
+    import asyncio
     from pathlib import Path
     from tempfile import NamedTemporaryFile
-    from astrbot.core.message.components import File
+    from astrbot.core.message.components import File, Plain
+    from companion_v2.conversation.media.understanding import media_scope_enabled
     from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
     from companion_v2.adapters.astrbot.telegram_media import fetch_location
     from companion_v2.execution.models import TaskError
     from .media import fetch_attachment
 
     # SDK File.get_file would download the original without the burst's remaining cap.
+    if not preferences["file_understanding_enabled"] or not media_scope_enabled(preferences, "file_understanding", scope):
+        return Plain(f"[文件 {locator.name}：文件理解未启用，未读取正文]"), 0
+    if Path(locator.name).suffix.lower() not in preferences["file_understanding_allowed_suffixes"]:
+        return Plain(f"[文件 {locator.name}：文件格式暂不支持]"), 0
+    maximum_bytes = min(remaining, preferences["file_understanding_max_size_mb"] * 1024**2)
     try:
-        data = await fetch_attachment(fetch_location(locator), maximum_bytes=min(remaining, 16 * 1024 * 1024))
+        data = await asyncio.wait_for(fetch_attachment(fetch_location(locator), maximum_bytes=maximum_bytes),
+                                      preferences["file_understanding_timeout_seconds"])
+    except TimeoutError:
+        raise
     except (aiohttp.ClientError, OSError):
         raise TaskError("host_file_unavailable", "document could not be retrieved") from None
     directory = Path(get_astrbot_temp_path())
