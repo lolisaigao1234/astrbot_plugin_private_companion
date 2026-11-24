@@ -110,6 +110,26 @@ class TelegramGroupMediaTests(TelegramHostFixture, unittest.IsolatedAsyncioTestC
                     with self.subTest(message_id=number, partial=bool(quote)):
                         await receive(self.update(number + offset, text="怎么看", reply_to_message=original.message.to_dict(), **quote))
 
+    async def test_group_voice_caption_and_link_match_a_full_quote(self):
+        async def download(url, *, path):
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_bytes(audio_bytes())
+
+        async def receive(update):
+            converted = await self.platform.convert_message(update, NS(bot=self.platform.client))
+            event = self.platform.create_event(converted)
+            event.created_at = self.clock.now().timestamp()
+            return (await self.controller.session.receive(event, self.controller.settings.target("test-group"))).unwrap()
+
+        original = self.update(10, voice=dict(file_id="voice", file_unique_id="v1", duration=1),
+                               caption="😀 guide", caption_entities=[
+                                   dict(type="text_link", offset=3, length=5, url="https://example.org/guide")])
+        with (patch("astrbot.core.platform.sources.telegram.tg_adapter.download_file", download),
+              patch("astrbot_host.audio.loader.decode_audio", AsyncMock(side_effect=inspect_audio))):
+            await receive(original)
+            for number, extra in ((11, {}), (12, {"quote": dict(text="guide", position=3)})):
+                await receive(self.update(number, text="怎么看", reply_to_message=original.message.to_dict(), **extra))
+
     async def test_caption_keeps_mention_link_and_photo(self):
         from companion_v2.conversation.group_timing import SELF_MENTION
 
