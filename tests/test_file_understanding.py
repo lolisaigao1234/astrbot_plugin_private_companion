@@ -135,6 +135,25 @@ class FileUnderstandingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(limits, [7, 3])
                 self.assertIn("上限", rendered[2])
 
+    async def test_streamed_oversize_file_spends_allowance_but_header_rejection_does_not(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        locators = [NativeFileLocator(i, f"doc{i}.txt", "https://example.org/doc") for i in range(2)]
+        for declared_size, downloads in ((None, 1), (8, 2)):
+            with self.subTest(content_length=declared_size):
+                response = MagicMock(status=200, content_length=declared_size, headers={})
+                response.content.read = AsyncMock(side_effect=[b"1234567", b"8"])
+                session = MagicMock()
+                session.get.return_value.__aenter__.return_value = response
+                with patch("astrbot_host.media.aiohttp.ClientSession") as factory:
+                    factory.return_value.__aenter__.return_value = session
+                    result = await prepare_file_text(locators, load_native_file, settings({**DEFAULTS,
+                        "file_understanding_enabled": True, "file_understanding_private_enabled": True}),
+                        client=None, scope=ScopeKind.PRIVATE, byte_budget=7)
+                self.assertEqual(session.get.call_count, downloads)
+                self.assertEqual(response.content.read.await_count, 2 if declared_size is None else 0)
+                self.assertIn("上限", result[1])
+
     async def test_failed_extraction_debits_the_bytes_downloaded(self):
         from unittest.mock import patch
 

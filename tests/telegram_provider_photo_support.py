@@ -1,0 +1,57 @@
+"""Exercise quoted photos through AstrBot's Telegram converter and provider serializer."""
+
+import base64
+from types import SimpleNamespace as NS
+from unittest.mock import AsyncMock, patch
+
+from astrbot.core.astr_main_agent import MainAgentBuildConfig, _process_quote_message, collect_initial_request
+from astrbot.core.message.components import Image, Reply
+from telegram import PhotoSize
+from tests.test_conversation_images import image_bytes
+
+
+async def check_provider_photo_budget(case, make_event, target_id, sender):
+    direct = [image_bytes((i * 20, 5, 5)) for i in range(1, 9)]
+    quoted = image_bytes("blue")
+    photo = dict(file_id="direct", file_unique_id="d", width=3, height=2)
+    original = dict(photo=[dict(photo, file_id="quoted")], caption="original caption")
+
+    async def get_file(size, *args, **kwargs):
+        data = direct[0] if size.file_id == "direct" else quoted
+        return NS(file_path="base64://" + base64.b64encode(data).decode())
+
+    target = case.controller.settings.target(target_id)
+    bridge = case.controller.session.bridge
+    for count, spare, keep in ((8, len(quoted), False), (2, 1, False),
+                               (1, 0, False), (1, len(quoted), True)):
+        with case.subTest(count=count, spare=spare):
+            fields = dict(photo=[photo], caption="current caption")
+            if count > 1:
+                fields["media_group_id"] = "album"
+            with patch.object(PhotoSize, "get_file", get_file):
+                event = await make_event(fields, original)
+            nickname = next(part.sender_nickname for part in event.message_obj.message if isinstance(part, Reply))
+            event.message_obj.message.extend(Image.fromBytes(data) for data in direct[1:count])
+            budget = sum(map(len, direct[:count])) + spare
+            loader = AsyncMock(wraps=bridge.image_loader)
+            with patch.object(bridge, "image_loader", loader), patch(
+                    "companion_v2.conversation.media.models.MAX_TURN_BYTES", budget):
+                prepared = (await case.controller.session.prepare_core_reply(event, target)).unwrap()
+            quote, = prepared["native_input"].quotes
+            case.assertEqual(quote.sender_id, str(sender))
+            case.assertIn("original caption", quote.text)
+            with patch("astrbot.core.astr_main_agent._get_session_conv", AsyncMock(return_value=NS(history="[]"))):
+                request, ref = await collect_initial_request(event, NS(), MainAgentBuildConfig(tool_call_timeout=30))
+                await _process_quote_message(event, request, "", NS(), image_ref=ref)
+                payload = await request.assemble_context()
+            images = [base64.b64decode(part["image_url"]["url"].split(",")[1])
+                      for part in payload["content"] if part["type"] == "image_url"]
+            case.assertEqual(images, direct[:count] + ([quoted] if keep else []))
+            text = "\n".join(part["text"] for part in payload["content"] if part["type"] == "text")
+            case.assertIn("current caption", text)
+            case.assertIn("original caption", text)
+            case.assertIn(f"({nickname}):", text)
+            limits = [budget - sum(map(len, direct[:i])) for i in range(count)]
+            if count < 8 and spare:
+                limits.append(spare)
+            case.assertEqual([call.kwargs["maximum_bytes"] for call in loader.await_args_list], limits)

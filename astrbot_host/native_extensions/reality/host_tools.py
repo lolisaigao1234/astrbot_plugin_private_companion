@@ -13,8 +13,17 @@ from companion_v2.storage.models import OperationState
 from companion_v2.storage.repositories import OperationRepository
 
 
+def sender_text(event):
+    if getattr(getattr(event, "platform_meta", None), "name", None) == "telegram":
+        raw = getattr(getattr(event.message_obj, "raw_message", None), "message", None)
+        if raw is None or getattr(raw, "forward_origin", None) is not None:
+            return ""
+        return getattr(raw, "text", None) or getattr(raw, "caption", None) or ""
+    return str(getattr(event, "message_str", "") or "")
+
+
 def private_command(event):
-    text = str(getattr(event, "message_str", "") or "").strip()
+    text = sender_text(event).strip()
     match = re.fullmatch(r"(?:陪伴\s*)?现实触及(?:\s+(.*))?", text, re.S)
     if match:
         return match.group(1) or "状态"
@@ -23,7 +32,7 @@ def private_command(event):
 
 
 def private_management_requested(event):
-    text = str(getattr(event, "message_str", "") or "")
+    text = sender_text(event)
     return bool(re.search(r"(?:起床|叫醒|现实触及|本机语音|音箱|音响|蓝牙)", text))
 
 
@@ -54,7 +63,7 @@ class RealityAudioCommandTool(FunctionTool):
             user = runtime._user(user_id)
             user["umo"] = str(self.event.unified_msg_origin)
             if self.command == "__confirm__":
-                reply = runtime.extension_api.apply_pending_confirmation(user_id, str(self.event.message_str))
+                reply = runtime.extension_api.apply_pending_confirmation(user_id, sender_text(self.event))
                 reply = reply or "请先发送“陪伴 现实触及 授权”阅读本次设备能力的风险说明，再确认。"
                 play = False
             else:
