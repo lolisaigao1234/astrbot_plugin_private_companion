@@ -103,7 +103,7 @@ async def send_group_notice(controller, route, *, text, mention_id="", transport
             chain = [At(qq=mention), Plain(" ")] if mention else []
             chain.append(Plain(str(text)))
             session = MessageSession(route.platform_id, MessageType.GROUP_MESSAGE, peer)
-            with redact_telegram_token(lease.client if platform_name == "telegram" else None):
+            with redact_telegram_token(platform.get_client() if platform_name == "telegram" else None):
                 accepted = await platform.send_by_session(session, MessageChain(chain=chain))
             if platform_name == "telegram" and accepted is False:
                 return {"state": "failed", "reason": "platform_call_failed"}
@@ -158,7 +158,7 @@ async def send_private_notice(controller, event, *, text, route, transport=None)
             lease = connections.acquire(lease.account_key)
             platform = lease.platform
         session = MessageSession(route.platform_id, MessageType.FRIEND_MESSAGE, peer)
-        with redact_telegram_token(lease.client if platform_name == "telegram" else None):
+        with redact_telegram_token(platform.get_client() if platform_name == "telegram" else None):
             accepted = await platform.send_by_session(session, MessageChain(chain=[Plain(str(text))]))
         if platform_name == "telegram" and accepted is False:
             return {"state": "failed", "reason": "platform_call_failed"}
