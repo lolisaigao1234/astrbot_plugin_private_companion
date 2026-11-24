@@ -1181,6 +1181,9 @@ class NativePrivateBridge:
                             self.platform(scope), event_client):
                     raise TaskError("host_image_owner_changed", "original image sender or client changed")
                 self.client(scope)
+            if telegram and telegram.quote and not any(getattr(part.type, "value", part.type) == "Reply" for part in parts):
+                # The SDK replaces a voice reply's chain with Record, losing the reply marker.
+                text = "\n[引用消息]\n" + text
             if telegram and telegram.forward_origin:
                 forward = telegram.capture_forward(event_id, safe_text(event, text), images, audios, videos)
                 self._check_shared_forwards((forward,), quotes, intake, "Telegram forward exceeds intake budget")

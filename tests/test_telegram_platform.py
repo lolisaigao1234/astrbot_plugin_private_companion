@@ -255,6 +255,16 @@ class TelegramHostFixture(MultiFixture):
         if plugin._host_start_task is not None:
             await asyncio.wait_for(plugin._host_start_task, timeout=20)
 
+    def enable_typing(self, interval=1):
+        from astrbot_host.management_identity import dashboard_operator
+        from companion_v2.role_work.state.management import StateManagement
+        manager = StateManagement(self.app, self.context)
+        operator = dashboard_operator(self.app.runtime, "synthetic", at=self.clock.now())
+        status = manager.status(operator).unwrap()
+        manager.command(operator, dict(action="configure", operation_key="typing-on",
+            edit_token=status["edit_token"], role_edit_token=status["role_edit_token"],
+            changes={"typing_enabled": True, "typing_refresh_seconds": interval})).unwrap()
+
 
 class TelegramIntakeLifecycleTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
     async def test_refused_windows_during_startup_and_restart(self):
@@ -322,16 +332,6 @@ class TelegramPresenceTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
         record, = logs.records
         self.assertIn("/bot[redacted]/sendChatAction", record.getMessage())
         self.assertNotIn(bot.token, repr(vars(record)))
-
-    def enable_typing(self, interval=1):
-        from astrbot_host.management_identity import dashboard_operator
-        from companion_v2.role_work.state.management import StateManagement
-        manager = StateManagement(self.app, self.context)
-        operator = dashboard_operator(self.app.runtime, "synthetic", at=self.clock.now())
-        status = manager.status(operator).unwrap()
-        manager.command(operator, dict(action="configure", operation_key="typing-on",
-            edit_token=status["edit_token"], role_edit_token=status["role_edit_token"],
-            changes={"typing_enabled": True, "typing_refresh_seconds": interval})).unwrap()
 
     async def run_to_host_waiting_hook(self, number, *, peer=OWNER):
         from astrbot.core.pipeline.process_stage.method.agent_sub_stages import internal
@@ -604,23 +604,24 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
                 self.assertEqual((receipt.status, receipt.failure_code), ("not_sent", reason))
                 self.assertNotIn(token, " ".join(logs.output))
 
-    async def test_chat_action_warning_redacts_the_bot_token(self):
+    async def test_delivery_markdown_fallback_warning_redacts_the_bot_token(self):
         token = self.platform.client.token
-        self.platform.client.send_chat_action.side_effect = InvalidToken(token)
-        self.platform.client.send_message.side_effect = InvalidToken(token)
+        self.platform.client.send_message.side_effect = [
+            BadRequest(f"can't parse entities: {token}"), InvalidToken(token),
+        ]
         with self.assertLogs("astrbot", level="WARNING") as host_logs:
             receipt = await self.send()
         self.assertEqual((receipt.status, receipt.failure_code), ("not_sent", "telegram_invalid_token"))
         self.assertNotIn(token, " ".join(host_logs.output))
         self.assertIn("[redacted]", " ".join(host_logs.output))
 
-    async def test_private_notice_redacts_host_chat_action_warning(self):
+    async def test_private_notice_redacts_markdown_fallback_warning(self):
         from astrbot_host.private_notice import send_private_notice
 
         event = telegram_event(self.platform)
         route = authenticate_notice_route(self.controller, event, ScopeKind.PRIVATE, expected_post="message")
         token = self.platform.client.token
-        self.platform.client.send_chat_action.side_effect = InvalidToken(token)
+        self.platform.client.send_message.side_effect = [BadRequest(f"can't parse entities: {token}"), None]
         with self.assertLogs("astrbot", level="WARNING") as logs:
             receipt = await send_private_notice(self.controller, event, text="验证", route=route)
         self.assertEqual(receipt["state"], "delivered")
@@ -632,12 +633,12 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
 
         event = telegram_event(self.platform)
         token = self.platform.client.token
-        self.platform.client.send_chat_action.side_effect = InvalidToken(token)
+        self.platform.client.send_message.side_effect = [BadRequest(f"can't parse entities: {token}"), None]
         with self.assertLogs("astrbot", level="WARNING") as logs:
             receipt = await _send_private(self.controller, event, platform_id="tg-main",
                                           login="tg-main", peer=str(OWNER), text="送达回执")
         self.assertEqual(receipt["state"], "delivered")
-        self.platform.client.send_message.assert_awaited_once()
+        self.assertEqual(self.platform.client.send_message.await_count, 2)
         self.assertNotIn(token, " ".join(logs.output))
 
     async def test_httpx_logs_redact_delivery_notice_and_relay_requests(self):
@@ -654,13 +655,9 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
             return httpx.Response(200)
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
-            async def chat_action(*args, **kwargs):
-                await http.post(f"https://telegram.invalid/bot{token}/sendChatAction")
-
             async def message(*args, **kwargs):
                 await http.post(f"https://telegram.invalid/bot{token}/sendMessage")
 
-            self.platform.client.send_chat_action.side_effect = chat_action
             self.platform.client.send_message.side_effect = message
             with self.assertLogs("httpx", "INFO") as logs:
                 self.assertEqual((await self.send()).status, "delivered")
@@ -669,7 +666,8 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
                                             login="tg-main", peer=str(OWNER), text="回执")
                 self.assertEqual((notice["state"], relay["state"]), ("delivered", "delivered"))
 
-        methods = ["sendChatAction", "sendMessage"] * 3
+        self.platform.client.send_chat_action.assert_not_awaited()
+        methods = ["sendMessage"] * 3
         self.assertEqual(paths, [f"/bot{token}/{method}" for method in methods])
         self.assertEqual(len(logs.records), len(methods))
         for record, method in zip(logs.records, methods):
