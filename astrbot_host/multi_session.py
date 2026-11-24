@@ -256,6 +256,7 @@ class MultiPrivateBridge(NativePrivateBridge):
                 counts[kind] += 1
                 replacements[position] = replacement
             except TaskError as exc:
+                remaining = max(0, remaining - getattr(exc, "bytes_read", 0))
                 replacements[position] = Plain(limited if exc.code.endswith("_limit") else "[附件不可用]")
         notes = list(dict.fromkeys(part.text for part in replacements.values() if isinstance(part, Plain)))
         message.message = [replacements.get(position, part) for position, part in enumerate(message.message)]

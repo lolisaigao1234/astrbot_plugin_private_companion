@@ -57,7 +57,7 @@ def file_locator(position, part):
 
 
 class FileExtractionError(TaskError):
-    """The file was read successfully but its text could not be extracted."""
+    """Document intake failed after consuming part of the read allowance."""
 
     def __init__(self, code, bytes_read):
         super().__init__(code, "document extraction failed")
