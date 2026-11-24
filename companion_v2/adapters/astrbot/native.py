@@ -1168,7 +1168,7 @@ class NativePrivateBridge:
                     client=event_client, scope=scope, payload_budget=65536 - sum(map(len, text_parts)),
                     byte_budget=remaining_file_budget(telegram, images, audios, videos, quotes))
                 text = "".join(file_text.get(position, part) for position, part in enumerate(text_parts))
-            if telegram and (telegram_caption or frozen_files):
+            if telegram and (partial_media or frozen_files):
                 text = telegram.quote_availability(text)
             if frozen_images or frozen_quotes or frozen_forwards or frozen_audios or frozen_videos or frozen_files or quotes:
                 # Network/media preparation is outside SQLite; recheck the role,
