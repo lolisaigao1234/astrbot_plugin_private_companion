@@ -173,7 +173,7 @@ async def process_private_receipts(controller, event, target):
             reply_to = (original.message_id if original.chat.id == raw.chat.id else -1)
         permission_tasks, reply_tasks = await asyncio.to_thread(
             claim_telegram_receipt, controller.runtime, account, target_user_id,
-            getattr(raw, "message_id", None), reply_to=reply_to)
+            getattr(raw, "message_id", None), reply_to=reply_to, permission_answer=confirmed or rejected)
     settled_permission: set[str] = set()
     in_flight_permission: str | None = None
     in_flight_permission_state = "failed"
@@ -216,6 +216,7 @@ async def process_private_receipts(controller, event, target):
     in_flight_report: str | None = None
     in_flight_report_state = "failed"
     in_flight_ask: str | None = None
+    prompt_id = None
     try:
         for task in reply_tasks:
             task_id = task["id"]
@@ -231,7 +232,8 @@ async def process_private_receipts(controller, event, target):
                 elif asked.get("state") == "delivered":
                     in_flight_report = None
                     in_flight_ask = task_id
-                    await asyncio.to_thread(mark_waiting_permission, controller.runtime, task_id, text, asked.get("message_id"))
+                    prompt_id = asked.get("message_id")
+                    await asyncio.to_thread(mark_waiting_permission, controller.runtime, task_id, text, prompt_id)
                 else:
                     in_flight_report = None
                     await asyncio.to_thread(requeue, controller.runtime, task_id, state="waiting_reply")
@@ -255,7 +257,7 @@ async def process_private_receipts(controller, event, target):
                 if task_id == in_flight_report:
                     finish(controller.runtime, task_id, in_flight_report_state)
                 elif task_id == in_flight_ask:
-                    mark_waiting_permission(controller.runtime, task_id, text)
+                    mark_waiting_permission(controller.runtime, task_id, text, prompt_id)
                 else:
                     requeue(controller.runtime, task_id, state="waiting_reply")
             except Exception:

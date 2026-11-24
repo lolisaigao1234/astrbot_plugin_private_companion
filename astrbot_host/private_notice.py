@@ -186,6 +186,8 @@ async def send_private_notice(controller, event, *, text, route, transport=None,
             if require_message_id and platform_name == "telegram":
                 sent = await platform.get_client().send_message(chat_id=int(peer), text=str(text))
                 identifier = getattr(sent, "message_id", None)
+                if type(identifier) is not int or identifier <= 0:
+                    return {"state": "unknown", "reason": "missing_prompt_message_id"}
                 return {"state": "delivered", "message_id": identifier}
             accepted = await send_private_session(platform, session, dispatched)
         if platform_name == "telegram" and accepted is False:

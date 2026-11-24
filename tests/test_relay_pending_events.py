@@ -64,12 +64,12 @@ class RelayPendingEventTests(unittest.IsolatedAsyncioTestCase):
         task = {"kind": "private_receipt", "state": "waiting_permission", "target_user_id": "peer",
                 "telegram_account": account, "expires_at": time.time() + 60}
         for message_id in (127, 63, 126, 64):
-            task_id = add_task(self.runtime, task)
-            permission, replies = claim_telegram_receipt(self.runtime, account, "peer", message_id)
+            task_id = add_task(self.runtime, {**task, "prompt_message_id": message_id - 2})
+            permission, replies = claim_telegram_receipt(self.runtime, account, "peer", message_id, reply_to=message_id - 2, permission_answer=True)
             self.assertEqual([record["id"] for record in permission], [task_id])
             self.assertEqual(replies, [])
             for seen in (127, message_id):
-                self.assertEqual(claim_telegram_receipt(self.runtime, account, "peer", seen), ([], []))
+                self.assertEqual(claim_telegram_receipt(self.runtime, account, "peer", seen, reply_to=seen - 2, permission_answer=True), ([], []))
 
     def test_telegram_receipt_keeps_legacy_replay_boundary(self):
         account = ["telegram", "main"]

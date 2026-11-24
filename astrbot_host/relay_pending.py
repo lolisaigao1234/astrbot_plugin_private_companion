@@ -145,7 +145,7 @@ def claim_private_receipts(runtime, target_user_id, now=None, *, permission=Fals
         return claimed
 
 
-def claim_telegram_receipt(runtime, account, user_id, message_id, *, reply_to=None):
+def claim_telegram_receipt(runtime, account, user_id, message_id, *, reply_to=None, permission_answer=False):
     """One native private message can advance one receipt, including after restart."""
     if type(message_id) is not int or message_id <= 0:
         return [], []
@@ -170,12 +170,11 @@ def claim_telegram_receipt(runtime, account, user_id, message_id, *, reply_to=No
         _prune(data, now)
         prompts = _waiting_receipts(data, user_id, account, now, "waiting_permission")
         permission, replies = [], []
-        if prompts:
-            if reply_to is not None:
-                prompts = [task for task in prompts if task.get("prompt_message_id") == reply_to]
-            if len(prompts) == 1 and message_id > (prompts[0].get("prompt_message_id") or 0):
-                permission = _claim_receipt(prompts)
-        else:
+        matches = [task for task in prompts if reply_to is not None and task.get("prompt_message_id") == reply_to]
+        if matches:
+            if len(matches) == 1 and type(reply_to) is int and 0 < reply_to < message_id and permission_answer:
+                permission = _claim_receipt(matches)
+        elif not (prompts and permission_answer):
             replies = _claim_receipt(_waiting_receipts(data, user_id, account, now, "waiting_reply"))
         _write(connection, data)
         return permission, replies
