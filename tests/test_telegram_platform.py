@@ -1364,12 +1364,13 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
     async def test_private_relay_unknown_prompt_and_report_are_terminal(self):
         from astrbot_host.relay_pending import _read
         target = self.controller.settings.target("tg-owner")
+        message_ids = iter(range(1, 7))
         for state, confirm in (("waiting_reply", True), ("waiting_permission", True), ("waiting_reply", False)):
             with self.subTest(state=state, confirm=confirm):
                 task_id = self.private_relay_task(state, confirm)
                 self.platform.client.send_message.side_effect = TimeoutError()
-                for number in (1, 2):
-                    event = telegram_event(self.platform, number, "可以")
+                for _ in range(2):
+                    event = telegram_event(self.platform, next(message_ids), "可以")
                     await self.controller.process_private_relay_receipts(event, target)
                 self.assertEqual(_read(self.controller.runtime)["tasks"][task_id]["state"], "unknown")
                 self.platform.client.send_message.assert_awaited_once()
@@ -1383,13 +1384,13 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
         raw = event.message_obj.raw_message.message
         with raw._unfrozen():
             raw.forward_origin = MessageOriginHiddenUser(raw.date, "Synthetic")
-        for confirm in (False, True):
+        for answer_id, confirm in ((2, False), (3, True)):
             with self.subTest(confirm=confirm):
                 task_id = self.private_relay_task("waiting_reply", confirm)
                 await self.controller.process_private_relay_receipts(event, target)
                 self.platform.client.send_message.assert_not_awaited()
                 self.assertEqual(_read(self.controller.runtime)["tasks"][task_id]["state"], "waiting_reply")
-                await self.controller.process_private_relay_receipts(telegram_event(self.platform, 2, "my answer"), target)
+                await self.controller.process_private_relay_receipts(telegram_event(self.platform, answer_id, "my answer"), target)
                 self.platform.client.send_message.assert_awaited_once()
                 self.platform.client.send_message.reset_mock()
                 task = _read(self.controller.runtime)["tasks"][task_id]
