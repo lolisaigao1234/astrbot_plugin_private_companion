@@ -412,7 +412,7 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
     async def test_voice_reply_preserves_caption_and_quote_through_provider_and_replay(self):
         from pathlib import Path
         from telegram import Voice
-        from astrbot.core.astr_main_agent import _process_quote_message, collect_initial_request
+        from astrbot.core.astr_main_agent import MainAgentBuildConfig, _process_quote_message, collect_initial_request
         from astrbot.core.message.components import Record
         from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
         from astrbot_host.audio.loader import load_native_audio
@@ -451,7 +451,7 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
                 core = require(await self.bridge.capture_core_reply(event))
                 self.assertEqual(core.text.count(caption), 1)
                 with patch("astrbot.core.astr_main_agent._get_session_conv", AsyncMock(return_value=NS(history="[]"))):
-                    request, _ = await collect_initial_request(event, NS(), NS(provider_wake_prefix="", provider_settings={}))
+                    request, _ = await collect_initial_request(event, NS(), MainAgentBuildConfig(tool_call_timeout=5))
                     await _process_quote_message(event, request, "", NS())
                 from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA, inject_core_reply_prompt
                 event.set_extra(CORE_REPLY_CONTEXT_EXTRA, {"prepared": {"native_input": core}})
