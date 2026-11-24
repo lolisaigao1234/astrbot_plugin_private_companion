@@ -15,7 +15,7 @@ from companion_v2.conversation.media.audio.models import AudioDescriptor, Captur
 from companion_v2.conversation.media.models import MAX_IMAGE_BYTES
 from companion_v2.adapters.astrbot.telegram_media import fetch_location
 from companion_v2.execution.models import TaskError
-from ..media import fetch_image as fetch_public_attachment
+from ..media import AttachmentReadError, account_for_decode, fetch_image as fetch_public_attachment
 
 
 DECODE_TIMEOUT = 8
@@ -100,7 +100,8 @@ def _read_temp_record(value, maximum_bytes):
 
 async def load_native_audio(locator, *, maximum_bytes=MAX_AUDIO_BYTES):
     content = await fetch_native_audio_bytes(locator, maximum_bytes=maximum_bytes)
-    return await decode_audio(content, locator.position)
+    with account_for_decode(content):
+        return await decode_audio(content, locator.position)
 
 
 async def fetch_native_audio_bytes(locator, *, maximum_bytes):
@@ -122,11 +123,12 @@ async def fetch_native_audio_bytes(locator, *, maximum_bytes):
             assert MAX_AUDIO_BYTES == MAX_IMAGE_BYTES
             content = await fetch_public_attachment(value, maximum_bytes=maximum_bytes)
         if len(content) > maximum_bytes:
-            raise TaskError("host_audio_limit", "voice exceeds remaining capacity")
+            raise AttachmentReadError("host_audio_limit", "voice exceeds remaining capacity", len(content))
         return content
     except TaskError as error:
         if error.code.startswith("host_image_"):
-            raise TaskError(error.code.replace("host_image_", "host_audio_", 1), "original voice attachment is unavailable") from None
+            raise AttachmentReadError(error.code.replace("host_image_", "host_audio_", 1),
+                                      "original voice attachment is unavailable", getattr(error, "bytes_read", 0)) from None
         raise
     except Exception:
         raise TaskError("host_audio_fetch_failed", "original voice could not be prepared") from None

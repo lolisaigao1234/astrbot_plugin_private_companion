@@ -51,6 +51,17 @@ class TelegramOfflineDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncio
         self.sender = AstrBotPlatformSender(self.controller.session.bridge, binding=self.binding,
             version="4.29.4", reverse_api_type=object, authorize=lambda: None)
 
+    async def test_managed_send_preserves_photo_and_voice_upload_actions(self):
+        from telegram.constants import ChatAction
+        from companion_v2.adapters.astrbot.telegram_send import _DeliveryClient
+
+        client = _DeliveryClient(self.bot)
+        for action in (ChatAction.TYPING, ChatAction.UPLOAD_PHOTO, ChatAction.UPLOAD_VOICE):
+            self.assertTrue(await client.send_chat_action(OWNER, action))
+        actions = [parse_qs(body.decode()) for method, body in self.requests if method == "sendChatAction"]
+        self.assertEqual([(item["chat_id"], item["action"]) for item in actions], [
+            ([str(OWNER)], ["upload_photo"]), ([str(OWNER)], ["upload_voice"])])
+
     async def background_send(self, text):
         envelope = DeliveryEnvelope("part-offline", "op-offline", self.context, 1, text, digest(text),
                                     self.binding, before_dispatch=lambda: True)

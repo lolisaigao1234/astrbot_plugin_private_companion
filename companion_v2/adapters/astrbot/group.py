@@ -651,11 +651,13 @@ class NativeGroupBridge(NativePrivateBridge):
             from companion_v2.conversation.media.understanding import settings as understanding_settings
             file_preferences = understanding_settings(self.file_settings(scope, role) if self.file_settings else {})
 
+            from .telegram_media import TelegramReadBudget, capture_turn_media
+            budget = TelegramReadBudget() if telegram is not None else None
+
             async def prepare():
                 if telegram is not None:
-                    from .telegram_media import capture_turn_media
                     return await capture_turn_media(self, telegram, frozen_images, frozen_audios, frozen_videos,
-                                                    text_parts, partial_media)
+                                                    text_parts, partial_media, budget)
                 images = await self._capture_images(frozen_images)
                 quotes = []
                 for locator in frozen_quotes:
@@ -726,10 +728,9 @@ class NativeGroupBridge(NativePrivateBridge):
             if partial_media:
                 text = "".join(text_parts)
             if frozen_files:
-                from .telegram_media import remaining_file_budget
                 file_text = await prepare_file_text(frozen_files, self.file_loader, file_preferences,
                     client=event_client, scope=scope, payload_budget=65536 - sum(map(len, text_parts)),
-                    byte_budget=remaining_file_budget(telegram, images, audios, videos, quotes))
+                    byte_budget=budget.remaining if budget else None)
                 text = "".join(file_text.get(position, part) for position, part in enumerate(text_parts))
             if frozen_images or frozen_quotes or frozen_forwards or frozen_audios or frozen_videos or frozen_files or quotes:
                 if await self._role(account, route.session_id) != (cid, role, instruction):
