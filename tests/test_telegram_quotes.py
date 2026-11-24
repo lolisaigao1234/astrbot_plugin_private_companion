@@ -9,9 +9,9 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from tests.test_telegram_platform import OWNER, TelegramHostFixture
-from telegram import PhotoSize, Update
+from telegram import Document, PhotoSize, Update
 from astrbot.core.platform.sources.telegram.tg_event import TelegramPlatformEvent
-from astrbot.core.message.components import Image, Reply
+from astrbot.core.message.components import File, Image, Reply
 from companion_v2.execution.models import require
 from astrbot_host.media import load_native_image
 
@@ -109,6 +109,20 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
                 self.assertIn("继续", result.text)
                 self.assertNotIn("不可见", result.text)
                 self.assertFalse(result.quotes)
+
+    async def test_unavailable_quote_keeps_the_document_and_its_caption(self):
+        self.bridge.file_type = File
+        self.bridge.file_settings = lambda *_: {"file_understanding_enabled": False}
+        self.bridge.file_loader = AsyncMock()
+        original = self.message(10, chat={"type": "private", "id": OWNER + 1}, text="不可见")
+        with patch.object(Document, "get_file", new=AsyncMock(return_value=NS(file_path="https://example.org/demo"))):
+            event = await self.event(reply_to_message=original, caption="这是说明",
+                                     document={"file_id": "doc", "file_unique_id": "d", "file_name": "demo.txt"})
+        result = require(await self.bridge.capture(event))
+        self.assertIn("引用消息不可用", result.text)
+        self.assertIn("demo.txt", result.text)
+        self.assertIn("这是说明", result.text)
+        self.assertFalse(result.quotes)
 
     async def test_each_forward_origin_is_preserved_in_the_observation(self):
         from astrbot_host.core_reply_forwards import private_debounce_input
