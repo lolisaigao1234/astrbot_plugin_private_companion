@@ -18,6 +18,14 @@ from astrbot_host.media import load_native_image
 
 
 class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
+    def test_non_photo_attachments_share_the_budget_with_a_quoted_photo(self):
+        from astrbot.core.message.components import File, Record, Video
+        reply = Reply(id="10", chain=[Image.fromBytes(b"quoted")])
+        for attachment in (File(name="note.txt", file="note.txt"), Record(file="voice.wav"), Video(file="clip.mp4")):
+            with self.subTest(kind=type(attachment).__name__):
+                event = NS(message_obj=NS(message=[reply, attachment]))
+                self.assertTrue(self.controller.session.bridge.has_attachment_and_quoted_photo(event))
+
     async def test_provider_photo_budget(self):
         from tests.telegram_provider_photo_support import check_provider_photo_budget
 
