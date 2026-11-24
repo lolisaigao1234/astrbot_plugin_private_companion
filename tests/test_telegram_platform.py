@@ -144,6 +144,24 @@ async def forum_reply_event(platform, *, topic_root):
 
 
 class TelegramGroupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_refused_quoted_group_text_preserves_delivery_certainty(self):
+        from astrbot.core.message.components import Reply
+        from astrbot.core.message.message_event_result import MessageChain
+        from companion_v2.adapters.astrbot.platform_sender import _telegram_refusal
+        from companion_v2.adapters.astrbot.telegram_wire import send_optional_reply
+
+        for text, responses, expected in (
+            ("短消息", [Forbidden("forbidden")], "telegram_forbidden"),
+            ("a" * 4100, [None, Forbidden("forbidden")], None),
+        ):
+            with self.subTest(length=len(text)):
+                client = NS(send_message=AsyncMock(side_effect=responses), send_chat_action=AsyncMock())
+                chain = MessageChain(chain=[Reply(id="22"), Plain(text)])
+                with self.assertRaises(Forbidden) as refused:
+                    await send_optional_reply(client, chain, "-400#23")
+                self.assertEqual(_telegram_refusal(refused.exception, chain), expected)
+                self.assertEqual(client.send_message.await_count, len(responses))
+
     async def test_delayed_mention_redacts_httpx_membership_request(self):
         from companion_v2.adapters.astrbot.telegram_wire import member_usernames
 
