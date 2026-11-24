@@ -707,6 +707,10 @@ class RelayToolPort:
             runtime = self._app().runtime
             if invocation.before_dispatch is not None:
                 invocation.before_dispatch()
+            signature = digest(["relay-group-wait", invocation.context.key,
+                                plan.destination_id, plan.mention_id, plan.text])
+            if telegram_account is not None:
+                signature = digest(["telegram-group-wait", operation_id])
             # Publish the queue entry and its outbox reference in one transaction.
             with runtime.transaction():
                 task_id = add_task(runtime, {
@@ -718,8 +722,7 @@ class RelayToolPort:
                     "source_user": invocation.context.actor.principal.native_account_id,
                     "operation_id": operation_id,
                     "expires_at": time() + 24 * 3600,
-                    "signature": digest(["relay-group-wait", invocation.context.key,
-                                         plan.destination_id, plan.mention_id, plan.text]),
+                    "signature": signature,
                 })
                 receipt_ref = "relay-scheduled:" + task_id
                 require(operations.transition_outbox(operation_id, part_id,

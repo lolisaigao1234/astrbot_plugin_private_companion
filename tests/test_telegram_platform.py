@@ -1436,6 +1436,39 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
         self.assertEqual(_read(self.controller.runtime)["tasks"][third]["state"], "waiting_permission")
         self.platform.client.send_message.assert_awaited_once()
 
+    async def test_private_receipt_consent_selects_the_replied_to_prompt(self):
+        from astrbot_host.relay_pending import _read
+
+        target = self.controller.settings.target("tg-owner")
+        receive = self.controller.process_private_relay_receipts
+        first = self.private_relay_task("waiting_reply", True)
+        self.platform.client.send_message.return_value = NS(message_id=100)
+        await receive(telegram_event(self.platform, 90, "first answer"), target)
+        self.assertEqual(_read(self.controller.runtime)["tasks"][first]["prompt_message_id"], 100)
+        second = self.private_relay_task("waiting_permission", True)
+        from astrbot_host.relay_pending import mark_waiting_permission
+        mark_waiting_permission(self.controller.runtime, second, "second answer", 103)
+        self.platform.client.send_message.reset_mock()
+        await receive(telegram_event(self.platform, 107, "可以"), target)
+        self.platform.client.send_message.assert_not_awaited()
+
+        def answer(message_id, prompt_id):
+            event = telegram_event(self.platform, message_id, "可以")
+            raw = event.message_obj.raw_message.message
+            with raw._unfrozen():
+                raw.reply_to_message = Message(prompt_id, raw.date, raw.chat, text="permission")
+            return event
+
+        await receive(answer(106, 105), target)
+        self.platform.client.send_message.assert_not_awaited()
+        allowed = answer(104, 103)
+        await receive(allowed, target)
+        await receive(allowed, target)
+        self.platform.client.send_message.assert_awaited_once()
+        tasks = _read(self.controller.runtime)["tasks"]
+        self.assertEqual((tasks[first]["state"], tasks[second]["state"]), ("waiting_permission", "reported"))
+        self.assertIn("second answer", self.platform.client.send_message.await_args.kwargs["text"])
+
     async def test_only_direct_telegram_words_can_grant_private_relay_permission(self):
         from telegram import MessageOriginHiddenUser
         from astrbot_host.relay_pending import _read

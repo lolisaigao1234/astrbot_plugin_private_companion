@@ -201,6 +201,15 @@ class TelegramAdministrationTests(unittest.IsolatedAsyncioTestCase):
                 proposed = await invoke("relay_message", args)
                 self.assertEqual(json.loads(proposed.source.payload)["state"], expected)
                 platform.client.send_message.assert_awaited_once()
+                if expected == "unknown":
+                    fixture.current_input = dict(event_id="new-request", observed_at=NOW.isoformat())
+                    fresh = json.loads((await invoke("relay_message", args)).source.payload)
+                    self.assertNotEqual(fresh["operation_id"], send_args["operation_id"])
+                    fixture.current_input = dict(event_id="new-confirm", observed_at=(NOW + timedelta(seconds=2)).isoformat())
+                    queued = await invoke(SEND_ACTION, dict(args, confirmed=True, operation_id=fresh["operation_id"]))
+                    from astrbot_host.relay_pending import scheduled_state
+                    task_id = json.loads(queued.source.payload)["task_id"]
+                    self.assertEqual(scheduled_state(fixture.runtime, task_id), "scheduled")
                 platform.client.send_message.reset_mock()
 
     async def test_delayed_mention_timeout_stays_unknown_on_replay(self):

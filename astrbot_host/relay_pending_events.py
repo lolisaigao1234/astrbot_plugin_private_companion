@@ -54,11 +54,11 @@ def _route(event, controller, *, kind, platform_id, login, peer):
     )
 
 
-async def _send_private(controller, event, *, platform_id, login, peer, text):
+async def _send_private(controller, event, *, platform_id, login, peer, text, require_message_id=False):
     route = _route(event, controller, kind=ScopeKind.PRIVATE, platform_id=platform_id, login=login, peer=peer)
     transport = prepare_relay_transport(controller, route)
     return await send_private_notice(controller, None, text=text,
-                                     route=route, transport=transport)
+                                     route=route, transport=transport, require_message_id=require_message_id)
 
 
 async def _send_group(controller, event, *, platform_id, login, peer, text, mention_id=""):
@@ -142,10 +142,11 @@ async def _report_receipt(controller, event, target, task, reply_text):
 
 
 async def _ask_permission(controller, event, target, task):
-    result = await _send_private(controller, event, platform_id=target.platform_id,
-        login=target.account_id, peer=target.participant_id,
-        text="可以把这条回复带回给发起人吗？回复「可以」或「不要」。")
-    return result.get("state")
+    telegram = _telegram_account(event, target) is not None
+    prompt = ("可以把这条回复带回给发起人吗？请回复这条消息，说「可以」或「不要」。"
+              if telegram else "可以把这条回复带回给发起人吗？回复「可以」或「不要」。")
+    return await _send_private(controller, event, platform_id=target.platform_id,
+        login=target.account_id, peer=target.participant_id, text=prompt, require_message_id=telegram)
 
 
 async def process_private_receipts(controller, event, target):
@@ -154,18 +155,25 @@ async def process_private_receipts(controller, event, target):
         return
     target_user_id = str(target.participant_id)
     text = _text(getattr(event, "message_str", ""), 800)
-    answer = text.rstrip("。！!.").strip()
-    confirmed = answer in {"可以", "同意", "好", "好的", "行", "转告", "带回去", "转发"}
-    rejected = answer in {"不同意", "不要", "不用", "不行", "不可以", "拒绝", "别转", "算了"}
+    approvals = ("可以", "同意", "好", "好的", "行", "转告", "带回去", "转发")
+    refusals = ("不同意", "不好", "不要", "不用", "不行", "不可以", "拒绝", "别转", "算了")
     account = _telegram_account(event, target)
     if account is None:
+        confirmed = any(word in text for word in approvals)
+        rejected = any(word in text for word in refusals)
         permission_tasks = await asyncio.to_thread(
             claim_private_receipts, controller.runtime, target_user_id, permission=True)
     else:
         raw = getattr(getattr(event.message_obj, "raw_message", None), "message", None)
+        answer = _text(getattr(raw, "text", ""), 800).rstrip("。！!.").strip()
+        confirmed, rejected = answer in approvals, answer in refusals
+        original = getattr(raw, "reply_to_message", None)
+        reply_to = None
+        if original is not None:
+            reply_to = (original.message_id if original.chat.id == raw.chat.id else -1)
         permission_tasks, reply_tasks = await asyncio.to_thread(
             claim_telegram_receipt, controller.runtime, account, target_user_id,
-            getattr(raw, "message_id", None))
+            getattr(raw, "message_id", None), reply_to=reply_to)
     settled_permission: set[str] = set()
     in_flight_permission: str | None = None
     in_flight_permission_state = "failed"
@@ -217,13 +225,13 @@ async def process_private_receipts(controller, event, target):
                 try:
                     asked = await _ask_permission(controller, event, target, task)
                 except Exception:
-                    asked = "failed"
-                if asked == "unknown":
+                    asked = {"state": "failed"}
+                if asked.get("state") == "unknown":
                     await asyncio.to_thread(finish, controller.runtime, task_id, "unknown")
-                elif asked == "delivered":
+                elif asked.get("state") == "delivered":
                     in_flight_report = None
                     in_flight_ask = task_id
-                    await asyncio.to_thread(mark_waiting_permission, controller.runtime, task_id, text)
+                    await asyncio.to_thread(mark_waiting_permission, controller.runtime, task_id, text, asked.get("message_id"))
                 else:
                     in_flight_report = None
                     await asyncio.to_thread(requeue, controller.runtime, task_id, state="waiting_reply")

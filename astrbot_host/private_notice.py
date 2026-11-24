@@ -137,7 +137,7 @@ async def send_group_notice(controller, route, *, text, mention_id="", transport
                            peer, mention, str(text)])}
 
 
-async def send_private_notice(controller, event, *, text, route, transport=None):
+async def send_private_notice(controller, event, *, text, route, transport=None, require_message_id=False):
     """Send one bounded private notice through the authenticated account route."""
     if not text or not str(text).strip():
         return {"state": "skipped", "reason": "blank_line"}
@@ -183,6 +183,10 @@ async def send_private_notice(controller, event, *, text, route, transport=None)
         session = MessageSession(route.platform_id, MessageType.FRIEND_MESSAGE, peer)
         with redact_telegram_token(platform.get_client() if platform_name == "telegram" else None):
             dispatched = MessageChain(chain=[Plain(str(text))])
+            if require_message_id and platform_name == "telegram":
+                sent = await platform.get_client().send_message(chat_id=int(peer), text=str(text))
+                identifier = getattr(sent, "message_id", None)
+                return {"state": "delivered", "message_id": identifier}
             accepted = await send_private_session(platform, session, dispatched)
         if platform_name == "telegram" and accepted is False:
             return {"state": "failed", "reason": "platform_call_failed"}

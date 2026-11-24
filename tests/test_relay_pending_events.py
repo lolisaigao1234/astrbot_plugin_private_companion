@@ -4,10 +4,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+import json
 import time
 import unittest
 
-from astrbot_host.relay_pending import add_task, claim_private_receipts
+from astrbot_host.relay_pending import add_task, claim_private_receipts, claim_telegram_receipt
 from astrbot_host.relay_pending_events import process_group_presence, process_private_receipts
 from companion_v2.storage.runtime import StorageRuntime
 
@@ -57,6 +58,34 @@ class RelayPendingEventTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["group_id"], 5005)
         self.assertEqual(kwargs["message"][0], {"type": "at", "data": {"qq": "7777"}})
         self.assertEqual(kwargs["message"][-1]["data"]["text"], "看到后回我")
+
+    def test_telegram_receipt_claims_distinct_out_of_order_messages_once(self):
+        account = ["telegram", "main"]
+        task = {"kind": "private_receipt", "state": "waiting_permission", "target_user_id": "peer",
+                "telegram_account": account, "expires_at": time.time() + 60}
+        for message_id in (127, 63, 126, 64):
+            task_id = add_task(self.runtime, task)
+            permission, replies = claim_telegram_receipt(self.runtime, account, "peer", message_id)
+            self.assertEqual([record["id"] for record in permission], [task_id])
+            self.assertEqual(replies, [])
+            for seen in (127, message_id):
+                self.assertEqual(claim_telegram_receipt(self.runtime, account, "peer", seen), ([], []))
+
+    def test_telegram_receipt_keeps_legacy_replay_boundary(self):
+        account = ["telegram", "main"]
+        key = "conversation.relay.private_seen:" + json.dumps([*account, "peer"], separators=(",", ":"))
+        with self.runtime.transaction() as connection:
+            connection.execute("INSERT INTO runtime_metadata(key, value) VALUES (?, ?)", (key, "100"))
+        task = {"kind": "private_receipt", "state": "waiting_reply", "target_user_id": "peer",
+                "telegram_account": account, "expires_at": time.time() + 60}
+        task_id = add_task(self.runtime, task)
+        for message_id in (99, 100):
+            self.assertEqual(claim_telegram_receipt(self.runtime, account, "peer", message_id), ([], []))
+        _, replies = claim_telegram_receipt(self.runtime, account, "peer", 102)
+        self.assertEqual([record["id"] for record in replies], [task_id])
+        second = add_task(self.runtime, task)
+        _, replies = claim_telegram_receipt(self.runtime, account, "peer", 101)
+        self.assertEqual([record["id"] for record in replies], [second])
 
     async def test_private_receipt_reports_next_reply_to_source(self):
         add_task(self.runtime, {
