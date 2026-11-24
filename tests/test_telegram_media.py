@@ -185,6 +185,28 @@ class TelegramCaptureTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase
         self.assertIn("附件超过读取上限", payload)
         self.assertFalse(any(isinstance(part, Video) for part in self.event.message_obj.message))
 
+    async def test_gif_and_video_sent_as_file_reach_video_understanding(self):
+        from astrbot.core.astr_main_agent import collect_initial_request
+        from astrbot_host.core_reply_perception import video_placeholders
+        target = self.controller.settings.target("tg-owner")
+        clip = dict(file_id="v", file_unique_id="v", width=64, height=48, duration=1)
+        for number, fields in enumerate((dict(animation=clip, document=dict(file_id="v", file_unique_id="v",
+                                                                            file_name="clip.mp4")),
+                                         dict(document=dict(file_id="v", file_unique_id="v", file_name="trip v1.2.MOV")))):
+            await self.convert(**fields, caption="my caption", message_id=720 + number)
+            event = self.platform.create_event(self.event.message_obj)
+            event.created_at = self.clock.now().timestamp()
+            with patch("astrbot_host.video.loader.fetch_attachment", AsyncMock(return_value=b"movie")), patch(
+                    "astrbot.core.astr_main_agent._get_session_conv", AsyncMock(return_value=NS(history="[]"))):
+                (await self.controller.session.prepare_core_reply(event, target)).unwrap()
+                request, _ = await collect_initial_request(event, NS(), NS(provider_wake_prefix="", provider_settings={}))
+                payload = json.dumps(await request.assemble_context(), ensure_ascii=False)
+            item, = video_placeholders(request, include_quoted=False)
+            self.assertEqual((item.name, item.location), (fields["document"]["file_name"], "path"))
+            self.assertEqual(Path(item.value).read_bytes(), b"movie")
+            self.assertIn("my caption", payload)
+            self.assertNotIn(self.platform.client.token, payload)
+
     async def test_standalone_oversized_photo_and_music_keep_their_caption(self):
         from astrbot.core.astr_main_agent import collect_initial_request
         from astrbot_host.media import load_native_image

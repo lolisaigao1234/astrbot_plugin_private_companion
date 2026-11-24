@@ -62,9 +62,13 @@ async def check_provider_quoted_attachments(case, make_event, target_id):
     from astrbot.core.message.components import File, Plain, Video
     from companion_v2.execution.models import TaskError
     from telegram import Document, Video as TelegramVideo
+    from astrbot_host.core_reply_perception import video_placeholders
 
     document = dict(file_id="d", file_unique_id="d", file_name="notes.txt")
     video = dict(file_id="v", file_unique_id="v", width=2, height=2, duration=1)
+    # Telegram sends a GIF as an animation and repeats it as a document.
+    fields = {"document": {"document": document}, "video": {"video": video},
+              "gif": {"animation": video, "document": dict(document, file_name="clip.mp4")}}
     bridge = case.controller.session.bridge
     target = case.controller.settings.target(target_id)
     bot = case.platform.client
@@ -72,11 +76,12 @@ async def check_provider_quoted_attachments(case, make_event, target_id):
     bot.get_file = AsyncMock(return_value=NS(file_path=bot.base_file_url + "/quoted-media"))
     payload = b"attachment"
     for kind, enabled, budget, keep in (("document", False, 32, False), ("document", True, 10, True),
-                                        ("video", False, 32, False), ("video", True, 3, False), ("video", True, 10, True)):
+                                        ("video", False, 32, False), ("video", True, 3, False), ("video", True, 10, True),
+                                        ("gif", False, 32, False), ("gif", True, 10, True)):
         with case.subTest(kind=kind, enabled=enabled, budget=budget):
             location = NS(file_path=case.platform.client.base_file_url + "/quoted-media")
-            original = {kind: document if kind == "document" else video, "caption": "quoted caption"}
-            with patch.object(Document if kind == "document" else TelegramVideo, "get_file",
+            original = {**fields[kind], "caption": "quoted caption"}
+            with patch.object(TelegramVideo if kind == "video" else Document, "get_file",
                               AsyncMock(return_value=location)):
                 event = await make_event({"text": "question about original"}, original)
 
@@ -95,7 +100,7 @@ async def check_provider_quoted_attachments(case, make_event, target_id):
             case.assertIn("quoted caption", prepared["native_input"].quotes[0].text)
             reply = next(p for p in event.message_obj.message if isinstance(p, Reply))
             case.assertEqual(fetch.await_count, int(enabled))
-            if keep and kind == "document":
+            if keep and kind != "video":
                 file = next(c for c in reply.chain if isinstance(c, File))
                 case.assertEqual(Path(await file.get_file()).read_bytes(), payload)
             elif keep:
@@ -109,4 +114,5 @@ async def check_provider_quoted_attachments(case, make_event, target_id):
                 await _process_quote_message(event, req, "", NS(), image_ref=ref)
                 serialized = str(await req.assemble_context())
             case.assertIn("question about original", serialized)
+            case.assertEqual(bool(video_placeholders(req)), keep and kind != "document")
             case.assertNotIn(case.platform.client.token, serialized)
