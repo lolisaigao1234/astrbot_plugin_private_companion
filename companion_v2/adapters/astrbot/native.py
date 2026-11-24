@@ -1095,7 +1095,13 @@ class NativePrivateBridge:
                         raise TaskError("host_audio_limit", "voice and images exceed the shared intake budget")
                 quotes = []
                 if telegram and telegram.quote:
-                    quotes.append(replace(telegram.quote, images=await self._capture_images(telegram.images)))
+                    quote = telegram.quote
+                    try:
+                        quote = replace(quote, images=await self._capture_images(telegram.images))
+                    except TaskError as error:
+                        if not telegram_caption or error.code != "host_image_limit":
+                            raise
+                    quotes.append(quote)
                 for locator in frozen_quotes:
                     if locator.message_id == event_id:
                         raise TaskError("host_quote_invalid", "an input cannot quote itself")
@@ -1146,6 +1152,8 @@ class NativePrivateBridge:
                         "host_audio_limit", "host_video_limit", "host_image_limit", "image_manifest_invalid"
                     }:
                         raise
+                    if telegram.quote:
+                        quotes = (telegram.quote,)
                     for attachment in (*frozen_images, *frozen_audios, *frozen_videos):
                         text_parts[attachment.position] = "[附件超过读取上限，本轮未读取]"
                     text = "".join(text_parts)

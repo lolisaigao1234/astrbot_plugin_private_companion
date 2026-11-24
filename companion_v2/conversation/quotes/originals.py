@@ -8,6 +8,23 @@ from companion_v2.execution.models import TaskContext, TaskError, digest
 from companion_v2.foundation.refs import ScopeKind, ScopeRef
 
 
+def _telegram_text(payload, quote, has_image):
+    """Recover Telegram's original UTF-16 coordinates from verified AstrBot link expansions."""
+    prefix = "\n[图片 1]\n" if has_image and payload.startswith("\n[图片 1]\n") else ""
+    encoded = payload[len(prefix):].encode("utf-16-le")
+    # Each removal restores the original coordinates for the next link.
+    for end, units, fingerprint in getattr(quote, "link_suffixes", ()):
+        start, stop = 2 * end, 2 * (end + units)
+        try:
+            suffix = encoded[start:stop].decode("utf-16-le")
+        except UnicodeDecodeError:
+            suffix = ""
+        if not suffix or digest(suffix) != fingerprint:
+            raise TaskError("quote_original_changed", "quoted link differs from the admitted original")
+        encoded = encoded[:start] + encoded[stop:]
+    return prefix, encoded.decode("utf-16-le")
+
+
 def original_sources(messages, context, event, quote, text, at, *, publish):
     if context.scope.kind is ScopeKind.GROUP:
         from .group_originals import original_sources as group_sources
@@ -37,16 +54,21 @@ def original_sources(messages, context, event, quote, text, at, *, publish):
                 raise TaskError("quote_original_scope_mismatch", "known original belongs to another captured conversation")
             saved = event_from_document(json.loads(original["event_json"]), context)
             record = messages._read_source(saved.source, context, event.capability, at)
+            if record.content_hash != saved.input_hash:
+                raise TaskError("quote_original_changed", "admitted original fingerprint changed")
             offset = getattr(quote, "selection_offset", None)
+            body = record.payload
+            prefix = ""
+            if offset is not None or getattr(quote, "link_suffixes", ()):
+                prefix, body = _telegram_text(body, quote, bool(getattr(saved, "images", ())))
             if offset is not None:
                 # Telegram selection positions are UTF-16 code units, including on emoji.
                 selected = text.encode("utf-16-le")
-                body = record.payload.removeprefix("\n[图片 1]\n") if getattr(saved, "images", ()) else record.payload
-                if body.encode("utf-16-le")[2 * offset:2 * offset + len(selected)] != selected:
+                if type(offset) is not int or offset < 0 or body.encode("utf-16-le")[2 * offset:2 * offset + len(selected)] != selected:
                     raise TaskError("quote_original_changed", "quoted selection differs from the admitted original")
                 references.append(saved.source)
                 continue
-            if (record.payload != text or record.content_hash != saved.input_hash or getattr(saved, "quotes", ())
+            if (prefix + body != text or getattr(saved, "quotes", ())
                     or getattr(saved, "forwards", ()) != getattr(quote, "forwards", ())):
                 raise TaskError("quote_original_changed", "quote differs from the already admitted original")
             saved_audios = getattr(saved, "audios", ())
