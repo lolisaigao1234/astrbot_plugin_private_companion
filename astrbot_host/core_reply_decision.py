@@ -99,6 +99,12 @@ def core_decision_facts(event, prepared, application, *, at):
     native, context = prepared.get("native_input"), prepared.get("context")
     scope = getattr(context, "scope", None)
     account = str(getattr(scope, "account_id", "") or "")
+    if getattr(getattr(event, "platform_meta", None), "name", None) == "telegram":
+        # AstrBot's instance key can be numeric and match an unrelated participant.
+        try:
+            account = str(getattr(getattr(event, "client", None), "id", None) or "")
+        except RuntimeError:  # python-telegram-bot has not initialized the bot user.
+            account = ""
     sender = str(getattr(getattr(native, "principal", None), "native_account_id", "") or "")
     text = str(prepared.get("text", getattr(native, "text", getattr(event, "message_str", ""))) or "")
     text = getattr(native, "group_message_text", None) or text
