@@ -162,6 +162,28 @@ class TelegramAdministrationTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(json.loads(proposed.source.payload)["state"], outcome)
                     platform.client.send_message.assert_awaited_once()
 
+    async def test_private_relay_records_native_question_id_once(self):
+        import json
+        from datetime import timedelta
+        from astrbot_host.relay_pending import _read
+        from companion_v2.conversation.relay_tools import SEND_ACTION
+        from tests.test_relay_tools import NOW
+
+        fixture, platform, invoke = await self.relay_fixture()
+        fixture.current_text = "确认发送"
+        args = dict(destination_kind="private", destination_id="2002", text="明天可以吗？", need_receipt=True)
+        fixture.current_input = dict(event_id="ask", observed_at=NOW.isoformat())
+        proposal = json.loads((await invoke("relay_message", args)).source.payload)
+        fixture.current_input = dict(event_id="confirm", observed_at=(NOW + timedelta(seconds=1)).isoformat())
+        send_args = dict(args, confirmed=True, operation_id=proposal["operation_id"])
+        platform.client.send_message.return_value = NS(message_id=102)
+        result = await invoke(SEND_ACTION, send_args)
+        self.assertEqual(json.loads(result.source.payload)["state"], "sent")
+        await invoke(SEND_ACTION, send_args)
+        question, = _read(fixture.runtime)["tasks"].values()
+        self.assertEqual(question["question_message_id"], 102)
+        platform.client.send_message.assert_awaited_once()
+
     async def test_delayed_relay_tool_replays_the_delivery_outcome(self):
         import json
         from datetime import timedelta

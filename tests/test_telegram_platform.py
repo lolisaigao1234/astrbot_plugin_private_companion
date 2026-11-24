@@ -1379,12 +1379,12 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
             raw.reply_to_message = Message(prompt_id, raw.date, raw.chat, text="permission")
         return event
 
-    def private_relay_task(self, state, confirm, prompt_id=None):
+    def private_relay_task(self, state, confirm, prompt_id=None, question_id=None):
         from time import time
         from astrbot_host.relay_pending import add_task
         return add_task(self.controller.runtime, dict(kind="private_receipt", state=state,
             target_user_id=str(OWNER), source_id=str(OWNER), confirm_before_report=confirm,
-            reply_text="private answer", prompt_message_id=prompt_id, expires_at=time()+60, telegram_account=["tg-main", "tg-main"]))
+            reply_text="private answer", question_message_id=question_id, prompt_message_id=prompt_id, expires_at=time()+60, telegram_account=["tg-main", "tg-main"]))
 
     async def test_private_relay_unknown_prompt_and_report_are_terminal(self):
         from astrbot_host.relay_pending import _read
@@ -1457,9 +1457,9 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
         self.platform.client.send_message.return_value = NS(message_id=100)
         await receive(telegram_event(self.platform, 90, "first answer"), target)
         self.assertEqual(_read(self.controller.runtime)["tasks"][first]["prompt_message_id"], 100)
-        second = self.private_relay_task("waiting_reply", True)
+        second = self.private_relay_task("waiting_reply", True, question_id=101)
         self.platform.client.send_message.return_value = NS(message_id=103)
-        await receive(telegram_event(self.platform, 102, "second answer"), target)
+        await receive(self.reply_to_prompt(102, 101, "可以"), target)
         self.assertEqual(_read(self.controller.runtime)["tasks"][second]["prompt_message_id"], 103)
         self.platform.client.send_message.reset_mock()
         await receive(telegram_event(self.platform, 107, "可以"), target)
@@ -1473,7 +1473,7 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
         self.platform.client.send_message.assert_awaited_once()
         tasks = _read(self.controller.runtime)["tasks"]
         self.assertEqual((tasks[first]["state"], tasks[second]["state"]), ("waiting_permission", "reported"))
-        self.assertIn("second answer", self.platform.client.send_message.await_args.kwargs["text"])
+        self.assertIn("可以", self.platform.client.send_message.await_args.kwargs["text"])
 
     async def test_only_direct_telegram_words_can_grant_private_relay_permission(self):
         from telegram import MessageOriginHiddenUser

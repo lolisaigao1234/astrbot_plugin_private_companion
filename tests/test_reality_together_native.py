@@ -534,7 +534,11 @@ class NativeRealityTogetherTests(unittest.IsolatedAsyncioTestCase):
         plugin.rooms["invited"] = SimpleNamespace(
             room_id="invited", ticket_token="invite-ticket", user_id="12345",
             native_v2=SimpleNamespace(**binding), integration_closed=False,
-            mode="watch", created_at=3.0, call_active=False, resume_token="")
+            mode="watch", created_at=binding.get("created_at", 0) - 1, call_active=False, resume_token="")
+        # A newer unredeemed private ticket must not displace the active room on close.
+        created_again = request(provider, "together.room.create", invocation="second-ticket",
+                                arguments={"mode": "watch"})
+        await provider.execute(created_again, before_dispatch=lambda: True)
         snap = request(provider, "together.room.snapshot", invocation="snapshot-invited")
         self.assertEqual((await provider.execute(snap, before_dispatch=lambda: True))["result"]["active_count"], 1)
         other = request(provider, "together.room.snapshot", invocation="snapshot-other-invited",

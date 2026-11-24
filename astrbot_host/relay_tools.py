@@ -772,9 +772,12 @@ class RelayToolPort:
             return self._response(invocation, {}, state="failed", effect="not_committed",
                                   operation_id=operation_id, receipt_ref=receipt_ref, error_code=code)
         message_id = result.get("receipt", {}).get("message_id") if isinstance(result, dict) else None
-        receipt_ref = ("telegram-" + message_id if route.platform_name == "telegram"
-                       and isinstance(message_id, str) and message_id.startswith("session:")
-                       else _onebot_receipt_ref(message_id))
+        if route.platform_name == "telegram" and type(message_id) is int and message_id > 0:
+            receipt_ref = f"telegram-message:{message_id}"
+        elif route.platform_name == "telegram" and isinstance(message_id, str) and message_id.startswith("session:"):
+            receipt_ref = "telegram-" + message_id
+        else:
+            receipt_ref = _onebot_receipt_ref(message_id)
         if not isinstance(result, dict) or result.get("state") != "sent" or receipt_ref is None:
             return self._response(invocation, {"state": "unknown", "operation_id": operation_id,
                                                "instruction": "没有获得平台成功回执，禁止自动重发"},
@@ -794,6 +797,7 @@ class RelayToolPort:
                     "source_id": invocation.context.scope.native_scope_id,
                     "source_user": invocation.context.actor.principal.native_account_id,
                     "question": plan.text, "sent_text": plan.text,
+                    "question_message_id": message_id if telegram_account and type(message_id) is int else None,
                     "confirm_before_report": plan.confirm_before_report,
                     "operation_id": operation_id,
                     "expires_at": time() + 12 * 3600,

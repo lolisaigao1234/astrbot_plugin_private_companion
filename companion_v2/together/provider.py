@@ -895,7 +895,7 @@ class NativeTogetherProvider:
                         if not callable(resolve) or resolve(native_scope, user_id) is None:
                             raise NativeTogetherError("together_private_room_required")
                     self.store.update(scope, operation["id"], state="dispatching", effect="unknown")
-                    result = await self._close_latest(scope, user_id)
+                    result = await self._close_latest(scope, user_id, group_invite=native_scope["kind"] == "group")
                     if native_scope["kind"] == "group" and result.get("reason") == "no_provider_room":
                         operation = self.store.update(scope, operation["id"], state="failed", effect="not_committed",
                                                       error="no_provider_room")
@@ -1062,7 +1062,7 @@ class NativeTogetherProvider:
             result.update(delivered_privately=True, message="房间链接已私发给发起人。")
         return self.store.update(scope, operation["id"], state="succeeded", effect="committed", result=result)
 
-    async def _close_latest(self, scope: str, user_id: str) -> dict[str, Any]:
+    async def _close_latest(self, scope: str, user_id: str, *, group_invite: bool = False) -> dict[str, Any]:
         closed = self._closed_tokens(scope)
         owned_tokens: set[str] = set()
         candidates: dict[str, tuple[float, Any]] = {}
@@ -1089,7 +1089,13 @@ class NativeTogetherProvider:
 
         if not candidates:
             return {"closed": False, "reason": "no_provider_room"}
-        token = max(candidates, key=lambda key: (candidates[key][0], key))
+        # Private close first ends a live room. A group requester closes their most recent invitation or room.
+        eligible = candidates
+        if not group_invite:
+            live = {token: value for token, value in candidates.items() if value[1] is not None}
+            if live:
+                eligible = live
+        token = max(eligible, key=lambda key: (eligible[key][0], key))
         _, room = candidates[token]
         if room is not None:
             await self.plugin.close_room(room)

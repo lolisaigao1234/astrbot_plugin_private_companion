@@ -174,8 +174,21 @@ def claim_telegram_receipt(runtime, account, user_id, message_id, *, reply_to=No
         if matches:
             if len(matches) == 1 and type(reply_to) is int and 0 < reply_to < message_id and permission_answer:
                 permission = _claim_receipt(matches)
-        elif not (prompts and permission_answer):
-            replies = _claim_receipt(_waiting_receipts(data, user_id, account, now, "waiting_reply"))
+        else:
+            waiting = _waiting_receipts(data, user_id, account, now, "waiting_reply")
+            if reply_to is not None:
+                addressed = [task for task in waiting if task.get("question_message_id") == reply_to]
+                if len(addressed) == 1 and type(reply_to) is int and 0 < reply_to < message_id:
+                    replies = _claim_receipt(addressed)
+                elif type(reply_to) is int and 0 < reply_to < message_id and not (prompts and permission_answer):
+                    known = any(task.get("telegram_account") == account and task.get("target_user_id") == user_id
+                                and reply_to in (task.get("prompt_message_id"), task.get("question_message_id"))
+                                for task in data["tasks"].values())
+                    if not known:
+                        # Legacy receipt tasks predate storage of the native question ID.
+                        replies = _claim_receipt([task for task in waiting if task.get("question_message_id") is None])
+            elif not (prompts and permission_answer):
+                replies = _claim_receipt(waiting)
         _write(connection, data)
         return permission, replies
 

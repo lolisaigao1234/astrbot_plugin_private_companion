@@ -76,7 +76,8 @@ async def relay_private(controller, event, *, request: RelayRequest, settings,
     if route is None:
         raise RelayNotDelivered("relay_target_unavailable", "目标私聊不可用，未发送。",
                                 audit=plan.audit)
-    receipt = await send_private_notice(controller, event, text=plan.text, route=route, transport=transport)
+    options = {"require_message_id": True} if plan.need_receipt and getattr(route, "platform_name", "") == "telegram" else {}
+    receipt = await send_private_notice(controller, event, text=plan.text, route=route, transport=transport, **options)
     return _delivery_result(plan, receipt)
 
 

@@ -102,6 +102,21 @@ class RelayPendingEventTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("今晚来吗", kwargs["message"][0]["data"]["text"])
         self.assertIn("好的", kwargs["message"][0]["data"]["text"])
 
+    async def test_qq_cancelled_permission_prompt_can_resume(self):
+        from asyncio import CancelledError
+        from unittest.mock import patch
+        from astrbot_host.relay_pending import _read
+
+        task = add_task(self.runtime, {
+            "kind": "private_receipt", "state": "waiting_reply", "target_user_id": "2002",
+            "confirm_before_report": True, "expires_at": time.time() + 60,
+        })
+        target = SimpleNamespace(participant_id="2002", platform_id="onebot", account_id="account")
+        with patch("astrbot_host.relay_pending_events._ask_permission", side_effect=CancelledError):
+            with self.assertRaises(CancelledError):
+                await process_private_receipts(self.controller, self.event, target)
+        self.assertEqual(_read(self.runtime)["tasks"][task]["state"], "waiting_reply")
+
     async def test_receipt_permission_is_requested_before_reporting(self):
         add_task(self.runtime, {
             "kind": "private_receipt", "state": "waiting_reply", "target_user_id": "2002",
@@ -115,7 +130,7 @@ class RelayPendingEventTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.api.calls[0][1]["user_id"], 2002)
         self.assertIn("可以", self.api.calls[0][1]["message"][0]["data"]["text"])
 
-        self.event.message_str = "可以"
+        self.event.message_str = "不好意思，可以"
         await process_private_receipts(self.controller, self.event, target)
         self.assertEqual(self.api.calls[1][0], "send_private_msg")
         self.assertEqual(self.api.calls[1][1]["user_id"], 1001)

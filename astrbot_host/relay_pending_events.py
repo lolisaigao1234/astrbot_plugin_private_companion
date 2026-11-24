@@ -156,17 +156,17 @@ async def process_private_receipts(controller, event, target):
     target_user_id = str(target.participant_id)
     text = _text(getattr(event, "message_str", ""), 800)
     approvals = ("可以", "同意", "好", "好的", "行", "转告", "带回去", "转发")
-    refusals = ("不同意", "不好", "不要", "不用", "不行", "不可以", "拒绝", "别转", "算了")
+    refusals = ("不要", "不用", "不行", "不可以", "拒绝", "别转", "算了")
     account = _telegram_account(event, target)
     if account is None:
         confirmed = any(word in text for word in approvals)
-        rejected = any(word in text for word in refusals)
+        rejected = "不同意" in text or "不好" in text.replace("不好意思", "") or any(word in text for word in refusals)
         permission_tasks = await asyncio.to_thread(
             claim_private_receipts, controller.runtime, target_user_id, permission=True)
     else:
         raw = getattr(getattr(event.message_obj, "raw_message", None), "message", None)
         answer = _text(getattr(raw, "text", ""), 800).rstrip("。！!.").strip()
-        confirmed, rejected = answer in approvals, answer in refusals
+        confirmed, rejected = answer in approvals, answer in (*refusals, "不同意", "不好")
         original = getattr(raw, "reply_to_message", None)
         reply_to = None
         if original is not None:
@@ -221,7 +221,7 @@ async def process_private_receipts(controller, event, target):
         for task in reply_tasks:
             task_id = task["id"]
             if task.get("confirm_before_report"):
-                in_flight_report = task_id
+                in_flight_report = task_id if account is not None else None
                 in_flight_report_state = "unknown"
                 try:
                     asked = await _ask_permission(controller, event, target, task)
