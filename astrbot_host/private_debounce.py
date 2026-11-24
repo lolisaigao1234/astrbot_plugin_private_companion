@@ -110,6 +110,11 @@ class PrivateDebounce:
                 timing_text=self._timing(pending),
             )
 
+    def collecting_event(self, key, predicate):
+        pending = self._pending.get(key)
+        return (pending is not None and pending.state in {"collecting", "active"}
+                and any(predicate(event) for event, _, _ in pending.entries))
+
     def reserve(self, key, event, text, *, received_at=None):
         """Register an event before the handler's first await.
 

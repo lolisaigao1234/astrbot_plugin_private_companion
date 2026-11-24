@@ -192,6 +192,34 @@ class MultiPrivateBridge(NativePrivateBridge):
             pieces.append(sticker)
         return safe_text(event, "".join(pieces))
 
+    async def prepare_telegram_album(self, event):
+        """Give AstrBot the same bounded direct photos that Companion admits."""
+        from astrbot.core.message.components import Image, Plain
+        from companion_v2.conversation.media.models import MAX_INPUT_IMAGES
+        from .core_reply_media import direct_image_locators, frozen_image_locators
+
+        images = direct_image_locators(frozen_image_locators(event))
+        if not images:
+            return
+        limited = "[附件超过读取上限，本轮未读取]"
+        replacements = {item.position: Plain(limited) for item in images[MAX_INPUT_IMAGES:]}
+
+        async def load_photo(loader, locator):
+            try:
+                return await loader(locator)
+            except TaskError as exc:
+                replacements[locator.position] = Plain(limited if exc.code == "host_image_limit" else "[附件不可用]")
+                return None
+
+        admitted = await self._capture_images(images[:MAX_INPUT_IMAGES], load_optional=load_photo)
+        notes = list(dict.fromkeys(part.text for part in replacements.values()))
+        replacements.update((photo.descriptor.position, Image.fromBytes(photo.content)) for photo in admitted)
+        message = event.message_obj
+        message.message = [replacements.get(position, part) for position, part in enumerate(message.message)]
+        if notes:
+            event.message_str = "\n".join([event.message_str, *notes]).strip()
+            message.message_str = event.message_str
+
     async def capture_core_reply(self, event):
         """Authenticate a private route for AstrBot's reply path without reading attachments."""
         try:
@@ -1286,6 +1314,10 @@ class MultiHostSession:
                     context = self._select_core_reply_context(target, captured)
                 self.bridge.connections.assert_current(connection_lease)
                 self._validate_core_group_admission(group_admission, context, captured)
+                if (context.scope.kind is ScopeKind.PRIVATE and event.platform_meta.name == "telegram"
+                        and getattr(event.message_obj.raw_message.message, "media_group_id", None)):
+                    await self.bridge.prepare_telegram_album(event)
+                    self.bridge.connections.assert_current(connection_lease)
                 turn_id = "core-reply:" + digest([context.key, captured.event_id])
                 presence = self.application.presence
                 if presence is not None:

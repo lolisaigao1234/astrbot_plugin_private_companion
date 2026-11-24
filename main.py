@@ -560,6 +560,9 @@ class PrivateCompanionV2StagingPlugin(Star):
         active_window = self._private_reply_followups().active_for(target_key)
         if active_window is None:
             return False
+        # A comment arriving after a forward belongs to the newer collecting turn.
+        if self._private_debounce_manager().collecting_event(target_key, telegram_private_forward):
+            return False
         guard = getattr(self, "_core_followup_guard", None)
         if guard is not None and guard.has_pending_media_barrier(
                 event, owner_event=active_window.event):
