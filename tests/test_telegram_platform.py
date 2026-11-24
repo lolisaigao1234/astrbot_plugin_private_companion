@@ -309,14 +309,18 @@ class TelegramPrivateCommandTests(TelegramHostFixture, unittest.IsolatedAsyncioT
         await self.plugin.receive_companion_message(event)
         return event
 
+    async def wait_for_contention(self, lock):
+        async def waiting():
+            while not lock._waiters:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(waiting(), timeout=30)
+
     async def dispatch_overlapping_notices(self, peer, owner=None):
         from astrbot_host.private_notice import notice_cooldown_lock
 
         lock = notice_cooldown_lock(self.controller, owner)
 
-        async def wait_for_contention():
-            while not lock._waiters:
-                await asyncio.sleep(0)
         sending, release = asyncio.Event(), asyncio.Event()
 
         async def send(*args):
@@ -328,7 +332,7 @@ class TelegramPrivateCommandTests(TelegramHostFixture, unittest.IsolatedAsyncioT
         try:
             await asyncio.wait_for(sending.wait(), timeout=10)
             second = asyncio.create_task(self.dispatch("你好", peer))
-            await asyncio.wait_for(wait_for_contention(), timeout=30)
+            await self.wait_for_contention(lock)
             self.clock.advance(timedelta(seconds=61))
         finally:
             release.set()
@@ -416,9 +420,7 @@ class TelegramPrivateCommandTests(TelegramHostFixture, unittest.IsolatedAsyncioT
         lock = notice_cooldown_lock(self.controller)
         async with lock:
             queued = asyncio.create_task(self.dispatch("你好", peer))
-            async with asyncio.timeout(30):
-                while not lock._waiters:
-                    await asyncio.sleep(0)
+            await self.wait_for_contention(lock)
             key = stranger_block_view_id("tg-main", "tg-main", str(peer))
             with self.controller.runtime.transaction() as connection:
                 connection.execute("INSERT INTO memory_views VALUES (?, ?, ?, ?, 'active', ?, ?, ?)",
@@ -445,9 +447,7 @@ class TelegramPrivateCommandTests(TelegramHostFixture, unittest.IsolatedAsyncioT
             lock = notice_cooldown_lock(self.controller, owner)
             async with lock:
                 queued = asyncio.create_task(self.dispatch("你好", peer))
-                async with asyncio.timeout(30):
-                    while not lock._waiters:
-                        await asyncio.sleep(0)
+                await self.wait_for_contention(lock)
                 if peer == OWNER:
                     grants.issue_grant(grant_id="restored-dialogue", subject=context.actor.subject,
                                        scope=context.scope, capability="conversation.reply",
@@ -479,7 +479,11 @@ class TelegramPrivateCommandTests(TelegramHostFixture, unittest.IsolatedAsyncioT
     async def test_reset_requires_admin_and_confirmation(self):
         authority = self.controller.authority
         context = authority.context("tg-owner", "role-tg")
-        event = await self.dispatch("全部重置")
+        from astrbot_host.reset_command import receive_reset_command
+        plain = telegram_event(self.platform, text="全部重置")
+        self.assertIsNone(await receive_reset_command(self.controller, plain))
+        self.platform.send_by_session.assert_not_awaited()
+        event = await self.dispatch("陪伴 全部重置")
         self.assertTrue(event.call_llm)
         self.assertIn("只允许安装核心管理员", self.sent_text())
         authority.provision_scope(authority.settings.target("tg-owner"), context.scope,
