@@ -180,7 +180,10 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
     async def test_mentioned_comment_quoting_collected_forward_joins_burst(self):
         await self.check_reply_to_forward(in_burst=True, mention=True)
 
-    async def check_reply_to_forward(self, *, in_burst, partial=False, mention=False):
+    async def test_captioned_photo_comment_quoting_collected_forward_joins_burst(self):
+        await self.check_reply_to_forward(in_burst=True, photo=True)
+
+    async def check_reply_to_forward(self, *, in_burst, partial=False, mention=False, photo=False):
         from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA
 
         plugin = self.started_plugin()
@@ -192,9 +195,19 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
         original = first if in_burst else await make_forward(67, "older-body")
         comment_text = "my reply @reader" if mention else "my reply"
         entities = {"entities": [{"type": "mention", "offset": 9, "length": 7}]} if mention else {}
-        comment = await self.event(number=82, text=comment_text, **entities, reply_to_message=
-                                   original.message_obj.raw_message.message.to_dict(),
-                                   **({"quote": {"text": "body", "position": 6}} if partial else {}))
+        fields = {"text": comment_text, **entities}
+        if partial:
+            fields["quote"] = {"text": "body", "position": 6}
+        fields["reply_to_message"] = original.message_obj.raw_message.message.to_dict()
+        if photo:
+            from tests.test_conversation_images import image_bytes
+            data = base64.b64encode(image_bytes("green")).decode()
+            del fields["text"]
+            fields.update(photo=[dict(file_id="p", file_unique_id="p", width=2, height=2)], caption=comment_text)
+            with patch.object(PhotoSize, "get_file", AsyncMock(return_value=NS(file_path="base64://" + data))):
+                comment = await self.event(number=82, **fields)
+        else:
+            comment = await self.event(number=82, **fields)
         manager = plugin._private_debounce_manager()
         ready = asyncio.Event()
         reserve = manager.reserve
@@ -222,6 +235,8 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
             with patch("astrbot.core.astr_main_agent._get_session_conv", AsyncMock(return_value=NS(history="[]"))):
                 request, _ = await collect_initial_request(burst, NS(), NS(provider_wake_prefix="", provider_settings={}))
             payload = json.dumps(await request.assemble_context(), ensure_ascii=False)
+            if photo:
+                self.assertIn(data, payload)
             if partial:
                 self.assertIn("所选片段：body", burst.message_str)
             for body in ("first-body", "second-body", comment_text):

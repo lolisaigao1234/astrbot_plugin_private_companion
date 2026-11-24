@@ -612,6 +612,27 @@ class TelegramPresenceTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
         self.assertEqual((await port.custom_status(self.context, "休息"))["code"], "presence_unsupported")
         self.action.assert_not_awaited()
 
+    async def test_rate_limited_typing_resumes_after_the_requested_delay(self):
+        self.enable_typing()
+        loop = asyncio.get_running_loop()
+        stamps = []
+        renewed = asyncio.Event()
+
+        async def action(**kwargs):
+            stamps.append(loop.time())
+            if len(stamps) == 1:
+                raise RetryAfter(1)
+            renewed.set()
+            return True
+
+        self.action.side_effect = action
+        self.presence.begin_native_reply(self.context, "rate-limited")
+        try:
+            await asyncio.wait_for(renewed.wait(), 6)
+            self.assertGreaterEqual(stamps[1] - stamps[0], 1)
+        finally:
+            self.presence.finish_native_reply(self.context, "rate-limited")
+
     async def test_slow_rate_limited_action_is_independent_of_reply(self):
         self.enable_typing()
         entered, release = asyncio.Event(), asyncio.Event()
@@ -626,10 +647,14 @@ class TelegramPresenceTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
         await asyncio.wait_for(entered.wait(), 3)
         release.set()
         route = self.presence.route(self.context)
-        await asyncio.wait_for(self.presence.typing[route][2], 3)
+        worker = self.presence.typing[route][2]
+        async with asyncio.timeout(3):
+            while not self.presence.results_for(self.context).get("typing:" + route):
+                await asyncio.sleep(0.01)
+        self.assertEqual(self.presence.results_for(self.context)["typing:" + route]["retry_after"], 42)
         self.assertIsNotNone(self.presence.active_turn(self.context))
-        self.assertEqual(self.presence.results_for(self.context)["typing:" + route]["state"], "unknown")
         self.presence.finish_native_reply(self.context, "rate-limited")
+        await asyncio.wait_for(asyncio.gather(worker, return_exceptions=True), 3)
         self.action.assert_awaited_once()
 
     async def test_failed_and_cancelled_reply_tasks_release_typing(self):
