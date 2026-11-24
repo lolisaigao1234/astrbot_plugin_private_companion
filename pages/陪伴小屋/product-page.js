@@ -57,8 +57,8 @@ window.CompanionProduct = (() => {
        后者要做的才是去确认已经发出去的那条。少了这一行，新码会落进
        fail() 的兜底「暂不可读取，请刷新核对。」——用户会以为页面读不到数据。 */
     setup_steps_incomplete:"还有引导步骤没有完成，请先完成（或跳过）剩下的步骤，再做这次测试。",
-    staging_delivery_not_enabled:"这个运行实例没有可用的 OneBot 私聊通道。请核对绑定的 Bot 账号、私聊对象和人格。",
-    staging_delivery_window_invalid:"当前 OneBot 投递通道配置无效，请核对账号与目标。",
+    staging_delivery_not_enabled:"这个运行实例没有可用的私聊通道。请核对绑定的 Bot 账号、私聊对象和人格。",
+    staging_delivery_window_invalid:"当前投递通道配置无效，请核对账号与目标。",
     staging_delivery_profile_required:"这个窗口的角色配置尚未就绪，请重新读取账号与会话。",
     staging_delivery_session_active:"当前运行实例正在接收消息，请先停止再修改目标。",
     staging_delivery_expiry_invalid:"角色配置无效，请重新读取连接状态。",
