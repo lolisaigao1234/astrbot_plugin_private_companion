@@ -154,7 +154,7 @@ class RoleConversationJournalMaterialProducer:
         values.append(limit)
         rows = runtime.read_all("""SELECT * FROM conversation_native_observations
             WHERE context_key = ? AND kind = 'input' AND delivery_state = 'input_observed'
-              AND json_extract(source_json, '$.owner') != ?""" + condition
+              AND json_extract(source_json, '$.owner') IS NOT ?""" + condition
             + " ORDER BY observed_at, observation_id LIMIT ?", tuple(values))
         zone, materials = ZoneInfo(target.timezone), []
         for row in rows:

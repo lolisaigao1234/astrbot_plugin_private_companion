@@ -72,6 +72,11 @@ class CapturedQuote:
         check_quote(self.position, self.message_id, self.sender_id, self.sent_at, tuple(i.descriptor for i in self.images))
 
 
+def prompt_label(label):
+    """Keep a platform-supplied name from forging another prompt section."""
+    return " ".join(label.splitlines()).replace("[", "［").replace("]", "］")
+
+
 @dataclass(frozen=True)
 class TelegramForwardOrigin:
     kind: str
@@ -90,7 +95,7 @@ class TelegramForwardOrigin:
         return digest(fields)
 
     def attribution(self, sender):
-        return f"转发者 {sender}，转发来源 {self.kind}：{self.label}，来源时间 {self.sent_at}"
+        return f"转发者 {sender}，转发来源 {self.kind}：{prompt_label(self.label)}，来源时间 {self.sent_at}"
 
 
 @dataclass(frozen=True)

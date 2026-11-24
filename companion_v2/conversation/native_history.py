@@ -41,7 +41,7 @@ def rows(runtime, context, *, start=None, end=None, kind=None, limit=32):
         return ()
     has_sends = table_exists(runtime, "conversation_native_sends")
     where = ["n.context_key = ?", "n.delivery_state IN ('input_observed', 'send_returned')"]
-    where.append("json_extract(n.source_json, '$.owner') != ?")
+    where.append("json_extract(n.source_json, '$.owner') IS NOT ?")
     values = [context.key, REFERENCE_OWNER]
     if start is not None:
         where.append("n.effective_at >= ?")
