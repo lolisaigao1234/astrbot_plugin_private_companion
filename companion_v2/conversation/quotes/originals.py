@@ -32,7 +32,7 @@ def telegram_text(payload, quote, has_image):
     return prefix, encoded.decode("utf-16-le")
 
 
-def _telegram_original(messages, context, saved, quote, body, references, at):
+def telegram_original(messages, context, saved, quote, body, references, at):
     from companion_v2.conversation.forwards.service import forward_reference, node_reference
 
     media_event = saved
@@ -104,7 +104,7 @@ def original_sources(messages, context, event, quote, text, at, *, publish):
             media_event = saved
             telegram = isinstance(quote, TelegramQuoteDescriptor)
             if telegram:
-                body, media_event = _telegram_original(messages, context, saved, quote, body, references, at)
+                body, media_event = telegram_original(messages, context, saved, quote, body, references, at)
             prefix = ""
             if offset is not None or getattr(quote, "link_suffixes", ()):
                 prefix, body = telegram_text(body, quote, bool(getattr(media_event, "images", ())))

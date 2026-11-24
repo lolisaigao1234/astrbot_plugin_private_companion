@@ -37,16 +37,19 @@ def original_sources(messages, context, event, quote, text, at):
                 or original.actor.principal.native_account_id != quote.sender_id):
             raise TaskError("quote_original_scope_mismatch", "known group original belongs to another speaker or context")
         data = json.loads(row["event_json"])
-        if data.get("quotes"):
+        if not telegram and data.get("quotes"):
             raise TaskError("quote_original_changed", "nested replies require their own original-source contract")
-        item, source = groups.read_input(groups.input_ref(row), context, instruction, at, current["rowid"], evidence=evidence)
+        item, source = groups.read_input(groups.input_ref(row), context, instruction, at, current["rowid"],
+                                         evidence=evidence, include_quoted_media=not telegram)
         from companion_v2.conversation.messages import event_from_document
         saved = event_from_document(data, original)
         body = item["text"]
         prefix = ""
+        media_event = saved
         if telegram:
-            from .originals import telegram_text
-            prefix, body = telegram_text(body, quote, bool(getattr(saved, "images", ())))
+            from .originals import telegram_original, telegram_text
+            body, media_event = telegram_original(messages, original, saved, quote, body, evidence, at)
+            prefix, body = telegram_text(body, quote, bool(getattr(media_event, "images", ())))
         if telegram and quote.selection_offset is not None:
             offset = quote.selection_offset
             selected = text.encode("utf-16-le")
@@ -55,9 +58,10 @@ def original_sources(messages, context, event, quote, text, at):
                 raise TaskError("quote_original_changed", "quoted selection differs from the admitted original")
             evidence.append(source)
             continue
-        if (prefix + body != text or tuple(replace(i, position=0) for i in getattr(saved, "images", ()))
+        if (prefix + body != text or tuple(replace(i, position=0) for i in getattr(media_event, "images", ()))
                 != tuple(replace(i, position=0) for i in quote.images)
-                or any(getattr(saved, name, ()) != getattr(quote, name, ()) for name in ("audios", "videos", "forwards"))):
+                or any(getattr(saved, name, ()) != getattr(quote, name, ()) for name in ("audios", "videos"))
+                or (not telegram and getattr(saved, "forwards", ()) != getattr(quote, "forwards", ()))):
             raise TaskError("quote_original_changed", "quote differs from the already admitted group original")
         evidence.append(source)
     platform_ref = "onebot-message:" + digest([event.scope.platform, event.scope.account_id])[:24] + ":" + quote.message_id

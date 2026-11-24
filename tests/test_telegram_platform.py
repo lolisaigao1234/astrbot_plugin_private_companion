@@ -585,6 +585,64 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
                     reply_to_message=altered.message_obj.raw_message.message, quote=TextQuote("片段", offset))
                 self.assertEqual((await receive(reply)).failure.code, expected)
 
+    async def receive_group(self, event):
+        event.created_at = self.clock.now().timestamp()
+        return await self.controller.session.receive(event, self.controller.settings.target("group-0"))
+
+    async def test_group_quote_of_admitted_reply(self):
+        earlier = await group_event(self.platform, message_id=10, text="此前的发言")
+        member = User(321, "Quoted", False)
+        fields = dict(message_id=11, from_user=member, text="😀成员回答")
+        original = await group_event(self.platform, **fields, reply_to_message=earlier.message_obj.raw_message.message)
+        require(await self.receive_group(original))
+        # Telegram omits reply_to_message inside the embedded original.
+        for number, changes, selection, failure in (
+            (12, {}, {}, None),
+            (13, {}, {"quote": TextQuote("成员", 2)}, None),
+            (14, {"text": "😀改写回答"}, {"quote": TextQuote("改写", 2)}, "quote_original_changed"),
+            (15, {"from_user": User(322, "Other", False)}, {}, "quote_original_scope_mismatch"),
+        ):
+            embedded = await group_event(self.platform, **(fields | changes))
+            reply = await group_event(self.platform, message_id=number, reply_to_message=embedded.message_obj.raw_message.message,
+                                      **selection)
+            result = await self.receive_group(reply)
+            if failure:
+                self.assertEqual(result.failure.code, failure)
+            else:
+                require(result)
+                captured = require(await self.controller.session.bridge.groups.capture(reply))
+                quote, = captured.quotes
+                self.assertEqual((captured.principal.native_account_id, quote.sender_id, quote.text),
+                                 (str(OWNER), "321", "成员" if selection else fields["text"]))
+                self.assertNotIn("成员", captured.text)
+
+    async def test_group_quote_of_admitted_forward(self):
+        from telegram import MessageOriginUser
+        origin = MessageOriginUser(datetime.now(timezone.utc), User(42, "Source", False))
+        fields = dict(message_id=10, from_user=User(321, "Forwarder", False), text="😀转发原文", forward_origin=origin)
+        original = await group_event(self.platform, **fields)
+        require(await self.receive_group(original))
+        for number, changes, selection, failure in (
+            (11, {}, {}, None),
+            (12, {}, {"quote": TextQuote("原文", 4)}, None),
+            (13, {"text": "😀转发改写"}, {"quote": TextQuote("改写", 4)}, "quote_original_changed"),
+            (14, {"forward_origin": None}, {}, "quote_original_changed"),
+        ):
+            embedded = await group_event(self.platform, **(fields | changes))
+            reply = await group_event(self.platform, message_id=number, reply_to_message=embedded.message_obj.raw_message.message,
+                                      **selection)
+            result = await self.receive_group(reply)
+            if failure:
+                self.assertEqual(result.failure.code, failure)
+            else:
+                require(result)
+                captured = require(await self.controller.session.bridge.groups.capture(reply))
+                quote, = captured.quotes
+                self.assertEqual((captured.principal.native_account_id, quote.sender_id, quote.forward_origin.user_id),
+                                 (str(OWNER), "321", "42"))
+                self.assertEqual(quote.text, "原文" if selection else fields["text"])
+                self.assertNotIn("原文", captured.text)
+
     async def test_group_delivery_and_collective_audience(self):
         from astrbot.core.message.message_event_result import MessageChain
 
