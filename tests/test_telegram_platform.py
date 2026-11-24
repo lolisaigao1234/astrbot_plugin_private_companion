@@ -161,6 +161,9 @@ class TelegramGroupTests(unittest.IsolatedAsyncioTestCase):
             ("你好", {}, False, False, "你好"),
             ("😀 @Synthetic_bot 好", {"entities": [MessageEntity("mention", 3, 14)]},
              True, False, "😀 " + SELF_MENTION + " 好"),
+            ("😀 @Synthetic_bot guide", {"entities": [MessageEntity("mention", 3, 14),
+                 MessageEntity("text_link", 18, 5, url="https://example.org/guide")]},
+             True, False, "😀 " + SELF_MENTION + " guide (https://example.org/guide)"),
             ("@tg_main", {"entities": [MessageEntity("mention", 0, 8)]}, False, False, "@tg_main"),
             ("@SYNTHETIC_BOT", {"entities": [MessageEntity("mention", 0, 14)]}, True, False, SELF_MENTION),
             ("@synthetic_bot 你好", {"entities": [MessageEntity("mention", 0, 14)]},
@@ -789,6 +792,17 @@ class TelegramPrivateCommandTests(TelegramHostFixture, unittest.IsolatedAsyncioT
         self.assertEqual(self.sent_text(peer), "陌生人提示")
         self.clock.advance(timedelta(seconds=60))
         await self.dispatch("你好", peer)
+        self.assertEqual(self.platform.send_by_session.await_count, 2)
+
+    async def test_refused_stranger_notice_remains_due(self):
+        peer = OWNER + 1
+        self.controller.session.application.private_access_settings.defaults_installation = Mock(return_value={
+            "stranger_notice": True, "denied_reply": "陌生人提示",
+            "stranger_daily_cap": 1, "notice_cooldown_seconds": 60,
+        })
+        self.platform.send_by_session.side_effect = [False, None]
+        for _ in range(3):
+            await self.dispatch("你好", peer)
         self.assertEqual(self.platform.send_by_session.await_count, 2)
 
     async def test_stranger_cooldown_keeps_legacy_notice_on_its_own_platform(self):
