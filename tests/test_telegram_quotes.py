@@ -137,6 +137,25 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
             payload = session.application.messages._read_source(saved.source, context, "text", self.clock.now()).payload
             self.assertEqual(json.loads(payload)["image_sources"][0]["original_sender"], str(sender))
 
+    async def test_oversized_quoted_photo_keeps_original_attribution_and_caption(self):
+        from astrbot_host.media import load_native_image
+        from tests.test_conversation_images import image_bytes
+
+        self.bridge.image_loader = load_native_image
+        source = image_bytes(size=(8193, 1))
+        photo = [{"file_id": "file", "file_unique_id": "unique", "width": 8193, "height": 1}]
+        with patch.object(PhotoSize, "get_file", new=AsyncMock(return_value=NS(
+                file_path="base64://" + base64.b64encode(source).decode()))):
+            event = await self.event(text="继续", reply_to_message=self.message(10, 424242, photo=photo, caption="原图"))
+        result = require(await self.bridge.capture(event))
+        quote, = result.quotes
+        self.assertEqual((quote.message_id, quote.sender_id, quote.sent_at), ("10", "424242", 1700000000))
+        self.assertTrue(quote.companion_sender)
+        self.assertIn("原图", quote.text)
+        self.assertEqual(quote.images, ())
+        self.assertIn("继续", result.text)
+        self.assertNotIn("原图", result.text)
+
     async def test_selection_of_a_previously_admitted_message_can_be_replayed(self):
         session = self.controller.session
         target = self.controller.settings.target("tg-owner")
