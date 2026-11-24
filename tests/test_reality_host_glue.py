@@ -259,6 +259,15 @@ class RealityHostGlueTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(getattr(getattr(req, "func_tool", None), "tools", ()))
         self.assertFalse(self.runtime._reality_touch_audio_consented(self.user))
 
+    async def test_own_telegram_words_include_debounced_text_and_transcripts(self):
+        from astrbot_host.native_extensions.reality.host_tools import sender_text
+
+        for raw_text, received in (("第二句", "第一句\n第二句"), (None, "语音转写的起床提醒"), ("/陪伴 现实触及", "陪伴 现实触及")):
+            event = self.private_event(received)
+            event.platform_meta = NS(name="telegram")
+            event.message_obj.raw_message = NS(message=NS(text=raw_text, caption=None, forward_origin=None))
+            self.assertEqual(sender_text(event), received)
+
     async def test_private_command_uses_received_confirmation_and_preserves_core_reply(self):
         self.user.pop("reality_touch_consent")
         event, owner, tool, wrapper = await self.private_tool("我理解风险并确认授权", event_id="unrequested")

@@ -12,14 +12,16 @@ from companion_v2.foundation.refs import OperationRef, VersionRef
 from companion_v2.storage.models import OperationState
 from companion_v2.storage.repositories import OperationRepository
 
+from ...binding import BURST_SENDER_TEXT_EXTRA, telegram_forward_message
+
 
 def sender_text(event):
-    if getattr(getattr(event, "platform_meta", None), "name", None) == "telegram":
-        raw = getattr(getattr(event.message_obj, "raw_message", None), "message", None)
-        if raw is None or getattr(raw, "forward_origin", None) is not None:
-            return ""
-        return getattr(raw, "text", None) or getattr(raw, "caption", None) or ""
-    return str(getattr(event, "message_str", "") or "")
+    """The sender's own words: forwarded Telegram messages and burst sections are not theirs."""
+    get_extra = getattr(event, "get_extra", None)
+    own = get_extra(BURST_SENDER_TEXT_EXTRA) if callable(get_extra) else None
+    if isinstance(own, str):
+        return own
+    return "" if telegram_forward_message(event) is not None else str(getattr(event, "message_str", "") or "")
 
 
 def private_command(event):
@@ -160,7 +162,7 @@ class RealityPrivateManagerTool(FunctionTool):
         try:
             contexts.recheck(original, user_id, umo=str(self.event.unified_msg_origin))
             accepted = await runtime.extension_api.schedule_reminder(user_id, payload,
-                source_text=str(self.event.message_str), trigger_umo=str(self.event.unified_msg_origin))
+                source_text=sender_text(self.event), trigger_umo=str(self.event.unified_msg_origin))
         except BaseException:
             require(ledger.transition(operation_ref.operation_id, expected_state=OperationState.ACCEPTED,
                 next_state=OperationState.UNKNOWN, observed_at=contexts.controller.now()))
