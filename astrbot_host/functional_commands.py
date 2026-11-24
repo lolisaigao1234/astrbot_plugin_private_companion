@@ -8,6 +8,8 @@ import json
 import logging
 import re
 
+from companion_v2.adapters.astrbot.group_mentions import telegram_plain_text
+
 from .binding import message_text
 from .native_extensions.request_context import set_system_instruction
 
@@ -169,6 +171,11 @@ def _match_alias(value: str, aliases: dict[str, str]):
         if folded.startswith(key + " "):
             return aliases[alias], value[len(alias):].strip()
     return None, ""
+
+
+def functional_command_text(event, *, channel: str) -> str:
+    text = message_text(event)
+    return telegram_plain_text(event, text) if channel == "group" else text
 
 
 def parse_functional_command(text: object, *, channel: str) -> FunctionalCommand | None:
@@ -686,13 +693,7 @@ def functional_command_receipt(event, command: FunctionalCommand | None, *, appl
 def inject_functional_command_instruction(event, request, *, channel: str, own_module: str | None = None,
                                           application=None, context=None) -> FunctionalCommand | None:
     """Attach request-local guidance after native extensions have reset their context."""
-    from .event_routing import competing_command_handler
-
-    if competing_command_handler(event, own_module=own_module) is not None:
-        command = None
-    else:
-        command = parse_functional_command(message_text(event), channel=channel)
-    _store_core_functional_command(event, command)
+    command = classify_functional_command(event, channel=channel, own_module=own_module)
     if command is not None:
         logger.info("[CompanionV2] 功能指令识别 surface=%s intent=%s", command.surface, command.intent)
     set_system_instruction(request, "functional_command", command_instruction(command))
@@ -708,7 +709,7 @@ def classify_functional_command(event, *, channel: str, own_module: str | None =
     if competing_command_handler(event, own_module=own_module) is not None:
         command = None
     else:
-        command = parse_functional_command(message_text(event), channel=channel)
+        command = parse_functional_command(functional_command_text(event, channel=channel), channel=channel)
     _store_core_functional_command(event, command)
     return command
 

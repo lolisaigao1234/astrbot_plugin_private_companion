@@ -16,8 +16,7 @@ from companion_v2.execution.models import TaskError
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.foundation.refs import ScopeKind
 
-from .binding import message_text
-from .functional_commands import GROUP_CONTROL_INTENTS, parse_functional_command
+from .functional_commands import GROUP_CONTROL_INTENTS, functional_command_text, parse_functional_command
 from .private_notice import send_text_notice
 from .recalls import authenticate_notice_route
 
@@ -109,7 +108,7 @@ async def _set_group_image(controller, session, target, route, enable, at):
 
 async def receive_group_llm_command(controller, event, *, target=None):
     """Return None when this is not a handled group LLM command."""
-    command = parse_group_control(message_text(event))
+    command = parse_group_control(functional_command_text(event, channel="group"))
     if command is None:
         return None
     route = authenticate_notice_route(controller, event, ScopeKind.GROUP, expected_post="message")

@@ -133,14 +133,14 @@ async def group_event(platform, chat_id=-400, kind="group", topic=None, text="�
     return platform.create_event(native)
 
 
-async def forum_reply_event(platform, *, topic_root):
+async def forum_reply_event(platform, *, topic_root, text="/ 原文"):
     original = Message(10 if topic_root else 11, date=datetime.now(timezone.utc),
                        chat=Chat(-400, "supergroup", is_forum=True),
                        from_user=User(platform.client.id, "Bot", True),
                        is_topic_message=True, message_thread_id=10,
                        forum_topic_created=ForumTopicCreated("Topic", 0) if topic_root else None,
                        text=None if topic_root else "之前")
-    return await group_event(platform, kind="supergroup", topic=10, text="/ 原文", reply_to_message=original)
+    return await group_event(platform, kind="supergroup", topic=10, text=text, reply_to_message=original)
 
 
 class TelegramGroupTests(unittest.IsolatedAsyncioTestCase):
@@ -186,6 +186,24 @@ class TelegramGroupTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(any(isinstance(part, Reply) for part in event.message_obj.message), not topic_root)
                 self.assertEqual(group_trigger_facts(event, "tg-main")["quoted_bot"], not topic_root)
                 self.assertEqual(group_message_text(event, "tg-main"), "/ 原文")
+
+    async def test_functional_commands_in_bot_replies_and_bot_created_topics(self):
+        from astrbot_host.functional_commands import (
+            classify_functional_command, inject_functional_command_instruction,
+        )
+
+        platform = TelegramPlatform()
+        for root in (True, False):
+            for text, recognized in (("陪伴群 话题", True), ("/陪伴群 话题", True),
+                                     ("/ 陪伴群 话题", False), ("你好", False)):
+                with self.subTest(topic_root=root, text=text):
+                    event = await forum_reply_event(platform, topic_root=root, text=text)
+                    self.assertEqual(event.message_obj.message_str, "/ " + text)
+                    classified = classify_functional_command(event, channel="group")
+                    request = NS(system_prompt="role", extra_user_content_parts=[])
+                    injected = inject_functional_command_instruction(event, request, channel="group")
+                    self.assertEqual(classified, injected)
+                    self.assertEqual(classified is not None, recognized)
 
     async def test_only_genuine_same_topic_reply_captures_a_quote(self):
         from companion_v2.adapters.astrbot.telegram_references import message_references
@@ -619,9 +637,14 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
         from companion_v2.execution.models import require
         platform, controller = self.platform, self.controller
         platform.client.get_chat_member = AsyncMock()
+        topic_creator = Message(23, date=datetime.now(timezone.utc),
+                                chat=Chat(-100400, "supergroup", is_forum=True),
+                                from_user=User(platform.client.id, "Bot", True),
+                                forum_topic_created=ForumTopicCreated("Topic", 0))
         for status, text in (("administrator", "陪伴群 关闭LLM"), ("creator", "陪伴群 开启LLM")):
             platform.client.get_chat_member.return_value = NS(user=NS(id=OWNER), status=status)
-            event = await group_event(platform, -100400, "supergroup", 23, text=text)
+            event = await group_event(platform, -100400, "supergroup", 23, text=text,
+                                      reply_to_message=topic_creator)
             result = require(await receive_group_llm_command(controller, event))
             self.assertIn("只有安装管理员", result["text"])
         authority = controller.authority
@@ -640,7 +663,8 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
                 ("member", "陪伴群 关闭LLM", "未执行"),
                 (None, "陪伴群 开启LLM", "未执行")):
             platform.client.get_chat_member.return_value = NS(user=NS(id=OWNER), status=status)
-            event = await group_event(platform, -100400, "supergroup", 23, text=text)
+            event = await group_event(platform, -100400, "supergroup", 23, text=text,
+                                      reply_to_message=topic_creator)
             result = require(await receive_group_llm_command(controller, event))
             self.assertIn(expected, result["text"])
             kwargs = platform.client.send_message.await_args.kwargs
