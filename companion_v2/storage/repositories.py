@@ -267,12 +267,14 @@ class OperationRepository:
         if (next_operation_state, next_outbox_state) not in allowed.get(
                 (expected_operation_state, expected_outbox_state), set()):
             return Outcome.failed("outbox_transition_invalid", "operation and outbox transition is not supported")
-        if next_outbox_state == "accepted":
+        refused = (expected_outbox_state == "unknown" and next_outbox_state == "cancelled"
+                   and receipt_ref is not None)
+        if next_outbox_state == "accepted" or refused:
             if (not isinstance(receipt_ref, str) or not receipt_ref or receipt_ref != receipt_ref.strip()
                     or len(receipt_ref) > 512):
-                return Outcome.failed("outbox_receipt_invalid", "accepted outbox state requires a bounded receipt")
+                return Outcome.failed("outbox_receipt_invalid", "outbox receipt must be a bounded reference")
         elif receipt_ref is not None:
-            return Outcome.failed("outbox_receipt_invalid", "only accepted outbox state can store a receipt")
+            return Outcome.failed("outbox_receipt_invalid", "outbox receipt requires acceptance or a settled refusal")
         timestamp = encode_timestamp(observed_at)
         with self._runtime.transaction() as connection:
             operation = connection.execute(

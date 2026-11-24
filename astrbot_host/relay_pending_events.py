@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from companion_v2.foundation.refs import ScopeKind
 
+from .core_reply_forwards import telegram_private_forward
 from .private_notice import prepare_relay_transport, send_group_notice, send_private_notice
 from .relay_pending import (claim_expired, claim_group, claim_private_receipts, finish,
                             mark_waiting_permission, requeue)
@@ -128,7 +129,7 @@ async def _report_receipt(controller, event, target, task, reply_text):
     source_kind = str(task.get("source_kind") or "private")
     source_id = str(task.get("source_id") or task.get("source_user") or "")
     if not source_id:
-        return False
+        return "failed"
     report = "你让我问的「%s」有回复了：%s" % (
         _text(task.get("question"), 120), _text(reply_text))
     if source_kind == "group":
@@ -137,22 +138,23 @@ async def _report_receipt(controller, event, target, task, reply_text):
     else:
         result = await _send_private(controller, event, platform_id=target.platform_id,
             login=target.account_id, peer=source_id, text=report)
-    return result.get("state") == "delivered"
+    return {"delivered": "reported", "unknown": "unknown"}.get(result.get("state"), "failed")
 
 
 async def _ask_permission(controller, event, target, task):
     result = await _send_private(controller, event, platform_id=target.platform_id,
         login=target.account_id, peer=target.participant_id,
         text="可以把这条回复带回给发起人吗？回复「可以」或「不要」。")
-    return result.get("state") == "delivered"
+    return result.get("state")
 
 
 async def process_private_receipts(controller, event, target):
     """Handle a target member's reply and optionally ask before reporting it."""
     target_user_id = str(target.participant_id)
     text = _text(getattr(event, "message_str", ""), 800)
-    confirmed = any(token in text for token in ("可以", "同意", "好", "行", "转告", "带回去", "转发"))
-    rejected = any(token in text for token in ("不要", "不用", "不行", "不可以", "拒绝", "别转", "算了"))
+    direct = not telegram_private_forward(event)
+    confirmed = direct and any(token in text for token in ("可以", "同意", "好", "行", "转告", "带回去", "转发"))
+    rejected = direct and any(token in text for token in ("不要", "不用", "不行", "不可以", "拒绝", "别转", "算了"))
 
     permission_tasks = await asyncio.to_thread(claim_private_receipts, controller.runtime,
                                                target_user_id, permission=True, telegram_account=_telegram_account(event, target))
@@ -168,13 +170,12 @@ async def process_private_receipts(controller, event, target):
                 await asyncio.to_thread(finish, controller.runtime, task_id, "declined")
             elif confirmed:
                 in_flight_permission = task_id
-                in_flight_permission_state = "failed"
+                in_flight_permission_state = "unknown"
                 try:
-                    ok = await _report_receipt(controller, event, target, task,
-                                               _text(task.get("reply_text"), 800))
+                    in_flight_permission_state = await _report_receipt(
+                        controller, event, target, task, _text(task.get("reply_text"), 800))
                 except Exception:
-                    ok = False
-                in_flight_permission_state = "reported" if ok else "failed"
+                    in_flight_permission_state = "failed"
                 await asyncio.to_thread(finish, controller.runtime, task_id, in_flight_permission_state)
             else:
                 await asyncio.to_thread(requeue, controller.runtime, task_id, state="waiting_permission")
@@ -203,23 +204,28 @@ async def process_private_receipts(controller, event, target):
         for task in reply_tasks:
             task_id = task["id"]
             if task.get("confirm_before_report"):
+                in_flight_report = task_id
+                in_flight_report_state = "unknown"
                 try:
                     asked = await _ask_permission(controller, event, target, task)
                 except Exception:
-                    asked = False
-                if asked:
+                    asked = "failed"
+                if asked == "unknown":
+                    await asyncio.to_thread(finish, controller.runtime, task_id, "unknown")
+                elif asked == "delivered":
+                    in_flight_report = None
                     in_flight_ask = task_id
                     await asyncio.to_thread(mark_waiting_permission, controller.runtime, task_id, text)
                 else:
+                    in_flight_report = None
                     await asyncio.to_thread(requeue, controller.runtime, task_id, state="waiting_reply")
             else:
                 in_flight_report = task_id
-                in_flight_report_state = "failed"
+                in_flight_report_state = "unknown"
                 try:
-                    ok = await _report_receipt(controller, event, target, task, text)
+                    in_flight_report_state = await _report_receipt(controller, event, target, task, text)
                 except Exception:
-                    ok = False
-                in_flight_report_state = "reported" if ok else "failed"
+                    in_flight_report_state = "failed"
                 await asyncio.to_thread(finish, controller.runtime, task_id, in_flight_report_state)
             settled_reply.add(task_id)
             in_flight_report = None

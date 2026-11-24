@@ -234,7 +234,7 @@ class HostLayerRegressionTests(unittest.IsolatedAsyncioTestCase):
         controller = NS(runtime=runtime, native_types=NS(), session=None)
         target = NS(platform_id="qq", account_id="100", participant_id="u-1", group_id="g-1")
         unrelated = NS(message_str="今天天气不错", bot=None, platform_meta=NS(name="aiocqhttp"))
-        with patch("astrbot_host.relay_pending_events._ask_permission", AsyncMock(return_value=True)) as ask_mock:
+        with patch("astrbot_host.relay_pending_events._ask_permission", AsyncMock(return_value="delivered")) as ask_mock:
             await process_private_receipts(controller, unrelated, target)
         ask_mock.assert_not_awaited()
         saved = relay_read(runtime)["tasks"][perm_id]
@@ -294,14 +294,14 @@ class HostLayerRegressionTests(unittest.IsolatedAsyncioTestCase):
             "expires_at": future,
         })
         target_u2 = NS(platform_id="qq-main", account_id="100", group_id="g-1", participant_id="u-2")
-        with patch("astrbot_host.relay_pending_events._report_receipt", AsyncMock(return_value=True)), \
+        with patch("astrbot_host.relay_pending_events._report_receipt", AsyncMock(return_value="reported")), \
                 patch("astrbot_host.relay_pending_events.asyncio.to_thread", side_effect=cancel_on_finish):
             with self.assertRaises(asyncio.CancelledError):
                 await process_private_receipts(controller, NS(message_str="刚到"), target_u2)
         self.assertEqual(relay_read(runtime)["tasks"][report_id]["state"], "reported")
 
         # 6) Cancellation during finish() after confirmed permission report settles as "reported".
-        with patch("astrbot_host.relay_pending_events._report_receipt", AsyncMock(return_value=True)), \
+        with patch("astrbot_host.relay_pending_events._report_receipt", AsyncMock(return_value="reported")), \
                 patch("astrbot_host.relay_pending_events.asyncio.to_thread", side_effect=cancel_on_finish):
             with self.assertRaises(asyncio.CancelledError):
                 await process_private_receipts(controller, NS(message_str="可以"), target)

@@ -293,9 +293,8 @@ class RelayToolPortTests(unittest.IsolatedAsyncioTestCase):
             self.operation_id, "private:2002").unwrap()
         self.assertEqual((outbox.state, outbox.receipt_ref), ("unknown", None))
 
-        with self.assertRaises(TaskError) as raised:
-            await self.send()
-        self.assertEqual(raised.exception.code, "relay_result_unknown")
+        replay = await self.send()
+        self.assertEqual((replay.state, replay.effect), ("unknown", "unknown"))
         self.assertEqual(len(self.api.calls), 1)
 
 

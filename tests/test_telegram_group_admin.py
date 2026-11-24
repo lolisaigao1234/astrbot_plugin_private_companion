@@ -66,12 +66,8 @@ class TelegramAdministrationTests(unittest.IsolatedAsyncioTestCase):
             bot.get_chat_member.side_effect = [admin]
             self.assertEqual((await resolve_group_standing(other, cache, fresh=True))["role"], "admin")
 
-    async def test_relays_resolve_only_configured_windows_and_keep_confirmation(self):
-        import json
-        from datetime import timedelta
-        from tests.test_relay_tools import RelayToolPortTests, NOW, SETTINGS
-        from companion_v2.conversation.relay_tools import SEND_ACTION
-        from companion_v2.execution.models import TaskError
+    async def relay_fixture(self):
+        from tests.test_relay_tools import RelayToolPortTests, SETTINGS
 
         fixture = RelayToolPortTests()
         fixture.addCleanup = self.addCleanup
@@ -100,6 +96,16 @@ class TelegramAdministrationTests(unittest.IsolatedAsyncioTestCase):
             invocation = fixture.invocation(action, arguments, action)
             return await port.invoke("relay:" + action, invocation)
 
+        return fixture, platform, invoke
+
+    async def test_relays_resolve_only_configured_windows_and_keep_confirmation(self):
+        import json
+        from datetime import timedelta
+        from tests.test_relay_tools import NOW
+        from companion_v2.conversation.relay_tools import SEND_ACTION
+        from companion_v2.execution.models import TaskError
+
+        fixture, platform, invoke = await self.relay_fixture()
         for hint, code in (("家人", "relay_target_ambiguous"), ("9999", "relay_target_not_found")):
             with self.assertRaises(TaskError) as refused:
                 await invoke("relay_message", dict(destination_id=hint, text="你好"))
@@ -124,6 +130,78 @@ class TelegramAdministrationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(kwargs["entities"][0].url, "tg://user?id=2002")
             platform.client.send_message.assert_awaited_once()
             platform.client.send_message.reset_mock()
+
+    async def test_immediate_relay_replays_definite_refusal_and_ambiguous_timeout(self):
+        import json
+        from datetime import timedelta
+        from telegram.error import Forbidden
+        from tests.test_relay_tools import NOW
+        from companion_v2.conversation.relay_tools import SEND_ACTION
+
+        fixture, platform, invoke = await self.relay_fixture()
+        fixture.current_text = "确认发送"
+        for kind, peer in (("private", "2002"), ("group", "-1004#22")):
+            for error, outcome, code in ((Forbidden("Bot was blocked by the user"), "failed", "telegram_bot_blocked"),
+                                         (TimeoutError(), "unknown", "relay_delivery_unknown")):
+                with self.subTest(kind=kind, outcome=outcome):
+                    args = dict(destination_kind=kind, destination_id=peer, text=outcome)
+                    if kind == "group":
+                        args["mention"] = "2002"
+                    request = dict(event_id="ask", observed_at=NOW.isoformat())
+                    fixture.current_input = request
+                    proposal = json.loads((await invoke("relay_message", args)).source.payload)
+                    send_args = dict(args, operation_id=proposal["operation_id"], confirmed=True)
+                    fixture.current_input = dict(event_id="confirm", observed_at=(NOW + timedelta(seconds=1)).isoformat())
+                    platform.client.send_message.reset_mock()
+                    platform.client.send_message.side_effect = error
+                    for _ in range(2):
+                        result = await invoke(SEND_ACTION, send_args)
+                        self.assertEqual((result.state, result.error_code), (outcome, code))
+                    fixture.current_input = request
+                    proposed = await invoke("relay_message", args)
+                    self.assertEqual(json.loads(proposed.source.payload)["state"], outcome)
+                    platform.client.send_message.assert_awaited_once()
+
+    async def test_delayed_relay_tool_replays_the_delivery_outcome(self):
+        import json
+        from datetime import timedelta
+        from telegram.error import Forbidden
+        from tests.test_relay_tools import NOW
+        from companion_v2.conversation.relay_tools import SEND_ACTION
+        from astrbot_host.relay_pending_events import process_group_presence
+
+        fixture, platform, invoke = await self.relay_fixture()
+        fixture.current_text = "确认发送"
+        target = NS(group_id="-1004#22", platform_id="onebot", account_id="account-a")
+        event = await group_event(platform, -1004, "supergroup", 22)
+        context = NS(actor=NS(principal=NS(native_account_id="2002")))
+        route = NS(peer=target.group_id, platform=platform, client=platform.client,
+                   platform_name="telegram", platform_id="onebot", login="account-a")
+        for error, expected in ((None, "already_sent"), (Forbidden("blocked"), "failed"),
+                                (TimeoutError(), "unknown")):
+            with self.subTest(expected=expected):
+                args = dict(destination_kind="group", destination_id=target.group_id,
+                            text=expected, mention="2002", delay_until_seen=True)
+                request = dict(event_id="request", observed_at=NOW.isoformat())
+                fixture.current_input = request
+                proposal = json.loads((await invoke("relay_message", args)).source.payload)
+                send_args = dict(args, confirmed=True, operation_id=proposal["operation_id"])
+                fixture.current_input = dict(event_id="confirm", observed_at=(NOW + timedelta(seconds=1)).isoformat())
+                for _ in range(2):
+                    replay = await invoke(SEND_ACTION, send_args)
+                    self.assertEqual(json.loads(replay.source.payload)["state"], "scheduled")
+                platform.client.send_message.side_effect = error
+                with patch("astrbot_host.relay_pending_events._route", return_value=route), patch(
+                        "astrbot_host.relay_pending_events.prepare_relay_transport", return_value=None):
+                    for _ in range(2):
+                        await process_group_presence(NS(runtime=fixture.runtime), event, target, context)
+                replay = await invoke(SEND_ACTION, send_args)
+                self.assertEqual(json.loads(replay.source.payload)["state"] if replay.source else replay.state, expected)
+                fixture.current_input = request
+                proposed = await invoke("relay_message", args)
+                self.assertEqual(json.loads(proposed.source.payload)["state"], expected)
+                platform.client.send_message.assert_awaited_once()
+                platform.client.send_message.reset_mock()
 
     async def test_delayed_mention_timeout_stays_unknown_on_replay(self):
         from time import time

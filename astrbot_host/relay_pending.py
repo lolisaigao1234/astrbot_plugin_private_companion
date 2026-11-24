@@ -88,6 +88,15 @@ def add_task(runtime, task):
         return identifier
 
 
+def scheduled_state(runtime, task_id):
+    task = _read(runtime)["tasks"].get(task_id) or {}
+    state = task.get("state")
+    if state == "waiting" and task.get("expires_at", 0) <= time():
+        return "expired"
+    return {"waiting": "scheduled", "sent": "already_sent", "failed": "failed",
+            "expired": "expired"}.get(state, "unknown")
+
+
 def claim_group(runtime, group_id, target_user_id, now=None, *, telegram_account=None):
     now = time() if now is None else now
     claimed = []
