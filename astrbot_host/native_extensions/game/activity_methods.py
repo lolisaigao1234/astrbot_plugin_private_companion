@@ -1,5 +1,6 @@
 """V2 game activity services."""
 from __future__ import annotations
+from companion_v2.adapters.astrbot.telegram_send import send_context_message
 from .common import *
 from ..usage import tracked_text_chat
 
@@ -741,7 +742,7 @@ class GameActivityMethods:
         if not text:
             return
         try:
-            await self.context.send_message(room.session_id, MessageChain([Plain(text)]))
+            await send_context_message(self.context, room.session_id, MessageChain([Plain(text)]))
         except Exception as exc:
             logger.debug('[GameCompanion] 回发游戏消息失败: %s', exc)
 

@@ -1,6 +1,7 @@
 """Twitch runtime, moderation-free auto reply, and output integration."""
 
 from __future__ import annotations
+from companion_v2.adapters.astrbot.telegram_send import send_context_message
 from .native_context import live_private_persona_prompt
 from ..usage import tracked_text_chat
 
@@ -444,7 +445,7 @@ class TwitchMixin:
                 audio_path = str(payload.get("audio_path") or "")
         sent = False
         try:
-            await self.context.send_message(session_id, MessageChain(chain))
+            await send_context_message(self.context, session_id, MessageChain(chain))
             sent = True
         except Exception as exc:
             logger.warning("[Twitch] 发送自动回应失败: %s", exc)

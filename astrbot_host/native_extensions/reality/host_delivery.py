@@ -12,6 +12,7 @@ from astrbot.core.message.message_event_result import MessageChain
 
 from companion_v2.conversation.location_context import sanitize_activity_note
 from companion_v2.conversation.text_processing import strip_internal_expression_protocol
+from companion_v2.adapters.astrbot.telegram_send import send_context_message
 from companion_v2.execution.models import TaskError, digest, encode, require
 from companion_v2.foundation.refs import OperationRef, SourceRef, VersionRef
 from companion_v2.sources.models import SourceRecord
@@ -75,7 +76,7 @@ class RealityHostDelivery:
             return accepted.state is OperationState.COMPLETED
         self.contexts.recheck(original, user_id, umo=umo)
         try:
-            returned = await self.contexts.controller.context.send_message(umo, MessageChain(chain=[Plain(text)]))
+            returned = await send_context_message(self.contexts.controller.context, umo, MessageChain(chain=[Plain(text)]))
         except BaseException:
             require(ledger.transition(operation.operation_id, expected_state=OperationState.ACCEPTED,
                 next_state=OperationState.UNKNOWN, observed_at=self.contexts.controller.now()))
