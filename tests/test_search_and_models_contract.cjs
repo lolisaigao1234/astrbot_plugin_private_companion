@@ -938,10 +938,17 @@ test("Modal UX: state-home-settings and detail-dialog-settings enforce three-tie
   }
 });
 
-test("Telegram 窗口的表达页不提供 QQ 自定义短状态", () => {
-  const expression = platform_name => createNavAndSearchContext({
-    product: {target: () => ({target_id: "t1", scope_kind: "private", platform_name})},
-  }).run("renderExpressionOriginal()");
-  assert.ok(!expression("telegram").includes("QQ 自定义短状态"));
-  assert.ok(expression("aiocqhttp").includes("QQ 自定义短状态"));
+test("Telegram 窗口和角色不提供 QQ 短状态入口与搜索项", () => {
+  const offered = product => {
+    const ctx = createNavAndSearchContext({product});
+    const fields = ctx.run("searchableConfigEntries().map(item => item.entry.field)");
+    return [ctx.run("renderExpressionOriginal()").includes("QQ 自定义短状态"),
+      fields.includes("presence_enabled"), fields.includes("online_status_enabled"), fields.includes("typing_enabled")];
+  };
+  const row = platform_name => ({target_id: "t1", scope_kind: "private", platform_name});
+  const hidden = [false, false, false, true];
+  assert.deepEqual(offered({target: () => row("telegram")}), hidden);
+  assert.deepEqual(offered({target: () => undefined, roleTarget: () => row("telegram")}), hidden);
+  assert.deepEqual(offered({target: () => row("unknown")}), hidden);
+  assert.deepEqual(offered({target: () => row("aiocqhttp")}), [true, true, true, true]);
 });
