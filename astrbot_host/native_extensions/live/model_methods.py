@@ -1,5 +1,6 @@
 """V2 live model services."""
 from __future__ import annotations
+from companion_v2.adapters.astrbot.telegram_send import send_context_message
 from .common import *
 from .activity_methods import _spawn_managed_task
 from .native_context import live_private_persona_prompt
@@ -267,10 +268,10 @@ class LiveModelMethods:
         if synced_tts:
             sent_synced = await self._send_bili_live_synced_tts_reply(session_id, reply_text)
             if not sent_synced:
-                await self.context.send_message(session_id, MessageChain(chain))
+                await send_context_message(self.context, session_id, MessageChain(chain))
                 await self._push_subtitle(reply_text, source='bili_live')
         else:
-            await self.context.send_message(session_id, MessageChain(chain))
+            await send_context_message(self.context, session_id, MessageChain(chain))
             await self._push_subtitle(reply_text, source='bili_live')
         self._record_bili_auto_reply_sent(selected, reply_text)
         if force_voice and (not synced_tts):
@@ -344,10 +345,10 @@ class LiveModelMethods:
         if synced_tts:
             sent_synced = await self._send_bili_live_synced_tts_reply(session_id, reply_text)
             if not sent_synced:
-                await self.context.send_message(session_id, MessageChain(chain))
+                await send_context_message(self.context, session_id, MessageChain(chain))
                 await self._push_subtitle(reply_text, source='bili_live')
         else:
-            await self.context.send_message(session_id, MessageChain(chain))
+            await send_context_message(self.context, session_id, MessageChain(chain))
             await self._push_subtitle(reply_text, source='bili_live')
         self._record_bili_auto_reply_sent(selected, reply_text)
         if force_voice and (not synced_tts):
@@ -436,10 +437,10 @@ class LiveModelMethods:
             if synced_tts:
                 sent_synced = await self._send_bili_live_synced_tts_reply(session_id, reply_text)
                 if not sent_synced:
-                    await self.context.send_message(session_id, MessageChain(chain))
+                    await send_context_message(self.context, session_id, MessageChain(chain))
                     await self._push_subtitle(reply_text, source='bili_live')
             else:
-                await self.context.send_message(session_id, MessageChain(chain))
+                await send_context_message(self.context, session_id, MessageChain(chain))
                 await self._push_subtitle(reply_text, source='bili_live')
             send_elapsed = time.perf_counter() - t_send
             self._record_bili_auto_reply_sent(selected, reply_text)

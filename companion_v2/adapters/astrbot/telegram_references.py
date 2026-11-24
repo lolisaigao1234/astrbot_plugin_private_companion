@@ -20,17 +20,19 @@ class TelegramReferences:
     quote: TelegramQuote | None = None
     images: tuple = ()
     unavailable: bool = False
-    forward_origin: str = ""
-    forwarded_at: int | None = None
-    forward_user_id: str | None = None
+    origin: TelegramForwardOrigin | None = None
+
+    @property
+    def forward_origin(self):
+        return self.origin.label if self.origin else ""
 
     @property
     def forward_marker(self):
         return f"[转发消息，来源：{self.forward_origin}]"
 
     def capture_forward(self, event_id, text, images, audios, videos):
-        resource = digest(["telegram-forward", event_id, self.forward_origin, self.forwarded_at])
-        node = CapturedForwardNode((0,), resource, self.forward_user_id, self.forward_origin[:256], self.forwarded_at,
+        resource = self.origin.resource_hash(event_id)
+        node = CapturedForwardNode((0,), resource, self.origin.user_id, self.origin.label[:256], self.origin.sent_at,
                                    text, images, audios, videos)
         position = 1 if self.quote and self.quote.position == 0 else 0
         return CapturedForward(position, resource, (node,))
@@ -140,9 +142,7 @@ def message_references(event):
     """Read references after the caller has authenticated the chat and speaker."""
     message = event.message_obj
     raw = message.raw_message.message
-    origin = _origin(event, raw.forward_origin)
-    references = TelegramReferences(forward_origin=origin.label, forwarded_at=origin.sent_at,
-                                    forward_user_id=origin.user_id) if origin else TelegramReferences()
+    references = TelegramReferences(origin=_origin(event, raw.forward_origin))
     reply = next(((index, part) for index, part in enumerate(message.message)
                   if getattr(part.type, "value", part.type) == "Reply"), None)
     original = reply_original(raw)
