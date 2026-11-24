@@ -12,7 +12,7 @@ import wave
 from unittest.mock import AsyncMock, Mock, patch
 
 from telegram.error import BadRequest, Forbidden, InvalidToken, NetworkError, RetryAfter, TimedOut
-from telegram import Chat, ForumTopicCreated, Message, MessageEntity, Update, User
+from telegram import Chat, ForumTopicCreated, ForumTopicEdited, Message, MessageEntity, Update, User
 from astrbot.core.message.components import Plain, Reply
 from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
 from astrbot.core.platform.message_type import MessageType
@@ -482,7 +482,6 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
             self.assertNotIn("None", payload["text"])
 
     async def test_topic_directory_tracks_group_topic_and_member_renames(self):
-        from telegram import ForumTopicEdited
         directory = self.controller.session_topology
         for title, topic, member in (("读书群", "小说", "阿青"), ("阅读群", "故事", "青")):
             event = await group_event(self.platform, -100400, "supergroup", 23, text=None,
@@ -496,6 +495,24 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
                                                  title="新群名", new_chat_title="新群名"))
         self.assertEqual(directory.stored_group_names()[("tg-main", "tg-main", "-100400#23")],
                          "新群名-故事")
+
+    async def test_topic_directory_retains_rename_after_reply_to_creation(self):
+        directory = self.controller.session_topology
+
+        async def observe(topic, message_id, **fields):
+            event = await group_event(self.platform, -100400, "supergroup", topic, title="Club",
+                                      number=message_id, **fields)
+            await directory.observe(event)
+            return event.message_obj.raw_message.message
+
+        root = await observe(23, 23, text=None, forum_topic_created=ForumTopicCreated("Books", 0))
+        await observe(24, 24, text=None, forum_topic_created=ForumTopicCreated("Music", 0))
+        for message_id, name in ((25, "Fiction"), (27, "Stories")):
+            await observe(23, message_id, text=None, forum_topic_edited=ForumTopicEdited(name=name))
+            await observe(23, message_id + 1, reply_to_message=root)
+            names = directory.stored_group_names()
+            self.assertEqual(names[("tg-main", "tg-main", "-100400#23")], f"Club-{name}")
+            self.assertEqual(names[("tg-main", "tg-main", "-100400#24")], "Club-Music")
 
     async def test_group_quote_keeps_the_other_members_identity(self):
         quote = Message(17, date=datetime.now(timezone.utc), chat=Chat(-400, "group"),
