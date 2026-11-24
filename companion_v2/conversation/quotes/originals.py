@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 import json
+import re
 
 from companion_v2.conversation.models import InboundConversationEvent
 from companion_v2.execution.models import TaskContext, TaskError, digest
@@ -32,10 +33,12 @@ def telegram_text(payload, quote, has_image):
     return prefix, encoded.decode("utf-16-le")
 
 
-def _telegram_original(messages, context, saved, quote, body, references, at):
+def telegram_original(messages, context, saved, quote, body, references, at):
     from companion_v2.conversation.forwards.service import forward_reference, node_reference
 
     media_event = saved
+    owner = saved
+    attachment = getattr(quote, "attachment", None)
     forwards = getattr(saved, "forwards", ())
     origin = getattr(quote, "forward_origin", None)
     if bool(forwards) != bool(origin):
@@ -48,7 +51,8 @@ def _telegram_original(messages, context, saved, quote, body, references, at):
         if (forward.resource_hash != quote.origin_resource_hash or node.sender_id != origin.user_id
                 or node.sent_at != origin.sent_at):
             raise TaskError("quote_original_changed", "Telegram forward origin differs from admitted node")
-        if quote.selection_offset is None and (getattr(node, "audios", ()) or getattr(node, "videos", ())):
+        owner = node
+        if quote.selection_offset is None and attachment is None and (getattr(node, "audios", ()) or getattr(node, "videos", ())):
             raise TaskError("quote_original_changed", "full Telegram quote is missing admitted audio or video")
         root = forward_reference(saved.source, forward.position)
         ref = node_reference(root, node.path)
@@ -65,7 +69,32 @@ def _telegram_original(messages, context, saved, quote, body, references, at):
         if saved.quotes[0].position != 0 or not body.startswith(marker):
             raise TaskError("quote_original_changed", "admitted Telegram reply marker changed")
         body = body[len(marker):]
-    return body, media_event
+    return body, media_event, owner
+
+
+def telegram_attachment_caption(body, owner, quote):
+    attachment = quote.attachment
+    audios = getattr(owner, "audios", ())
+    if attachment.kind == "voice" and len(audios) == 1 and body.startswith("\n[语音 1]\n"):
+        label, caption = "[语音消息]", body[len("\n[语音 1]\n"):]
+    elif attachment.kind in ("document", "unnamed_document") and body.startswith("\n[文件阅读材料]\n"):
+        # The file reader emits one JSON line before the converted caption.
+        entry, separator, caption = body[len("\n[文件阅读材料]\n"):].partition("\n")
+        try:
+            name = json.loads(entry)["name"]
+        except (ValueError, KeyError, TypeError):
+            name = None
+        if (not separator or not isinstance(name, str) or attachment.kind == "unnamed_document"
+                and not re.fullmatch("[0-9a-f]{32}", name)):
+            raise TaskError("quote_original_changed", "admitted document metadata is unavailable")
+        label = f"[文件 {name}]" if attachment.kind == "document" else "[文件]"
+    else:
+        raise TaskError("quote_original_changed", "attachment differs from admitted Telegram original")
+    _, caption = telegram_text(caption, quote, False)
+    full = label + ("\n" + caption if caption else "")
+    if digest(full) != attachment.projection_hash:
+        raise TaskError("quote_original_changed", "attachment label or caption changed")
+    return caption if quote.selection_offset is not None else full
 
 
 def original_sources(messages, context, event, quote, text, at, *, publish):
@@ -104,9 +133,12 @@ def original_sources(messages, context, event, quote, text, at, *, publish):
             media_event = saved
             telegram = isinstance(quote, TelegramQuoteDescriptor)
             if telegram:
-                body, media_event = _telegram_original(messages, context, saved, quote, body, references, at)
+                body, media_event, owner = telegram_original(messages, context, saved, quote, body, references, at)
             prefix = ""
-            if offset is not None or getattr(quote, "link_suffixes", ()):
+            attachment = getattr(quote, "attachment", None)
+            if attachment:
+                body = telegram_attachment_caption(body, owner, quote)
+            elif offset is not None or getattr(quote, "link_suffixes", ()):
                 prefix, body = telegram_text(body, quote, bool(getattr(media_event, "images", ())))
             if offset is not None:
                 # Telegram selection positions are UTF-16 code units, including on emoji.
@@ -119,6 +151,10 @@ def original_sources(messages, context, event, quote, text, at, *, publish):
                 or getattr(saved, "forwards", ()) != getattr(quote, "forwards", ()))
             if prefix + body != text or incompatible_components:
                 raise TaskError("quote_original_changed", "quote differs from the already admitted original")
+            if attachment:
+                # The quote covers only verified metadata, never the attachment contents.
+                references.append(saved.source)
+                continue
             saved_audios = getattr(saved, "audios", ())
             saved_videos = getattr(saved, "videos", ())
             if (tuple(saved_audios) != getattr(quote, "audios", ())

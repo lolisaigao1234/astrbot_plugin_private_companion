@@ -144,6 +144,25 @@ async def forum_reply_event(platform, *, topic_root, text="/ 原文"):
 
 
 class TelegramGroupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_delayed_mention_redacts_httpx_membership_request(self):
+        from companion_v2.adapters.astrbot.telegram_wire import member_usernames
+
+        bot = telegram_bot()
+        transport = httpx.MockTransport(lambda request: httpx.Response(200))
+        async with httpx.AsyncClient(transport=transport) as http:
+            async def lookup(*, chat_id, user_id):
+                await http.post(f"https://telegram.invalid/bot{bot.token}/getChatMember")
+                return NS(user=User(user_id, "Synthetic", False, username="speaker"))
+
+            bot.get_chat_member = lookup
+            with self.assertLogs("httpx", "INFO") as logs:
+                names = await member_usernames(bot, "-100400#23", [str(OWNER)])
+
+        self.assertEqual(names, {str(OWNER): "speaker"})
+        record, = logs.records
+        self.assertIn("/bot[redacted]/getChatMember", record.getMessage())
+        self.assertNotIn(bot.token, repr(vars(record)))
+
     async def test_sdk_group_and_topic_routes(self):
         platform = TelegramPlatform()
         for kind, topic, window in (("group", None, "-400"), ("supergroup", None, "-400"),
@@ -290,6 +309,23 @@ class TelegramPresenceTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
         self.context, _ = await self.controller.session.synchronize(self.controller.settings.target("tg-owner"))
         self.action = self.platform.client.send_chat_action = AsyncMock(return_value=True)
         self.presence = self.app.presence
+
+    async def test_typing_redacts_httpx_request(self):
+        self.enable_typing()
+        bot = self.platform.client
+        transport = httpx.MockTransport(lambda request: httpx.Response(200))
+        async with httpx.AsyncClient(transport=transport) as http:
+            async def chat_action(**kwargs):
+                await http.post(f"https://telegram.invalid/bot{bot.token}/sendChatAction")
+                return True
+
+            self.action.side_effect = chat_action
+            with self.assertLogs("httpx", "INFO") as logs:
+                result = await self.presence.port.typing(self.context)
+        self.assertEqual(result["state"], "accepted")
+        record, = logs.records
+        self.assertIn("/bot[redacted]/sendChatAction", record.getMessage())
+        self.assertNotIn(bot.token, repr(vars(record)))
 
     def enable_typing(self, interval=1):
         from astrbot_host.management_identity import dashboard_operator
@@ -583,6 +619,64 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
                 reply = await group_event(self.platform, message_id=n + index,
                     reply_to_message=altered.message_obj.raw_message.message, quote=TextQuote("片段", offset))
                 self.assertEqual((await receive(reply)).failure.code, expected)
+
+    async def receive_group(self, event):
+        event.created_at = self.clock.now().timestamp()
+        return await self.controller.session.receive(event, self.controller.settings.target("group-0"))
+
+    async def test_group_quote_of_admitted_reply(self):
+        earlier = await group_event(self.platform, message_id=10, text="此前的发言")
+        member = User(321, "Quoted", False)
+        fields = dict(message_id=11, from_user=member, text="😀成员回答")
+        original = await group_event(self.platform, **fields, reply_to_message=earlier.message_obj.raw_message.message)
+        require(await self.receive_group(original))
+        # Telegram omits reply_to_message inside the embedded original.
+        for number, changes, selection, failure in (
+            (12, {}, {}, None),
+            (13, {}, {"quote": TextQuote("成员", 2)}, None),
+            (14, {"text": "😀改写回答"}, {"quote": TextQuote("改写", 2)}, "quote_original_changed"),
+            (15, {"from_user": User(322, "Other", False)}, {}, "quote_original_scope_mismatch"),
+        ):
+            embedded = await group_event(self.platform, **(fields | changes))
+            reply = await group_event(self.platform, message_id=number, reply_to_message=embedded.message_obj.raw_message.message,
+                                      **selection)
+            result = await self.receive_group(reply)
+            if failure:
+                self.assertEqual(result.failure.code, failure)
+            else:
+                require(result)
+                captured = require(await self.controller.session.bridge.groups.capture(reply))
+                quote, = captured.quotes
+                self.assertEqual((captured.principal.native_account_id, quote.sender_id, quote.text),
+                                 (str(OWNER), "321", "成员" if selection else fields["text"]))
+                self.assertNotIn("成员", captured.text)
+
+    async def test_group_quote_of_admitted_forward(self):
+        from telegram import MessageOriginUser
+        origin = MessageOriginUser(datetime.now(timezone.utc), User(42, "Source", False))
+        fields = dict(message_id=10, from_user=User(321, "Forwarder", False), text="😀转发原文", forward_origin=origin)
+        original = await group_event(self.platform, **fields)
+        require(await self.receive_group(original))
+        for number, changes, selection, failure in (
+            (11, {}, {}, None),
+            (12, {}, {"quote": TextQuote("原文", 4)}, None),
+            (13, {"text": "😀转发改写"}, {"quote": TextQuote("改写", 4)}, "quote_original_changed"),
+            (14, {"forward_origin": None}, {}, "quote_original_changed"),
+        ):
+            embedded = await group_event(self.platform, **(fields | changes))
+            reply = await group_event(self.platform, message_id=number, reply_to_message=embedded.message_obj.raw_message.message,
+                                      **selection)
+            result = await self.receive_group(reply)
+            if failure:
+                self.assertEqual(result.failure.code, failure)
+            else:
+                require(result)
+                captured = require(await self.controller.session.bridge.groups.capture(reply))
+                quote, = captured.quotes
+                self.assertEqual((captured.principal.native_account_id, quote.sender_id, quote.forward_origin.user_id),
+                                 (str(OWNER), "321", "42"))
+                self.assertEqual(quote.text, "原文" if selection else fields["text"])
+                self.assertNotIn("原文", captured.text)
 
     async def test_group_delivery_and_collective_audience(self):
         from astrbot.core.message.message_event_result import MessageChain

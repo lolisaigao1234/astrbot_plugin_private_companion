@@ -6,6 +6,8 @@ from functools import partial
 from astrbot.core.message.components import ActionRow, At, Face, File, Image, Plain, Record, Reply, Video
 from astrbot.core.utils.media_utils import convert_audio_format
 
+from .telegram_logging import redact_telegram_token
+
 
 class _TelegramVoice(Record):
     async def convert_to_file_path(self):
@@ -110,7 +112,8 @@ async def member_usernames(client, window, identifiers):
 
     async def username(identifier):
         try:
-            member = await asyncio.wait_for(lookup(chat_id=chat_id, user_id=int(identifier)), 2)
+            with redact_telegram_token(client):
+                member = await asyncio.wait_for(lookup(chat_id=chat_id, user_id=int(identifier)), 2)
             if str(member.user.id) == identifier:
                 return identifier, member.user.username
         except Exception:
