@@ -444,6 +444,7 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
                 full = require(await self.bridge.capture(event))
                 self.assertTrue(full.text.startswith("\n[引用消息]\n"))
                 self.assertEqual(full.text.count(caption), 1)
+                self.assertEqual((full.quotes[0].position, full.audios[0].descriptor.position), (0, 1))
                 require(await session.receive(event, target))
                 replay = await self.event(number + 1, text="继续", reply_to_message=self.message(number, voice=voice, caption=caption))
                 require(await session.receive(replay, target))
