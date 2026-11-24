@@ -70,6 +70,19 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
         inject_core_reply_prompt(event, request)
         return request.prompt + request.system_prompt
 
+    async def test_numeric_instance_id_is_not_the_author_of_a_quote(self):
+        from astrbot_host.core_reply_decision import core_decision_facts
+
+        for author in (OWNER, self.platform.client.id):
+            event = await self.event(text="答复", reply_to_message=self.message(10, author, text="原文"))
+            native = require(await self.bridge.capture_core_reply(event))
+            prepared = {"native_input": native, "context": NS(scope=NS(account_id=str(OWNER))),
+                        "channel": "private"}
+            facts = core_decision_facts(event, prepared, None, at=self.clock.now())
+            self.assertFalse(facts["is_bot_message"])
+            self.assertEqual(facts["quoted_bot_message"], author == self.platform.client.id)
+            self.assertEqual(facts["bot_account_id"], str(self.platform.client.id))
+
     async def test_private_quotes_preserve_original_source_and_selected_text(self):
         from astrbot.core.utils.quoted_message.chain_parser import ReplyChainParser
 

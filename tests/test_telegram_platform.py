@@ -321,6 +321,49 @@ class TelegramHostFixture(MultiFixture):
             await asyncio.wait_for(plugin._host_start_task, timeout=20)
 
 
+class TelegramIntakeLifecycleTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_refused_windows_during_startup_and_restart(self):
+        config = self.controller.config
+        config["multi_host"]["group_targets"] = [
+            dict(target_id="topic", platform_id="tg-main", account_id="tg-main",
+                 bot_id="bot-tg", group_id="-400#23")]
+        self.window_personas["tg-main:GroupMessage:-400#23"] = "original"
+        self.controller = self.make_controller(config)
+        plugin = self.started_plugin()
+        other = TelegramPlatform()
+        other.config["id"] = "tg-other"
+        self.native.platforms["tg-other"] = other
+
+        for phase in ("startup", "restart"):
+            if phase == "restart":
+                await self.start_host()
+                require(await self.controller.stop())
+            self.assertFalse(self.controller._accepting)
+            self.assertIsNone(self.controller.session)
+            for platform, chat, topic, suppressed in (
+                (self.platform, -401, None, True),
+                (self.platform, -400, 24, True),
+                (self.platform, -400, 23, False),
+                (other, -400, 24, False),
+            ):
+                with self.subTest(phase=phase, platform=platform.meta().id, chat=chat, topic=topic):
+                    event = await group_event(platform, chat, "supergroup", topic)
+                    await plugin.receive_companion_message(event)
+                    self.assertEqual(event.call_llm, suppressed)
+
+    async def test_startup_requires_current_bot_and_a_verified_window(self):
+        plugin = self.started_plugin()
+        event = await group_event(self.platform)
+        event.client = telegram_bot()
+        await plugin.receive_companion_message(event)
+        self.assertFalse(event.call_llm)
+
+        event = await group_event(self.platform)
+        event.message_obj.raw_message = None
+        await plugin.receive_companion_message(event)
+        self.assertTrue(event.call_llm)
+
+
 class TelegramPresenceTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.app = await self.start_host()
