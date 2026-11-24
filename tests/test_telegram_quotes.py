@@ -2,6 +2,7 @@
 
 import base64
 from dataclasses import replace
+from datetime import timedelta
 import json
 from types import SimpleNamespace as NS
 import unittest
@@ -19,7 +20,11 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
         self.platform.client.id = 424242
         self.platform.client.username = "synthetic_bot"
         self.types = replace(self.types, reply=Reply, quote_loader=AsyncMock(side_effect=AssertionError("Telegram must not look up the quoted message")))
-        self.controller = self.make_controller(self.controller.config)
+        config = self.controller.config
+        config["multi_host"]["targets"].append(dict(config["multi_host"]["targets"][0],
+            target_id="tg-linked", participant_id=str(OWNER + 1)))
+        self.window_personas[f"tg-main:FriendMessage:{OWNER + 1}"] = "original"
+        self.controller = self.make_controller(config)
         await self.start_host()
         self.bridge = self.controller.session.bridge
 
@@ -65,7 +70,18 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
                     self.assertEqual((quote.message_id, quote.sender_id, quote.sent_at, quote.text),
                                      ("10", str(sender), 1700000000, original))
                     self.assertNotIn(original, result.text)
-            record, _ = self.observe(result)
+            human_text, (_, kind) = self.observe(result)
+            self.assertEqual((human_text, kind), ("说说看", "human_message"))
+            session = self.controller.session
+            context = session.authority.select(self.controller.settings.target("tg-owner"), result.route.scope, result.role)
+            row = self.controller.runtime.read_one("""SELECT source_json FROM conversation_native_observations
+                WHERE event_id=? AND json_extract(source_json, '$.owner')='conversation.native_reference'""",
+                (result.event_id,))
+            from companion_v2.memory.codec import source
+            access = session.application.memory.writer.access
+            quoted = access.capture(context, source(json.loads(row["source_json"])))
+            self.assertEqual((quoted.speaker_id, quoted.source_kind), (None, "observation"))
+            record = access.evidence(context, quoted)
             self.assertIn(original, record)
             self.assertIn(str(sender), record)
             if selection:
@@ -91,6 +107,16 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
 
     async def test_each_forward_origin_is_preserved_in_the_observation(self):
         from astrbot_host.core_reply_forwards import private_debounce_input
+        from companion_v2.relationships.account_link_context import linked_context
+        from companion_v2.relationships.account_link_history import history
+        from companion_v2.relationships.account_links import PrivateAccountLinks
+        session = self.controller.session
+        app = session.application
+        owner, _ = await session.synchronize(self.controller.settings.target("tg-owner"))
+        peer, _ = await session.synchronize(self.controller.settings.target("tg-linked"))
+        PrivateAccountLinks(app.runtime).configure(owner, (owner, peer), persona_id="original",
+            expected_revision=0, share_context=True, operation_key="link", operator_id="test", at=self.clock.now())
+        self.clock.advance(timedelta(seconds=1))
         origins = (
             ({"type": "user", "sender_user": self.message(3, 42)["from"]}, "Synthetic (42)"),
             ({"type": "hidden_user", "sender_user_name": "Hidden"}, "Hidden"),
@@ -110,6 +136,10 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
             self.assertEqual(record, f"[转发消息，来源：{name}]\n别人的话")
             self.assertEqual(attribution, (None, "observation"))
             self.assertEqual(self.prompt(event, core, "别人的话"), record)
+            page = history(app, peer, at=self.clock.now())["records"]
+            shared = json.loads(linked_context(app, peer, at=self.clock.now()).splitlines()[-1])
+            for rows in (page, shared):
+                self.assertEqual([r["speaker"] for r in rows if r["text"] == record], ["observation"])
 
     async def test_captioned_photos_keep_the_original_sender_and_image(self):
         from astrbot_host.core_reply_media import frozen_image_locators, prepare_native_input_images
@@ -137,11 +167,45 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
             payload = session.application.messages._read_source(saved.source, context, "text", self.clock.now()).payload
             self.assertEqual(json.loads(payload)["image_sources"][0]["original_sender"], str(sender))
 
+    async def test_oversized_quoted_photo_keeps_original_attribution_and_caption(self):
+        from astrbot_host.media import load_native_image
+        from tests.test_conversation_images import image_bytes
+
+        self.bridge.image_loader = load_native_image
+        source = image_bytes(size=(8193, 1))
+        photo = [{"file_id": "file", "file_unique_id": "unique", "width": 8193, "height": 1}]
+        with patch.object(PhotoSize, "get_file", new=AsyncMock(return_value=NS(
+                file_path="base64://" + base64.b64encode(source).decode()))):
+            event = await self.event(text="继续", reply_to_message=self.message(10, 424242, photo=photo, caption="原图"))
+        result = require(await self.bridge.capture(event))
+        quote, = result.quotes
+        self.assertEqual((quote.message_id, quote.sender_id, quote.sent_at), ("10", "424242", 1700000000))
+        self.assertTrue(quote.companion_sender)
+        self.assertIn("原图", quote.text)
+        self.assertEqual(quote.images, ())
+        self.assertIn("继续", result.text)
+        self.assertNotIn("原图", result.text)
+
     async def test_selection_of_a_previously_admitted_message_can_be_replayed(self):
         session = self.controller.session
         target = self.controller.settings.target("tg-owner")
-        require(await session.receive(await self.event(number=10, text="😀片段原文"), target))
-        event = await self.event(number=11, text="再说说", quote={"text": "片段", "position": 2},
-                                 reply_to_message=self.message(10, text="😀片段原文"))
+        body = dict(text="😀链接片段原文", entities=[dict(type="text_link", offset=2, length=2,
+                                                    url="https://example.org/synthetic")])
+        admitted = await self.event(number=10, **body)
+        self.assertIn(body["entities"][0]["url"], admitted.message_str)
+        require(await session.receive(admitted, target))
+        whole = await self.event(number=13, text="完整引用", reply_to_message=self.message(10, **body))
+        require(await session.receive(whole, target))
+        event = await self.event(number=11, text="再说说", quote={"text": "片段", "position": 4},
+                                 reply_to_message=self.message(10, **body))
         require(await session.receive(event, target))
         require(await session.receive(event, target))
+        changed = dict(body, entities=[dict(body["entities"][0], url="https://example.org/changed")])
+        for number, original, selection in (
+            (14, changed, {"text": "片段", "position": 4}),
+            (15, body, {"text": "片段", "position": 3}),
+        ):
+            invalid = await self.event(number=number, text="校验", quote=selection,
+                                       reply_to_message=self.message(10, **original))
+            outcome = await session.receive(invalid, target)
+            self.assertEqual(outcome.failure.code, "quote_original_changed")

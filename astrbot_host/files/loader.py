@@ -69,7 +69,12 @@ async def load_native_file(locator, *, client, scope, maximum_bytes, maximum_cha
                 action = "get_private_file_url"
             response = await client.call_action(action, **route)
             value = response.get("url", "") if isinstance(response, dict) else ""
-        content = await fetch_attachment(value, maximum_bytes=maximum_bytes)
+        try:
+            content = await fetch_attachment(value, maximum_bytes=maximum_bytes)
+        except TaskError as error:
+            if error.code == "host_image_limit":
+                raise TaskError("host_file_limit", "file exceeds its original byte budget") from None
+            raise
     if not 0 < len(content) <= maximum_bytes:
         raise TaskError("host_file_limit", "file exceeds its original byte budget")
     return await decode_document(content, locator, maximum_chars=maximum_chars, formats=formats)

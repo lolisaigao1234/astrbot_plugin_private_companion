@@ -1022,7 +1022,8 @@ window.CompanionProduct = (() => {
     const id = platform === "Telegram" ? String(item.account_id || "") : nativeId(item.account_id);
     if (item.account_name) return item.account_name + (id ? `（${id}）` : "");
     if (!id) return "当前账号";
-    const prefix = {"QQ · OneBot":"QQ", "当前平台":"账号"}[platform] || platform;
+    if (platform.startsWith("QQ")) return `QQ ${id}`;
+    const prefix = platform === "当前平台" ? "账号" : platform;
     return `${prefix} ${id}`;
   };
   function readableLabel(value, fallback) {

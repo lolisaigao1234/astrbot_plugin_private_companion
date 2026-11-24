@@ -268,6 +268,70 @@ class TelegramPresenceTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
             edit_token=status["edit_token"], role_edit_token=status["role_edit_token"],
             changes={"typing_enabled": True, "typing_refresh_seconds": interval})).unwrap()
 
+    async def run_to_host_waiting_hook(self, number, *, peer=OWNER):
+        from astrbot.core.pipeline.process_stage.method.agent_sub_stages import internal
+
+        # Follow Telegram's ordinary update -> adapter queue -> plugin intake
+        # route, then run the real host substage up to the waiting hook.
+        self.platform._event_queue = asyncio.Queue()
+        self.platform.client.username = "synthetic_bot"
+        update = Update(number, message=Message(number, date=datetime.now(timezone.utc),
+            chat=Chat(peer, "private"), from_user=User(peer, "Synthetic", False), text="你好 😀"))
+        await self.platform.message_handler(update, NS(bot=self.platform.client))
+        event = self.platform._event_queue.get_nowait()
+        event.set_extra("activated_handlers", [])
+        event.created_at = self.clock.now().timestamp()
+        await self.started_plugin().receive_companion_message(event)
+        waiting = AsyncMock(return_value=True)
+        with patch.object(internal, "call_event_hook", waiting):
+            stage = internal.InternalAgentSubStage.__new__(internal.InternalAgentSubStage)
+            stage.streaming_response = stage.show_reasoning = False
+            async with asyncio.timeout(3):
+                async for _ in stage.process(event, ""):
+                    pass
+        waiting.assert_awaited_once_with(event, internal.EventType.OnWaitingLLMRequestEvent)
+        await asyncio.sleep(0)
+        return event
+
+    async def test_host_indicator_respects_setting_and_leaves_unmanaged_peer_alone(self):
+        await self.run_to_host_waiting_hook(1)
+        self.action.assert_not_awaited()
+        await self.run_to_host_waiting_hook(2, peer=OWNER + 1)
+        self.action.assert_awaited_once_with(chat_id=str(OWNER + 1), action="typing")
+
+    async def test_host_indicator_with_disconnected_client(self):
+        self.enable_typing()
+        self.platform.application.updater.running = False
+        await self.run_to_host_waiting_hook(1)
+        self.action.assert_not_awaited()
+
+    async def test_host_indicator_with_missing_grant(self):
+        self.enable_typing()
+        identities = self.controller.session.bridge.identities
+        grant = next(g for g in identities.grants_for_subject(self.context.actor.subject)
+                     if g.capability == "platform.typing")
+        identities.revoke_grant(grant.grant_id, revoked_at=self.clock.now(), expected_revision=identities.revision)
+        await self.run_to_host_waiting_hook(1)
+        self.action.assert_not_awaited()
+
+    async def test_host_waiting_hook_proceeds_while_authorized_indicator_is_pending(self):
+        self.enable_typing()
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def slow(**kwargs):
+            entered.set()
+            await release.wait()
+            return True
+
+        self.action.side_effect = slow
+        try:
+            event = await self.run_to_host_waiting_hook(1)
+            await asyncio.wait_for(entered.wait(), 3)
+            self.action.assert_awaited_once_with(chat_id=OWNER, action="typing")
+            self.assertTrue(event.get_extra(CORE_REPLY_CONTEXT_EXTRA)["prepared"])
+        finally:
+            release.set()
+
     async def test_long_reply_refreshes_until_finished(self):
         self.enable_typing(interval=10)
         renewed = asyncio.Event()

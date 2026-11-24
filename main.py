@@ -37,6 +37,7 @@ _CORE_PATH_INSERTED = activate_plugin_imports(_PLUGIN_ROOT, __name__)
 
 from .astrbot_host.multi_controller import AstrBotMultiController
 from .astrbot_host.conversation_reset import install_native_reset_marker
+from .astrbot_host.core_reply_presence import gate_telegram_private_typing
 from .astrbot_host.core_reply import (
     CORE_REPLY_CONTEXT_EXTRA,
     SILENT_SEND_DENIAL_CODES,
@@ -1146,6 +1147,7 @@ class PrivateCompanionV2StagingPlugin(Star):
             # 它的失败，既不写台账也不出日志——平台日志不该被别人的群消息刷屏。
             if self._claims_target(event):
                 if self.staging_enabled():
+                    gate_telegram_private_typing(event)
                     # 目标确实是本插件的，只是这一刻没能受理（停机中、会话不在运行、
                     # 启动失败）。接不了这条本该由它回的消息，是预期未回。
                     self._record_no_reply(event, self._admission_reason(), stage="admission",
@@ -1176,6 +1178,7 @@ class PrivateCompanionV2StagingPlugin(Star):
             return
         if target is None:
             return
+        gate_telegram_private_typing(event)
         # AstrBot owns the persona and reply; V2 contributes optional background.
         event_ref = uuid4().hex
         origin_key = self._origin_key_for_event(event)
