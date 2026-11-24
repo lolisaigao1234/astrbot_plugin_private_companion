@@ -127,7 +127,7 @@ def _file_is_video(part):
     return False
 
 
-def video_positions(event, *, video_type, component_reader=None):
+def video_positions(event, *, video_type, component_reader=None, limit=MAX_VIDEOS):
     """读这条消息里的视频位置（含群/私聊 ``.mp4`` 等视频 File 段，排除 ``.ts``）。
 
     ``capture_text_only`` 只读文本骨架，从不触碰这里；位置是在它把组件折成
@@ -154,7 +154,7 @@ def video_positions(event, *, video_type, component_reader=None):
         value = file if type(file) is str and file.startswith("base64://") else getattr(part, "url", None) or file
         if type(value) is str and value:
             found.append(freeze_attachment(event, NativeVideoLocator(position, value)))
-        if len(found) >= MAX_VIDEOS:
+        if limit is not None and len(found) >= limit:
             break
     return tuple(found)
 
