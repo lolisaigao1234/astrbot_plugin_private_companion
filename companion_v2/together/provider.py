@@ -256,6 +256,17 @@ class OperationStore:
                       key=lambda item: (float(item.get("created_at", 0)), item.get("id", "")),
                       reverse=True)
 
+    @staticmethod
+    def pending_group_notice(operation):
+        return (operation.get("action") == "together.room.create" and operation.get("state") == "failed"
+                and operation.get("error") == "together_private_invite_refused"
+                and (operation.get("result") or {}).get("group_notice") == "pending")
+
+    def pending_group_notice_ids(self):
+        with self._lock:
+            return [(scope, key) for scope, ops in self._data["operations"].items() for key, op in ops.items()
+                    if self.pending_group_notice(op)]
+
     def update(self, scope: str, operation_id: str, *, state: str, effect: str,
                result: dict[str, Any] | None = None, error: str | None = None) -> dict[str, Any]:
         with self._lock:
@@ -827,12 +838,8 @@ class NativeTogetherProvider:
         scope = scope_key(value["context"])
         operation, fresh = self.store.begin(scope, value)
         if not fresh:
-            if (operation.get("error") == "together_private_invite_refused"
-                    and (operation.get("result") or {}).get("group_notice") == "pending"):
-                native_scope = value["context"]["audience"]["scope"]
-                route = self.plugin.telegram_group_invite_route(native_scope, _user_id(value["context"]))
-                if route is not None:
-                    operation = await self._notify_invite_refused(scope, operation, route)
+            if self.store.pending_group_notice(operation):
+                operation = await self._resume_group_notice(scope, operation)
             return self._response(value, operation)
         action = value["action"]
         if action in _READ_ACTIONS:
@@ -888,6 +895,23 @@ class NativeTogetherProvider:
             if isinstance(exc, asyncio.CancelledError):
                 raise
         return self._response(value, operation)
+
+    async def recover_group_notices(self):
+        for scope, key in self.store.pending_group_notice_ids():
+            try:
+                operation = self.store.get(scope, key)
+                if self.store.pending_group_notice(operation):
+                    await self._resume_group_notice(scope, operation)
+            except Exception as error:
+                logger.warning("[TogetherCompanion] 群邀请提示待恢复 error_type=%s", type(error).__name__)
+
+    async def _resume_group_notice(self, scope, operation):
+        context = operation["request"]["context"]
+        if scope_key(context) == scope and context["audience"]["scope"].get("kind") == "group":
+            route = self.plugin.telegram_group_invite_route(context["audience"]["scope"], _user_id(context))
+            if route is not None:
+                return await self._notify_invite_refused(scope, operation, route)
+        return operation
 
     async def _notify_invite_refused(self, scope, operation, route):
         # Persist the claim before calling Telegram. Losing the acknowledgement

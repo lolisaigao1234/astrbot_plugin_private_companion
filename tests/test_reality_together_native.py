@@ -350,6 +350,9 @@ class NativeRealityTogetherTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncio.CancelledError):
             await provider.execute(req, before_dispatch=lambda: True)
         plugin.notify_telegram_invite_refused.assert_not_awaited()
+        restarted = TOGETHER.NativeTogetherProvider(plugin, self.root, version=PRODUCT_VERSION)
+        await restarted.recover_group_notices()
+        plugin.notify_telegram_invite_refused.assert_awaited_once()
         for _ in range(3):
             provider = TOGETHER.NativeTogetherProvider(plugin, self.root, version=PRODUCT_VERSION)
             result = await provider.execute(req, before_dispatch=lambda: True)

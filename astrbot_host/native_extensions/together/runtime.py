@@ -127,3 +127,5 @@ class TogetherRuntime(NativeService, TogetherSettingsMethods, TogetherRoomsMetho
     async def initialize(self):
         if self.server_enabled:
             await self._start_room_server()
+        if self._native_provider is not None:
+            self._create_background_task(self._native_provider.recover_group_notices())
