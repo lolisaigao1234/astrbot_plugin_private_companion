@@ -679,6 +679,37 @@ def execute_functional_command(command: FunctionalCommand | None, *, application
     return ""
 
 
+def _telegram_group_voice_command(event, command):
+    return (command is not None and command.surface == "group" and command.intent == "voice_language"
+            and getattr(getattr(event, "platform_meta", None), "name", None) == "telegram")
+
+
+async def prepare_telegram_voice_language_receipt(event, command, session, prepared):
+    """Check native standing immediately before the existing authorized settings write."""
+    if not _telegram_group_voice_command(event, command) or isinstance(_event_extra(event, _RECEIPT_EXTRA), str):
+        return
+    from companion_v2.execution.models import TaskError
+    from .command_authority import is_core_subject
+    from .group_standing import resolve_group_standing
+
+    receipt = "未执行：只有群主或群管理员可以更改本群语音语种。"
+    lease = prepared.get("connection_lease")
+    if session is not None and lease is not None and event.client is lease.client:
+        standing = await resolve_group_standing(event, session.group_standing_cache, fresh=True)
+        try:
+            session.bridge.connections.assert_current(lease)
+        except TaskError:
+            receipt = "未执行：Telegram 连接已变化，请重新发送指令。"
+        else:
+            if standing and standing["role"] in {"owner", "admin"}:
+                context = prepared["context"]
+                if is_core_subject(session.runtime, context.actor.subject):
+                    receipt = execute_functional_command(command, application=session.application, context=context)
+                else:
+                    receipt = "未执行：只有安装管理员可以更改本群语音语种。"
+    _set_event_extra(event, _RECEIPT_EXTRA, receipt)
+
+
 def functional_command_receipt(event, command: FunctionalCommand | None, *, application=None,
                                context=None) -> str:
     """Execute once per admitted event and reuse the receipt on later model rounds."""
@@ -687,6 +718,8 @@ def functional_command_receipt(event, command: FunctionalCommand | None, *, appl
     stashed = _event_extra(event, _RECEIPT_EXTRA)
     if isinstance(stashed, str):
         return stashed
+    if _telegram_group_voice_command(event, command):
+        return "未执行：尚未验证本群管理员身份。"
     receipt = execute_functional_command(command, application=application, context=context)
     _set_event_extra(event, _RECEIPT_EXTRA, receipt)
     return receipt

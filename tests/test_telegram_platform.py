@@ -1074,6 +1074,39 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
             kwargs = platform.client.send_message.await_args.kwargs
             self.assertEqual((kwargs["chat_id"], kwargs["message_thread_id"]), ("-100400", "23"))
 
+    async def test_group_voice_language_rechecks_standing_before_each_write(self):
+        from datetime import timedelta
+        from astrbot_host import functional_commands as commands
+
+        controller = self.controller
+        authority = controller.authority
+        owner = authority.context("tg-owner", "role-tg")
+        lookup = self.platform.client.get_chat_member = AsyncMock()
+        for number, (core, status, language, expected) in enumerate((
+                (False, "administrator", "日语", "未执行"),
+                (True, "administrator", "日语", "已切换"),
+                (True, "member", "英语", "未执行"),
+                (True, None, "英语", "未执行"),
+                (True, "creator", "日语", "没有更改")), 100):
+            with self.subTest(core=core, status=status):
+                if number == 101:
+                    authority.provision_scope(authority.settings.target("tg-owner"), owner.scope,
+                                              owner.role_binding.role, core_admin=True)
+                self.clock.advance(timedelta(seconds=3))
+                lookup.return_value = NS(user=NS(id=OWNER), status=status)
+                event = await group_event(self.platform, -100400, "supergroup", 23, message_id=number,
+                    text=f"@synthetic_bot 陪伴群 切换语种 {language}", entities=[MessageEntity("mention", 0, 14)])
+                event.created_at = self.clock.now().timestamp()
+                admission = require(await controller.group_reply_candidate(event))
+                prepared = require(await controller.prepare_core_reply(event, group_admission=admission))
+                command = commands.classify_functional_command(event, channel="group")
+                lookup.reset_mock()
+                await commands.prepare_telegram_voice_language_receipt(event, command, controller.session, prepared)
+                receipt = commands.functional_command_receipt(event, command, application=controller.session.application,
+                                                               context=prepared["context"])
+                self.assertIn(expected, receipt)
+                lookup.assert_awaited_once_with(chat_id=-100400, user_id=OWNER)
+
     async def test_group_room_only_sends_ticket_to_requester(self):
         from astrbot_host.native_extensions.together.rooms_methods import TogetherRoomsMethods
         from companion_v2.together.models import RoomTicketStore
@@ -1103,6 +1136,7 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
                         plugin.ticket_store.consume(plugin.issued.token)
                     if refused:
                         raise Forbidden("private chat unavailable")
+                return NS(message_id=77)
 
             self.platform.client.send_message.side_effect = send
             result = await provider._create_room(value, "scope", {"id": "op"}, user_id=str(OWNER))
@@ -1130,10 +1164,14 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
         service = TogetherRoomsMethods()
         service.controller = self.controller
         event = await group_event(self.platform, -100400, "supergroup", 23)
-        self.assertTrue(await service._send_private_room_link(event, "synthetic invite"))
+        self.platform.client.send_message.return_value = NS(message_id=77)
+        invite = "https://example.invalid/join/a__b_C-d?mode=call"
+        self.assertTrue(await service._send_private_room_link(event, invite))
         send = self.platform.client.send_message
         send.assert_awaited_once()
-        self.assertEqual(send.await_args.kwargs["chat_id"], str(OWNER))
+        self.assertEqual(str(send.await_args.kwargs["chat_id"]), str(OWNER))
+        self.assertEqual(send.await_args.kwargs["text"], invite)
+        self.assertIsNone(send.await_args.kwargs.get("parse_mode"))
         self.assertNotIn("message_thread_id", {k: v for k, v in send.await_args.kwargs.items() if v is not None})
 
     async def test_repeat_sends_the_configured_interruption_into_the_topic(self):
@@ -1210,7 +1248,7 @@ class TelegramGroupRoomToolTests(TelegramHostFixture, unittest.IsolatedAsyncioTe
             app = await self.start_host()
         self.addAsyncCleanup(close_core_reply_tools, app)
         self.platform.client.send_chat_action = AsyncMock()
-        self.platform.client.send_message = AsyncMock()
+        self.platform.client.send_message = AsyncMock(return_value=NS(message_id=77))
         event = await group_event(self.platform, -100400, "supergroup", 23, text="@synthetic_bot 开房",
                                   from_user=User(OWNER + 1, "Member", False), entities=[MessageEntity("mention", 0, 14)])
         event.created_at = self.clock.now().timestamp()
@@ -1261,7 +1299,7 @@ class TelegramGroupRoomToolTests(TelegramHostFixture, unittest.IsolatedAsyncioTe
         self.platform.client.send_message.assert_awaited_once()
         sent = self.platform.client.send_message.await_args.kwargs
         self.assertEqual(str(sent["chat_id"]), str(OWNER + 1))
-        token = sent["text"].replace(chr(92), "").split("/join/")[1].split("?")[0]
+        token = sent["text"].split("/join/")[1].split("?")[0]
         self.assertNotIn(token, json.dumps(result))
         ticket = plugin.ticket_store.get(token)
         self.assertEqual(ticket.user_id, str(OWNER + 1))
@@ -1277,7 +1315,7 @@ class TelegramGroupRoomToolTests(TelegramHostFixture, unittest.IsolatedAsyncioTe
             self.assertEqual(result["state"], "failed", result)
         private, notice = self.platform.client.send_message.await_args_list
         self.assertEqual(str(private.kwargs["chat_id"]), str(OWNER + 1))
-        refused = private.kwargs["text"].replace(chr(92), "").split("/join/")[1].split("?")[0]
+        refused = private.kwargs["text"].split("/join/")[1].split("?")[0]
         self.assertIsNone(plugin.ticket_store.get(refused))
         self.assertEqual(str(notice.kwargs["chat_id"]), "-100400")
         self.assertEqual(str(notice.kwargs["message_thread_id"]), "23")
@@ -1292,7 +1330,7 @@ class TelegramGroupRoomToolTests(TelegramHostFixture, unittest.IsolatedAsyncioTe
         self.platform.client.send_message.assert_awaited_once()
         private = self.platform.client.send_message.await_args.kwargs
         self.assertEqual(str(private["chat_id"]), str(OWNER + 1))
-        uncertain = private["text"].replace(chr(92), "").split("/join/")[1].split("?")[0]
+        uncertain = private["text"].split("/join/")[1].split("?")[0]
         self.assertIsNotNone(plugin.ticket_store.get(uncertain))
         self.assertNotIn(uncertain, json.dumps(result))
 

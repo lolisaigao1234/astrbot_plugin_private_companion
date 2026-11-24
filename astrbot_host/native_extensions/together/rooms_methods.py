@@ -70,7 +70,7 @@ class TogetherRoomsMethods:
     async def send_telegram_group_invite(self, route, message):
         from astrbot_host.private_notice import send_private_notice
 
-        return await send_private_notice(self.controller, None, route=route, text=message)
+        return await send_private_notice(self.controller, None, route=route, text=message, require_message_id=True)
 
     async def notify_telegram_invite_refused(self, private_route):
         from dataclasses import replace

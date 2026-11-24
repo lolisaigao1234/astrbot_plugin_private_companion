@@ -104,7 +104,9 @@ from .astrbot_host.core_reply_telemetry import (
     observe_core_reply_suppressed,
 )
 from .astrbot_host.calendar_command import parse_calendar_command
-from .astrbot_host.functional_commands import classify_functional_command, inject_functional_command_instruction
+from .astrbot_host.functional_commands import (
+    classify_functional_command, inject_functional_command_instruction, prepare_telegram_voice_language_receipt,
+)
 from .astrbot_host.group_command import receive_group_llm_command
 from .astrbot_host.reset_command import receive_reset_command
 from .astrbot_host.phone_command import receive_phone_confirmation
@@ -1935,10 +1937,11 @@ class PrivateCompanionV2StagingPlugin(Star):
             inject_core_reply_prompt(event, req)
             inject_core_reply_forwards(event, req, prepared=prepared)
         mark_core_reply_inflight(event)
-        application = getattr(getattr(self.staging, "session", None), "application", None)
-        observer = getattr(getattr(self.staging, "session", None), "core_reply_observations", None)
+        session = getattr(self.staging, "session", None)
+        application = getattr(session, "application", None)
+        observer = getattr(session, "core_reply_observations", None)
         self._observe_core_phase(prepared, "running")
-        classify_functional_command(event, channel=str(prepared.get("channel") or ""), own_module=__name__)
+        command = classify_functional_command(event, channel=str(prepared.get("channel") or ""), own_module=__name__)
         if application is not None:
             try:
                 with measure_core_preparation(event, "tool_injection", now=self.staging.now):
@@ -1948,6 +1951,7 @@ class PrivateCompanionV2StagingPlugin(Star):
                                type(error).__name__)
         prepare_native_host_request(self.staging, event, req)
         inject_core_turn_notes(event, req)
+        await prepare_telegram_voice_language_receipt(event, command, session, prepared)
         inject_functional_command_instruction(
             event, req, channel=str(prepared.get("channel") or ""), own_module=__name__,
             application=application,
