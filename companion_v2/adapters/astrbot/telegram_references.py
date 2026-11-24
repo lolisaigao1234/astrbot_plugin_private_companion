@@ -7,6 +7,8 @@ from companion_v2.conversation.forwards.models import CapturedForward, CapturedF
 from companion_v2.conversation.quotes.models import TelegramForwardOrigin, TelegramQuote
 from companion_v2.execution.models import TaskError, digest
 
+from companion_v2.sources.privacy import redact_text
+
 from .quotes import image_locator
 
 
@@ -19,7 +21,7 @@ class TelegramReferences:
 
     @property
     def forward_origin(self):
-        return self.origin.label if self.origin else ""
+        return redact_text(self.origin.label) if self.origin else ""
 
     @property
     def forward_marker(self):
