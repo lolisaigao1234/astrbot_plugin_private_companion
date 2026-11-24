@@ -15,10 +15,12 @@ from companion_v2.adapters.astrbot.telegram_media import TelegramFile, freeze_at
 from companion_v2.adapters.astrbot.quotes import image_locator
 from companion_v2.conversation.media.models import ImageConversationEvent, MAX_INPUT_IMAGES
 from companion_v2.conversation.native_tool_sources import native_input_images
+from companion_v2.conversation.quotes.models import TelegramForwardOrigin
 from companion_v2.execution.models import TaskContext, TaskError, digest, encode, require
 from companion_v2.foundation.refs import ScopeKind, SourceRef, VersionRef
 from companion_v2.sources.governance import bind
 from companion_v2.sources.models import SourceRecord
+from companion_v2.sources.privacy import redact_text
 
 from .media import load_native_image, public_url
 
@@ -45,6 +47,8 @@ class _QuotedImages:
 
     telegram_peer: str | None = None
     telegram_bot: str | None = None
+
+    telegram_forward_origin: TelegramForwardOrigin | None = None
 
     @property
     def needs_lookup(self):
@@ -90,7 +94,7 @@ def frozen_image_locators(event):
                 quote = telegram.quote
                 if quote and quote.position == position and telegram.images:
                     quotes.append(_QuotedImages(position, quote.message_id, quote.sender_id, quote.sent_at,
-                        telegram.images, event, None, str(event.message_obj.sender.user_id), str(event.client.id)))
+                        telegram.images, event, None, str(event.message_obj.sender.user_id), str(event.client.id), quote.forward_origin))
                 continue
             identifier = _identifier(part.id)
             if identifier is None:
@@ -170,8 +174,11 @@ async def _resolve_quoted_images(quote, context, check):
                            for index, value in enumerate(references))
         sent_at = raw.get("time") if type(raw.get("time")) is int and raw["time"] > 0 else sent_at
     _quote_sender(context, sender, quote.telegram_bot)
+    origin = quote.telegram_forward_origin
     return images, {"origin": "quoted_message", "original_message_id": quote.message_id,
                     "original_sender": sender, "sent_at_unix": sent_at, "component_position": quote.position,
+                    **({"telegram_forward_origin": replace(origin, label=redact_text(origin.label)),
+                        "forwarded_by": sender} if origin else {}),
                     **({"telegram_bot": quote.telegram_bot} if quote.telegram_bot else {})}
 
 
