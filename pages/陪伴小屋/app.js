@@ -4196,6 +4196,8 @@ function expressionPerceptionJump(label,tab='recall',icon='message-square-quote'
   return `<button class="expression-route-button" type="button" data-perception-config="${tab}">${I(icon)}<span>${label}</span>${I('arrow-right')}</button>`;
 }
 function renderExpressionOriginal(){
+  const windowTarget=window.CompanionProduct?.target?.();
+  const telegramWindow=(windowTarget?.platform_name||windowTarget?.platform_id)==='telegram';
   const modules=[
     ['expression-text','message-square-more','文字风格与分段'],
     ['expression-voice','volume-2','语音朗读'],
@@ -4219,7 +4221,7 @@ function renderExpressionOriginal(){
         ${expressionPerceptionJump('管理撤回原文转写（感知页）')}
         <div id="pokePolicyWorkspace"></div>
         ${settingsJump('管理主动联系中的平台动作','contact')}
-        ${expressionLifeJump('QQ 自定义短状态','state','activity')}</div>`,'expression-platform'],
+        ${telegramWindow?'':expressionLifeJump('QQ 自定义短状态','state','activity')}</div>`,'expression-platform'],
     ['群聊表达','',`<div class="expression-group-workspace">${configEditors('groupDenoiseWorkspace',['group_participation'],'群聊表达去噪')}</div>`,'expression-group'],
   ];
   if(!sections.some(section=>section[3]===expressionModule))expressionModule='expression-text';

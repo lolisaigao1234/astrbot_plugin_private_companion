@@ -937,3 +937,11 @@ test("Modal UX: state-home-settings and detail-dialog-settings enforce three-tie
     ctx.CompanionStatePage.unmount();
   }
 });
+
+test("Telegram 窗口的表达页不提供 QQ 自定义短状态", () => {
+  const expression = platform_name => createNavAndSearchContext({
+    product: {target: () => ({target_id: "t1", scope_kind: "private", platform_name})},
+  }).run("renderExpressionOriginal()");
+  assert.ok(!expression("telegram").includes("QQ 自定义短状态"));
+  assert.ok(expression("aiocqhttp").includes("QQ 自定义短状态"));
+});

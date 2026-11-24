@@ -355,7 +355,7 @@ window.CompanionStatePage = (() => {
       telegramTarget()
         ? {name:"presentation",label:"正在输入提示",icon:"radio-tower",value:data.windowSelected?(settings.typing_enabled?"已开启":"已关闭"):"未选择私聊窗口",help:"当前私聊窗口 · 输入提示刷新间隔"}
         : {name:"presentation",label:"QQ 状态",icon:"radio-tower",value:`${[settings.typing_enabled,settings.presence_enabled,settings.online_status_enabled].filter(Boolean).length} 项已开启`,help:"正在输入提示 · 在线状态 · 自定义短状态"},
-      {name:"planning",label:"日程配置",icon:"calendar-days",value:settings.calendar_enabled?(settings.schedule_simulation_mode==="continuous"?"连续日程":"日程编排"):"日程已关闭",help:"规划方式 · 安排与公开文案"},
+      {name:"planning",label:"日程配置",icon:"calendar-days",value:settings.calendar_enabled?(settings.schedule_simulation_mode==="continuous"?"连续日程":"日程编排"):"日程已关闭",help:telegramTarget()?"规划方式 · 日程安排":"规划方式 · 安排与公开文案"},
       {name:"weather",label:"天气",icon:"cloud-sun",value:settings.planning_weather_enabled?(location||"地点待配置"):"天气感知已关闭",help:"角色所在地 · 实况信息时效"},
       {name:"datetime",label:"时间与日期",icon:"calendar-clock",value:local({hour:"2-digit",minute:"2-digit",hourCycle:"h23"})+" · "+local({month:"long",day:"numeric",weekday:"long"}),help:zone+" · 日期背景"},
     ];
