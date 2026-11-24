@@ -10,6 +10,8 @@ import unittest
 import wave
 from unittest.mock import AsyncMock, Mock, patch
 
+import httpx
+
 from telegram.error import BadRequest, Forbidden, InvalidToken, NetworkError, RetryAfter, TimedOut
 from telegram import Chat, Message, Update, User
 from astrbot.core.message.components import Plain
@@ -215,6 +217,42 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
         self.assertEqual(receipt["state"], "delivered")
         self.platform.client.send_message.assert_awaited_once()
         self.assertNotIn(token, " ".join(logs.output))
+
+    async def test_httpx_logs_redact_delivery_notice_and_relay_requests(self):
+        from astrbot_host.private_notice import send_private_notice
+        from astrbot_host.relay_pending_events import _send_private
+
+        token = self.platform.client.token
+        event = telegram_event(self.platform)
+        route = authenticate_notice_route(self.controller, event, ScopeKind.PRIVATE, expected_post="message")
+        paths = []
+
+        def respond(request):
+            paths.append(request.url.path)
+            return httpx.Response(200)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+            async def chat_action(*args, **kwargs):
+                await http.post(f"https://telegram.invalid/bot{token}/sendChatAction")
+
+            async def message(*args, **kwargs):
+                await http.post(f"https://telegram.invalid/bot{token}/sendMessage")
+
+            self.platform.client.send_chat_action.side_effect = chat_action
+            self.platform.client.send_message.side_effect = message
+            with self.assertLogs("httpx", "INFO") as logs:
+                self.assertEqual((await self.send()).status, "delivered")
+                notice = await send_private_notice(self.controller, event, text="验证", route=route)
+                relay = await _send_private(self.controller, event, platform_id="tg-main",
+                                            login="tg-main", peer=str(OWNER), text="回执")
+                self.assertEqual((notice["state"], relay["state"]), ("delivered", "delivered"))
+
+        methods = ["sendChatAction", "sendMessage"] * 3
+        self.assertEqual(paths, [f"/bot{token}/{method}" for method in methods])
+        self.assertEqual(len(logs.records), len(methods))
+        for record, method in zip(logs.records, methods):
+            self.assertIn(f"/bot[redacted]/{method}", record.getMessage())
+            self.assertNotIn(token, repr(record.args))
 
     async def test_unavailable_refusal_classifier_keeps_dispatch_unknown(self):
         self.platform.client.send_message.side_effect = NetworkError("connection lost")
