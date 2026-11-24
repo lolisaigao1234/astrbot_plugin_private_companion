@@ -936,15 +936,18 @@ class NativePrivateBridge:
 
     async def _capture_images(self, locators, *, load_optional=None):
         images = []
-        for locator in locators:
-            if load_optional is None:
-                image = await self.image_loader(locator)
-            else:
-                image = await load_optional(self.image_loader, locator)
-                if image is None:
-                    continue
+        async def load(locator):
+            image = await self.image_loader(locator)
             if not isinstance(image, CapturedImage) or image.descriptor.position != locator.position:
                 raise TaskError("host_image_invalid", "image loader did not preserve the original component position")
+            if load_optional and not fits_budget(tuple(i.descriptor for i in images) + (image.descriptor,)):
+                raise TaskError("host_image_limit", "album exceeds the shared image budget")
+            return image
+
+        for locator in locators:
+            image = await load_optional(load, locator) if load_optional else await load(locator)
+            if image is None:
+                continue
             images.append(image)
             check_manifest(tuple(i.descriptor for i in images))
         return tuple(images)
