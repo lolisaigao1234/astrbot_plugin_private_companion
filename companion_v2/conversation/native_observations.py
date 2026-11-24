@@ -68,7 +68,7 @@ def input_rows_for_context(runtime, context, *, start=None, end=None, after_sequ
     if not observations_available(runtime):
         return ()
     clauses = ["n.kind = 'input'", "n.delivery_state = 'input_observed'",
-               "json_extract(n.source_json, '$.owner') != ?"]
+               "json_extract(n.source_json, '$.owner') IS NOT ?"]
     values = [REFERENCE_OWNER]
     if context.scope.kind is ScopeKind.PRIVATE:
         clauses.append("n.context_key = ?")
@@ -157,7 +157,7 @@ def rows_for_context(runtime, context, *, start=None, end=None, limit=None, incl
              "n.delivery_state IN ('input_observed', 'send_returned')"]
     values = [owner_key(context)]
     if not include_references:
-        where.append("json_extract(n.source_json, '$.owner') != ?")
+        where.append("json_extract(n.source_json, '$.owner') IS NOT ?")
         values.append(REFERENCE_OWNER)
     if start is not None:
         where.append("n.effective_at >= ?")
