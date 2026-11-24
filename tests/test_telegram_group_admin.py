@@ -125,6 +125,34 @@ class TelegramAdministrationTests(unittest.IsolatedAsyncioTestCase):
             platform.client.send_message.assert_awaited_once()
             platform.client.send_message.reset_mock()
 
+    async def test_delayed_mention_timeout_stays_unknown_on_replay(self):
+        from time import time
+        from astrbot_host.relay_pending import _read, add_task
+        from astrbot_host.relay_pending_events import process_group_presence
+        from tests.test_relay_pending_events import RelayPendingEventTests
+
+        fixture = RelayPendingEventTests()
+        fixture.addCleanup = self.addCleanup
+        fixture.setUp()
+        platform = TelegramPlatform()
+        event = await group_event(platform)
+        route = NS(peer="-400", platform=platform, client=platform.client, platform_name="telegram",
+                   platform_id="tg-main", login="tg-main")
+        platform.client.send_message = AsyncMock(side_effect=TimeoutError())
+        target = NS(group_id=route.peer, platform_id=route.platform_id, account_id=route.login)
+        context = NS(actor=NS(principal=NS(native_account_id=str(OWNER))))
+        task = dict(kind="group_wait", state="waiting", group_id=route.peer, mention_id=str(OWNER),
+                    target_user_id=str(OWNER), text="Hello", expires_at=time()+60, signature="one-mention",
+                    telegram_account=["tg-main", "tg-main"])
+        task_id = add_task(fixture.runtime, task)
+        with patch("astrbot_host.relay_pending_events._route", return_value=route), patch(
+                "astrbot_host.relay_pending_events.prepare_relay_transport", return_value=None):
+            await process_group_presence(fixture.controller, event, target, context)
+            self.assertEqual(_read(fixture.runtime)["tasks"][task_id]["state"], "unknown")
+            self.assertEqual(add_task(fixture.runtime, task), task_id)
+            await process_group_presence(fixture.controller, event, target, context)
+        platform.client.send_message.assert_awaited_once()
+
     async def test_pending_receipts_do_not_cross_platform_or_bot_accounts(self):
         from time import time
         from astrbot_host.relay_pending import add_task, claim_private_receipts

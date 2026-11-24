@@ -933,9 +933,14 @@ class NativeTogetherProvider:
                                      error=operation["error"], result={"group_notice": "expired"})
         context = operation["request"]["context"]
         if scope_key(context) == scope and context["audience"]["scope"].get("kind") == "group":
-            route = self.plugin.telegram_group_invite_route(context["audience"]["scope"], _user_id(context))
+            try:
+                route = self.plugin.telegram_group_invite_route(context["audience"]["scope"], _user_id(context))
+            except Exception as error:
+                logger.info("[TogetherCompanion] 群邀请提示路由暂不可用 error_type=%s", type(error).__name__)
+                route = None
             if route is not None:
                 return await self._notify_invite_refused(scope, operation, route)
+            self._schedule_notice_retry()
         return operation
 
     async def _notify_invite_refused(self, scope, operation, route):

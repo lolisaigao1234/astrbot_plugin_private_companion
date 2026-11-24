@@ -109,10 +109,15 @@ async def send_group_notice(controller, route, *, text, mention_id="", transport
             chat, _, topic = peer.partition("#")
             label = "@" + mention
             entity = MessageEntity("text_link", 0, len(label), url="tg://user?id=" + mention)
+            chat_id, topic_id = chat, int(topic) if topic else None
             with redact_telegram_token(route.client):
-                await route.client.send_message(
-                    chat_id=chat, message_thread_id=int(topic) if topic else None,
-                    text=f"{label} {text}", entities=[entity])
+                try:
+                    await route.client.send_message(chat_id=chat_id, message_thread_id=topic_id,
+                                                    text=f"{label} {text}", entities=[entity])
+                except Exception as exc:
+                    from companion_v2.adapters.astrbot.platform_sender import telegram_call_refusal
+                    reason = telegram_call_refusal(exc)
+                    return {"state": "failed" if reason else "unknown", "reason": reason or "platform_call_failed"}
         else:
             chain = [At(qq=mention), Plain(" ")] if mention else []
             chain.append(Plain(str(text)))

@@ -79,12 +79,13 @@ async def process_group_presence(controller, event, target, context):
         for task in tasks:
             task_id = task["id"]
             in_flight = task_id
-            in_flight_state = "failed"
+            in_flight_state = "unknown" if task.get("telegram_account") else "failed"
             try:
                 result = await _send_group(controller, event, platform_id=target.platform_id,
                     login=target.account_id, peer=target.group_id,
                     text=_text(task.get("text")), mention_id=str(task.get("mention_id") or ""))
-                in_flight_state = "sent" if isinstance(result, dict) and result.get("state") == "delivered" else "failed"
+                state = result.get("state") if isinstance(result, dict) else None
+                in_flight_state = {"delivered": "sent", "unknown": "unknown"}.get(state, "failed")
             except Exception:
                 in_flight_state = "failed"
             await asyncio.to_thread(finish, controller.runtime, task_id, in_flight_state)

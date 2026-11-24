@@ -400,6 +400,10 @@ class NativeRealityTogetherTests(unittest.IsolatedAsyncioTestCase):
         restarted = TOGETHER.NativeTogetherProvider(plugin, self.root, version=PRODUCT_VERSION)
         restarted.NOTICE_RETRY_SECONDS = 0.01
         route = plugin.telegram_group_invite_route.return_value
+        plugin.telegram_group_invite_route.side_effect = RuntimeError("route is offline")
+        offline = await restarted.execute(req, before_dispatch=lambda: True)
+        self.assertEqual((offline["state"], offline["effect"]), ("failed", "not_committed"))
+        plugin.telegram_group_invite_route.side_effect = None
         plugin.telegram_group_invite_route.return_value = None
         await restarted.recover_group_notices()
         plugin.notify_telegram_invite_refused.assert_not_awaited()

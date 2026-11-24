@@ -37,7 +37,6 @@ def _telegram_refusal(error, chain):
     # send_by_session exposes no per-call progress. Earlier components or text
     # chunks may already be visible when a later Bot API call is refused.
     from astrbot.core.platform.sources.telegram.tg_event import TelegramPlatformEvent
-    from telegram.error import BadRequest, Forbidden, InvalidToken, RetryAfter
 
     components = chain.chain
     # A leading Reply only sets reply_to_message_id on the following API call.
@@ -48,6 +47,13 @@ def _telegram_refusal(error, chain):
     component = components[0]
     if isinstance(component, Plain) and len(component.text) > TelegramPlatformEvent.MAX_MESSAGE_LENGTH:
         return None
+    return telegram_call_refusal(error)
+
+
+def telegram_call_refusal(error):
+    """Classify a refusal from a single dispatched Bot API request."""
+    from telegram.error import BadRequest, Forbidden, InvalidToken, RetryAfter
+
     if isinstance(error, Forbidden):
         return "telegram_bot_blocked" if "bot was blocked" in error.message.lower() else "telegram_forbidden"
     if isinstance(error, BadRequest):

@@ -78,7 +78,7 @@ def add_task(runtime, task):
         if signature:
             for existing in data["tasks"].values():
                 if existing.get("signature") == signature and existing.get("state") in {
-                        "waiting", "sending", "sent", "waiting_reply", "reporting",
+                        "waiting", "sending", "sent", "unknown", "waiting_reply", "reporting",
                         "waiting_permission"}:
                     return existing.get("id", "")
         identifier = uuid4().hex
