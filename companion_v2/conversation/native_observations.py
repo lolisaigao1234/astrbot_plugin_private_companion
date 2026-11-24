@@ -216,11 +216,15 @@ class NativeConversationObservations:
     def capture_input(self, context, native_input, *, turn_id):
         from .native_turns import NativeConversationTurns
         inputs = getattr(native_input, "telegram_burst", ()) or (native_input,)
+        own = reference = None
         with self.runtime.transaction():
             for original in inputs:
-                reference = self._capture_input_source(context, original, turn_id)
-            NativeConversationTurns(self.runtime).admit(context, native_input, turn_id, reference)
-        return reference
+                reference = self._capture_input_source(context, original, turn_id) or reference
+                if reference is not None and reference.owner != REFERENCE_OWNER:
+                    own = reference
+            # Forwarded and quoted words are never the turn's authenticated input.
+            NativeConversationTurns(self.runtime).admit(context, native_input, turn_id, own)
+        return own or reference
 
     def _capture_input_source(self, context, native_input, turn_id):
         if (context.scope != native_input.route.scope or context.actor.principal != native_input.principal

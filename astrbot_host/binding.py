@@ -166,6 +166,10 @@ def _without_leading_mentions(value: str) -> str:
     return value
 
 
+# Set on the event that carries a merged forward burst: only the sender's own comments.
+BURST_SENDER_TEXT_EXTRA = "_pc_burst_sender_text"
+
+
 def telegram_forward_message(event):
     """Return the native forwarded message when its words belong to another source."""
     if getattr(getattr(event, "platform_meta", None), "name", None) != "telegram":

@@ -6,6 +6,7 @@ import re
 
 from companion_v2.adapters.astrbot.group_mentions import telegram_has_reply_prefix
 from companion_v2.conversation.group_timing import SELF_MENTION
+from companion_v2.sources.privacy import redact_text
 
 
 logger = logging.getLogger(__name__)
@@ -106,11 +107,13 @@ def telegram_reference_prefix(event, original):
         markers.append("[引用消息不可用]")
     for quote in getattr(original, "quotes", ()):
         raw = getattr(getattr(getattr(event, "message_obj", None), "raw_message", None), "message", None)
+        # Capture keeps the original label so a later check can prove it unchanged.
         if getattr(raw, "voice", None) and not any(
                 getattr(part.type, "value", part.type) == "Reply" for part in event.message_obj.message):
-            markers.append(quote.observation_text())
+            markers.append(redact_text(quote.observation_text()))
         elif getattr(quote, "forward_origin", None):
-            markers.append(f"[引用消息 {quote.message_id}，{quote.forward_origin.attribution(quote.sender_id)}]")
+            attribution = redact_text(quote.forward_origin.attribution(quote.sender_id))
+            markers.append(f"[引用消息 {quote.message_id}，{attribution}]")
     return "\n".join(markers) + "\n" if markers else ""
 
 
