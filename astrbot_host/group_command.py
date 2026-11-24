@@ -129,7 +129,8 @@ async def receive_group_llm_command(controller, event, *, target=None):
     telegram = getattr(route, "platform_name", "") == "telegram"
     if telegram:
         from .group_standing import resolve_group_standing
-        standing = await resolve_group_standing(event, session.group_standing_cache)
+        standing = await resolve_group_standing(event, session.group_standing_cache,
+                                                fresh=command.intent != "group_llm_status")
         session.bridge.connections.assert_current(route.connection_lease)
     if telegram and (not standing or standing["role"] not in {"owner", "admin"}):
         text = "未执行：只有群主或群管理员可以使用本群管理命令。"

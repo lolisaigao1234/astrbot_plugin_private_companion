@@ -36,7 +36,7 @@ def group_sender_standing(event):
             "group_id": group.strip() if isinstance(group, str) else ""}
 
 
-async def resolve_group_standing(event, cache):
+async def resolve_group_standing(event, cache, *, fresh=False):
     """Read standing for a validated group event. Topics share chat membership."""
     if getattr(getattr(event, "platform_meta", None), "name", "") != "telegram":
         return group_sender_standing(event)
@@ -47,6 +47,8 @@ async def resolve_group_standing(event, cache):
     chat = event.message_obj.raw_message.message.chat.id
     client = event.client
     key = (route.platform_id, chat, route.sender_id)
+    if fresh:
+        cache.pop(key, None)
     entry = cache.get(key)
     if entry and entry[0] is client and entry[1] > monotonic():
         role = entry[2]

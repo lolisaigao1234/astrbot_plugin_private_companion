@@ -588,6 +588,8 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
                                   context.role_binding.role, core_admin=True)
         for status, text, expected in (
                 ("administrator", "陪伴群 关闭LLM", "已临时封锁"),
+                ("member", "陪伴群 开启LLM", "未执行"),
+                ("administrator", "陪伴群 关闭LLM", "已经处于临时封锁"),
                 ("creator", "陪伴群 LLM状态", "临时封锁"),
                 ("administrator", "陪伴群 开启LLM", "已恢复"),
                 ("administrator", "陪伴群 关闭生图", "已关闭"),
@@ -595,7 +597,6 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
                 ("member", "陪伴群 开启生图", "未执行"),
                 ("member", "陪伴群 关闭LLM", "未执行"),
                 (None, "陪伴群 开启LLM", "未执行")):
-            controller.session.group_standing_cache.clear()
             platform.client.get_chat_member.return_value = NS(user=NS(id=OWNER), status=status)
             event = await group_event(platform, -100400, "supergroup", 23, text=text)
             result = require(await receive_group_llm_command(controller, event))
