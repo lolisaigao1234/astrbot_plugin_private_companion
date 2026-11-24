@@ -2000,6 +2000,14 @@ test("Telegram identity cards and member details identify numeric accounts by pl
   }
 });
 
+test("QQ Official and Lark people keep an account label for opaque IDs", async () => {
+  for (const platform_name of ["qq_official", "lark"]) {
+    const h = harness({persons: [person("opaque-id", "测试成员", {platform: "default", platform_name})]});
+    await open(h, "测试成员");
+    assert.match(flat(h.card("测试成员")), /账号 opaque-id/);
+  }
+});
+
 test("Telegram route selector retains the adapter family for both roles", async () => {
   const route = {platform: "default", platform_name: "telegram", account_id: "6789", persona_ids: ["璃"]};
   const h = harness({persons: ["role-a", "role-b"].map(role_id =>
