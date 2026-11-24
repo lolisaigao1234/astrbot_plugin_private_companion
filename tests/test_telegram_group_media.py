@@ -42,6 +42,18 @@ class TelegramGroupMediaTests(TelegramHostFixture, unittest.IsolatedAsyncioTestC
 
         await check_provider_photo_budget(self, make_event, "test-group", OWNER)
 
+    async def test_provider_quoted_documents_and_videos(self):
+        from tests.telegram_provider_photo_support import check_provider_quoted_attachments
+
+        async def make_event(fields, original):
+            update = self.update(11, **fields, reply_to_message=self.update(10, **original).message.to_dict())
+            message = await self.platform.convert_message(update, NS(bot=self.platform.client))
+            event = self.platform.create_event(message)
+            event.created_at = self.clock.now().timestamp()
+            return event
+
+        await check_provider_quoted_attachments(self, make_event, "test-group")
+
     async def asyncSetUp(self):
         config = self.controller.config
         config["multi_host"]["group_targets"] = [dict(target_id="test-group", group_id="-400",
