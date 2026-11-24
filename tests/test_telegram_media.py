@@ -195,7 +195,9 @@ class TelegramCaptureTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase
             with path.open("wb") as stream:
                 stream.truncate(MAX_AUDIO_BYTES + 1)
             self.event.message_obj.message = [Record(file=str(path), path=str(path)), Plain("caption")]
-            captured = (await self.bridge.capture(self.event)).unwrap()
+            with patch("astrbot_host.audio.loader.decode_audio", new_callable=AsyncMock) as decode:
+                captured = (await self.bridge.capture(self.event)).unwrap()
+                decode.assert_not_awaited()
             self.assertIn("caption", captured.text)
             self.assertEqual(captured.audios, ())
 
