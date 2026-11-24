@@ -928,6 +928,31 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
         self.assertEqual(directory.stored_group_names()[("tg-main", "tg-main", "-100400#23")],
                          "新群名-故事")
 
+    async def test_topic_only_legacy_labels_survive_observation_and_parent_rename(self):
+        directory = self.controller.session_topology
+        for peer, name in (("-100400#23", "Books"), ("-100400#24", "Science-Fiction")):
+            origin = f"tg-main:GroupMessage:{peer}"
+            directory._store_observation(digest(["tg-main", "tg-main", origin]), {
+                "unified_msg_origin": origin, "account_id": "tg-main", "group_name": f"Book-Club-{name}",
+            })
+        await directory.observe(await group_event(self.platform, -100400, "supergroup", 23, title="Book-Club"))
+        key = ("tg-main", "tg-main", "-100400#24")
+        self.assertEqual(directory.stored_group_names()[key], "Book-Club-Science-Fiction")
+        await directory.observe(await group_event(self.platform, -100400, "supergroup",
+            title="Library", new_chat_title="Library", text=None, message_id=44))
+        self.assertEqual(directory.stored_group_names()[key], "Library-Science-Fiction")
+
+    async def test_first_parent_rename_preserves_the_full_legacy_topic_suffix(self):
+        directory = self.controller.session_topology
+        peer = "-100400#23"
+        origin = f"tg-main:GroupMessage:{peer}"
+        directory._store_observation(digest(["tg-main", "tg-main", origin]), {
+            "unified_msg_origin": origin, "account_id": "tg-main", "group_name": "Book-Club-Science-Fiction",
+        })
+        await directory.observe(await group_event(self.platform, -100400, "supergroup", text=None,
+            title="Book-Club", new_chat_title="Library", message_id=44))
+        self.assertEqual(directory.stored_group_names()[("tg-main", "tg-main", peer)], "Library-Science-Fiction")
+
     async def test_chat_rename_updates_legacy_topics_on_the_same_account(self):
         directory = self.controller.session_topology
         for peer, label in (("-100400", "旧-群名"), ("-100400#23", "旧-群名-故事"),
