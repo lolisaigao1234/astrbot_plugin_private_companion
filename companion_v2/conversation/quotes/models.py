@@ -84,6 +84,13 @@ class TelegramForwardOrigin:
 
 
 @dataclass(frozen=True)
+class TelegramAttachmentQuote:
+    kind: str
+    # Binds selections to the complete visible label and caption.
+    projection_hash: str
+
+
+@dataclass(frozen=True)
 class TelegramQuote(CapturedQuote):
     companion_sender: bool = False
     selection_offset: int | None = None
@@ -93,6 +100,7 @@ class TelegramQuote(CapturedQuote):
     forward_origin: TelegramForwardOrigin | None = None
 
     self_mentions: tuple = ()
+    attachment: TelegramAttachmentQuote | None = None
 
     def observation_text(self):
         sender = f"伙伴 ({self.sender_id})" if self.companion_sender else self.sender_id
@@ -121,6 +129,11 @@ class QuoteDescriptor:
             fields = {**data, "images": tuple(image_descriptor(i) for i in data["images"])}
             if "link_suffixes" in fields:
                 fields["link_suffixes"] = tuple(tuple(item) for item in fields["link_suffixes"])
+                if "attachment" in fields:
+                    fields["attachment"] = TelegramAttachmentQuote(**fields["attachment"])
+                    if fields.get("forward_origin"):
+                        fields["forward_origin"] = TelegramForwardOrigin(**fields["forward_origin"])
+                    return TelegramAttachmentDescriptor(**fields)
                 if "forward_origin" in fields:
                     fields["forward_origin"] = TelegramForwardOrigin(**fields["forward_origin"])
                     return TelegramForwardedQuoteDescriptor(**fields)
@@ -157,6 +170,13 @@ class TelegramMentionQuoteDescriptor(TelegramLinkedQuoteDescriptor):
 class TelegramForwardedQuoteDescriptor(TelegramLinkedQuoteDescriptor):
     forward_origin: TelegramForwardOrigin
     origin_resource_hash: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class TelegramAttachmentDescriptor(TelegramLinkedQuoteDescriptor):
+    attachment: TelegramAttachmentQuote
+    forward_origin: TelegramForwardOrigin | None = None
+    origin_resource_hash: str = ""
 
 
 def event_forwards(event):

@@ -47,15 +47,23 @@ def original_sources(messages, context, event, quote, text, at):
         prefix = ""
         media_event = saved
         if telegram:
-            from .originals import telegram_original, telegram_text
-            body, media_event = telegram_original(messages, original, saved, quote, body, evidence, at)
-            prefix, body = telegram_text(body, quote, bool(getattr(media_event, "images", ())))
+            from .originals import telegram_attachment_caption, telegram_original, telegram_text
+            body, media_event, owner = telegram_original(messages, original, saved, quote, body, evidence, at)
+            if getattr(quote, "attachment", None):
+                body = telegram_attachment_caption(body, owner, quote)
+            else:
+                prefix, body = telegram_text(body, quote, bool(getattr(media_event, "images", ())))
         if telegram and quote.selection_offset is not None:
             offset = quote.selection_offset
             selected = text.encode("utf-16-le")
             if (type(offset) is not int or offset < 0
                     or body.encode("utf-16-le")[2 * offset:2 * offset + len(selected)] != selected):
                 raise TaskError("quote_original_changed", "quoted selection differs from the admitted original")
+            evidence.append(source)
+            continue
+        if telegram and getattr(quote, "attachment", None):
+            if body != text:
+                raise TaskError("quote_original_changed", "attachment differs from the admitted group original")
             evidence.append(source)
             continue
         if (prefix + body != text or tuple(replace(i, position=0) for i in getattr(media_event, "images", ()))

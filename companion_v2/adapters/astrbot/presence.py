@@ -4,6 +4,7 @@ from companion_v2.execution.models import require
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.foundation.refs import ScopeKind
 from .native import route_id
+from .telegram_logging import redact_telegram_token
 
 
 def native_presence_port(bridge, scope, *, reverse_api_type, authorize, now):
@@ -52,7 +53,8 @@ class TelegramPresencePort(_PresencePort):
         except Exception:
             return {"state": "not_started", "code": "presence_authorization_changed"}
         try:
-            accepted = await lease.client.send_chat_action(chat_id=chat_id, action="typing")
+            with redact_telegram_token(lease.client):
+                accepted = await lease.client.send_chat_action(chat_id=chat_id, action="typing")
         except Exception:
             return {"state": "unknown", "code": "presence_ack_unknown"}
         if accepted is True:
