@@ -208,6 +208,31 @@ class TelegramCaptureTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase
         self.assertIn("附件超过读取上限", serialized)
         self.assertNotIn(self.platform.client.token, serialized)
 
+    async def test_managed_records_and_files_share_the_read_budget(self):
+        from companion_v2.execution.models import TaskError
+
+        await self.convert(text="caption")
+        parts = self.event.message_obj.message
+        parts.extend([Record(file="base64://YWJj"), File(name="large.txt", url="https://example.org/large"),
+                      File(name="small.txt", url="https://example.org/small"),
+                      File(name="last.txt", url="https://example.org/last")])
+        limits = []
+        async def fetch(url, *, maximum_bytes):
+            limits.append((url.rsplit("/", 1)[-1], maximum_bytes))
+            if url.endswith("large"):
+                raise TaskError("host_image_limit", "synthetic oversized file")
+            return b"ok"
+
+        with patch("companion_v2.conversation.media.models.MAX_TURN_BYTES", 5), patch(
+                "astrbot_host.media.fetch_attachment", fetch):
+            await self.bridge.prepare_telegram_album(self.event)
+        self.assertEqual(limits, [("large", 2), ("small", 2)])
+        caption, record, large, small, last = self.event.message_obj.message
+        self.assertEqual((caption.text, record.file), ("caption", "base64://YWJj"))
+        self.assertEqual((small.name, Path(await small.get_file()).read_bytes()), ("small.txt", b"ok"))
+        self.assertEqual(large.text, last.text)
+        self.assertIn("超过读取上限", last.text)
+
     async def test_captioned_album_preserves_photo_and_first_video_at_shared_limit(self):
         await self.check_mixed_album(oversized_first=False)
 
@@ -226,7 +251,10 @@ class TelegramCaptureTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase
         originals = {f"https://example.org/v{n}.mp4": f"video-{n}".encode() for n in (1, 2, 3)}
         video_size = len(originals["https://example.org/v1.mp4"])
         count = 2 if oversized_first else 1
-        async def video(locator):
+        video_limits = []
+
+        async def video(locator, *, maximum_bytes):
+            video_limits.append(maximum_bytes)
             if oversized_first and locator.position == 2:
                 from companion_v2.execution.models import TaskError
                 raise TaskError("host_video_limit", "oversized first video")
@@ -244,8 +272,10 @@ class TelegramCaptureTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase
         self.event.message_obj.message.extend(Video(file=url) for url in urls)
         budget = len(photo) + count * (video_size + frame.descriptor.retained_bytes)
         with patch("astrbot_host.media.fetch_image", AsyncMock(return_value=photo)), patch(
-                "companion_v2.conversation.media.video.models.MAX_TURN_BYTES", budget):
+                "companion_v2.conversation.media.models.MAX_TURN_BYTES", budget):
             captured = (await self.bridge.capture(self.event)).unwrap()
+        unit = video_size + frame.descriptor.retained_bytes
+        self.assertEqual(video_limits, [2 * unit, 2 * unit, unit] if oversized_first else [unit])
         self.assertEqual([item.descriptor.position for item in captured.images], [0])
         self.assertEqual([item.descriptor.position for item in captured.videos], [3, 4] if oversized_first else [2])
         self.assertEqual(captured.text.count("附件超过读取上限"), 1)
@@ -262,7 +292,7 @@ class TelegramCaptureTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase
         event.created_at = self.clock.now().timestamp()
         with patch("astrbot_host.media.fetch_image", AsyncMock(return_value=photo)), patch(
                 "astrbot_host.video.loader.fetch_attachment", fetch), patch(
-                "companion_v2.conversation.media.video.models.MAX_TURN_BYTES", len(photo) + count * video_size):
+                "companion_v2.conversation.media.models.MAX_TURN_BYTES", len(photo) + count * video_size):
             await self.started_plugin().receive_companion_message(event)
         from astrbot.core.astr_main_agent import collect_initial_request
         with patch("astrbot.core.astr_main_agent._get_session_conv", AsyncMock(return_value=NS(history="[]"))):

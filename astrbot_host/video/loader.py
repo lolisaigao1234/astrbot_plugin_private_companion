@@ -66,8 +66,8 @@ async def _decode(content, position, scratch):
             await process.communicate()
 
 
-async def load_native_video(locator):
-    return await decode_video(await fetch_native_video_bytes(locator), locator.position)
+async def load_native_video(locator, *, maximum_bytes=MAX_VIDEO_BYTES):
+    return await decode_video(await fetch_native_video_bytes(locator, maximum_bytes=min(MAX_VIDEO_BYTES, maximum_bytes)), locator.position)
 
 
 def _b64decode_strict(encoded: str) -> bytes:
