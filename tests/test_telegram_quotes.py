@@ -220,6 +220,50 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
         self.assertIn("继续", result.text)
         self.assertNotIn("原图", result.text)
 
+    async def test_admitted_mentions_keep_their_positions_across_links_and_partial_quotes(self):
+        session = self.controller.session
+        target = self.controller.settings.target("tg-owner")
+        body = dict(text="😀A @Synthetic_Bot B ok", entities=[
+            dict(type="text_link", offset=2, length=1, url="https://example.org/a"),
+            dict(type="mention", offset=4, length=14),
+            dict(type="text_link", offset=19, length=1, url="https://example.org/b"),
+        ])
+        event = await self.event(10, **body)
+        expected = "😀A (https://example.org/a) @Synthetic_Bot B (https://example.org/b) ok"
+        self.assertNotIn("@Synthetic_Bot", event.message_str)
+        require(await session.receive(event, target))
+        for number, selection in ((11, {}), (12, {"quote": {"text": "@Synthetic_Bot B", "position": 4}})):
+            reply = await self.event(number, text="讨论", reply_to_message=self.message(10, **body), **selection)
+            require(await session.receive(reply, target))
+        for capture in (self.bridge.capture, self.bridge.capture_core_reply):
+            self.assertEqual(require(await capture(event)).text, expected)
+
+    async def test_private_mention_restoration_preserves_attribution_and_transformed_text(self):
+        body = dict(text="@synthetic_bot", entities=[dict(type="mention", offset=0, length=14)])
+        forwarded = await self.event(21, **body, forward_origin={
+            "type": "hidden_user", "sender_user_name": "Hidden", "date": 1700000000})
+        full = require(await self.bridge.capture(forwarded))
+        self.assertNotIn(body["text"], full.text)
+        self.assertEqual(full.forwards[0].nodes[0].text, body["text"])
+        core = require(await self.bridge.capture_core_reply(forwarded))
+        self.assertEqual(self.observe(core), ("[转发消息，来源：Hidden]\n@synthetic_bot", (None, "observation")))
+
+        event = await self.event(22, **dict(body, text="@synthetic_bot private"))
+        event.message_obj.message[-1].text = "edited"
+        for capture in (self.bridge.capture, self.bridge.capture_core_reply):
+            self.assertEqual(require(await capture(event)).text, "edited")
+
+    async def test_old_body_without_a_mention_cannot_prove_its_original_position(self):
+        session = self.controller.session
+        target = self.controller.settings.target("tg-owner")
+        # This is also the only text available from pre-fix admissions.
+        require(await session.receive(await self.event(10, text="hi  ok"), target))
+        original = self.message(10, text="hi @synthetic_bot ok", entities=[
+            dict(type="mention", offset=3, length=14)])
+        for number, selection in ((11, {}), (12, {"quote": {"text": "@synthetic_bot", "position": 3}})):
+            reply = await self.event(number, text="讨论", reply_to_message=original, **selection)
+            self.assertEqual((await session.receive(reply, target)).failure.code, "quote_original_changed")
+
     async def test_selection_of_a_previously_admitted_message_can_be_replayed(self):
         session = self.controller.session
         target = self.controller.settings.target("tg-owner")
