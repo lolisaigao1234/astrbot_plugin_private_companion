@@ -197,13 +197,13 @@ class MultiPrivateBridge(NativePrivateBridge):
         from astrbot.core.message.components import File, Image, Record, Reply, Video
 
         parts = event.message_obj.message
-        if any(isinstance(part, Video) for part in parts):
+        if any(isinstance(part, (File, Video)) for part in parts):
             return True
         return (any(isinstance(part, (File, Image, Record, Video)) for part in parts)
                 and any(isinstance(child, Image) for part in parts if isinstance(part, Reply)
                         for child in part.chain or ()))
 
-    async def prepare_telegram_album(self, event):
+    async def prepare_telegram_album(self, event, context):
         """Budget direct attachments and embedded quote photos before SDK request collection."""
         import base64
         from astrbot.core.message.components import File, Image, Plain, Record, Reply, Video
@@ -213,6 +213,7 @@ class MultiPrivateBridge(NativePrivateBridge):
         from companion_v2.conversation.media.audio.models import MAX_AUDIO_BYTES, MAX_INPUT_AUDIOS
         from companion_v2.conversation.media.models import MAX_IMAGE_BYTES, MAX_INPUT_IMAGES, MAX_TURN_BYTES, fits_budget
         from companion_v2.conversation.media.video.models import MAX_VIDEO_BYTES, MAX_VIDEOS
+        from companion_v2.conversation.media.understanding import settings as understanding_settings
         from .audio.loader import fetch_native_audio_bytes
         from .core_reply_media import frozen_image_locators
         from .core_reply_video_sources import video_positions
@@ -264,6 +265,7 @@ class MultiPrivateBridge(NativePrivateBridge):
             photos.append(photo.descriptor)
             return Image.fromBytes(photo.content)
 
+        file_preferences = None
         for position, part in enumerate(message.message):
             kind = type(part)
             if kind not in limits:
@@ -292,7 +294,11 @@ class MultiPrivateBridge(NativePrivateBridge):
                     replacement = Record(file="base64://" + base64.b64encode(data).decode("ascii"))
                 else:
                     locator = freeze_attachment(event, file_locator(position, part))
-                    replacement, size = await read_attachment(bounded_file_component(event, locator, remaining))
+                    if file_preferences is None:
+                        values = self.file_settings(context.scope, context.role_binding.role) if self.file_settings else {}
+                        file_preferences = understanding_settings(values)
+                    replacement, size = await read_attachment(bounded_file_component(
+                        event, locator, remaining, file_preferences, context.scope))
                 if size > remaining:
                     remaining = 0
                     replacements[position] = Plain(limited)
@@ -1448,7 +1454,7 @@ class MultiHostSession:
                     or self.bridge.needs_telegram_media_budget(event)
                     or (context.scope.kind is ScopeKind.PRIVATE and captured.telegram_burst)
                 ):
-                    await self.bridge.prepare_telegram_album(event)
+                    await self.bridge.prepare_telegram_album(event, context)
                     self.bridge.connections.assert_current(connection_lease)
                 turn_id = "core-reply:" + digest([context.key, captured.event_id])
                 presence = self.application.presence
