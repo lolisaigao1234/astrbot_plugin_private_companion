@@ -606,9 +606,11 @@ class NativeGroupBridge(NativePrivateBridge):
                             raise TaskError("host_group_media_unsupported", "group media differs from its original component")
             elif onebot and (audio_locators or video_locators):
                 raise TaskError("host_group_media_unsupported", "group media requires original OneBot components")
-            if (len(image_locators) > MAX_INPUT_IMAGES or len(quote_locators) > 1
-                    or len(forward_locators) > intake.max_forwards or len(audio_locators) > MAX_INPUT_AUDIOS
-                    or len(video_locators) > MAX_VIDEOS):
+            captioned = telegram is not None and any(
+                getattr(part.type, "value", part.type) == "Plain" and part.text.strip() for part in parts)
+            if (len(quote_locators) > 1 or len(forward_locators) > intake.max_forwards
+                    or not captioned and (len(image_locators) > MAX_INPUT_IMAGES
+                                          or len(audio_locators) > MAX_INPUT_AUDIOS or len(video_locators) > MAX_VIDEOS)):
                 raise TaskError("host_group_media_limit", "group attachments exceed the input budget")
             text = "".join(text_parts)
             if not text.strip() and _has_self_mention_segment(original_parts, event, route.account_id):
@@ -649,11 +651,30 @@ class NativeGroupBridge(NativePrivateBridge):
             from companion_v2.conversation.media.understanding import settings as understanding_settings
             file_preferences = understanding_settings(self.file_settings(scope, role) if self.file_settings else {})
 
+            limited = "[附件超过读取上限，本轮未读取]"
+
+            async def load_optional(load, locator):
+                try:
+                    return await load(locator)
+                except TaskError as error:
+                    if not captioned or error.code not in {"host_image_limit", "host_video_limit", "host_audio_limit"}:
+                        raise
+                    text_parts[locator.position] = limited
+                    return None
+
             async def prepare():
-                images = await self._capture_images(frozen_images)
+                images = await self._capture_images(frozen_images, load_optional=load_optional if captioned else None)
                 quotes = []
                 if telegram and telegram.quote:
-                    quotes.append(replace(telegram.quote, images=await self._capture_images(telegram.images)))
+                    quote = telegram.quote
+                    try:
+                        quoted_images = await self._capture_images(telegram.images)
+                        if not captioned or fits_budget(tuple(i.descriptor for i in (*images, *quoted_images))):
+                            quote = replace(quote, images=quoted_images)
+                    except TaskError as error:
+                        if not captioned or error.code != "host_image_limit":
+                            raise
+                    quotes.append(quote)
                 for locator in frozen_quotes:
                     if locator.message_id == route.event_id:
                         raise TaskError("host_quote_invalid", "a group input cannot quote itself")
@@ -693,22 +714,38 @@ class NativeGroupBridge(NativePrivateBridge):
                     raise TaskError("host_group_media_limit", "group attachments exceed their shared input budget")
                 audios = []
                 for locator in frozen_audios:
-                    audio = await self.audio_loader(locator)
+                    if captioned and len(audios) >= MAX_INPUT_AUDIOS:
+                        text_parts[locator.position] = limited
+                        continue
+                    audio = await load_optional(self.audio_loader, locator)
+                    if audio is None and captioned:
+                        continue
                     if type(audio) is not CapturedAudio or audio.descriptor.position != locator.position:
                         raise TaskError("host_audio_invalid", "group audio loader changed the original component position")
+                    if not fits_video_budget(tuple(video_descriptors), all_images, (*audio_descriptors, audio.descriptor)):
+                        if captioned:
+                            text_parts[locator.position] = limited
+                            continue
+                        raise TaskError("host_group_media_limit", "group voice and visual attachments exceed the input budget")
                     audios.append(audio)
                     audio_descriptors.append(audio.descriptor)
-                    if not fits_video_budget(tuple(video_descriptors), all_images, tuple(audio_descriptors)):
-                        raise TaskError("host_group_media_limit", "group voice and visual attachments exceed the input budget")
                 videos = []
                 for locator in frozen_videos:
-                    video = await self.video_loader(locator)
+                    if captioned and len(videos) >= MAX_VIDEOS:
+                        text_parts[locator.position] = limited
+                        continue
+                    video = await load_optional(self.video_loader, locator)
+                    if video is None and captioned:
+                        continue
                     if type(video) is not CapturedVideo or video.descriptor.position != locator.position:
                         raise TaskError("host_video_invalid", "group video loader changed the original component position")
+                    if not fits_video_budget((*video_descriptors, video.descriptor), all_images, tuple(audio_descriptors)):
+                        if captioned:
+                            text_parts[locator.position] = limited
+                            continue
+                        raise TaskError("host_group_media_limit", "group video and other attachments exceed the input budget")
                     videos.append(video)
                     video_descriptors.append(video.descriptor)
-                    if not fits_video_budget(tuple(video_descriptors), all_images, tuple(audio_descriptors)):
-                        raise TaskError("host_group_media_limit", "group video and other attachments exceed the input budget")
                 if not fits_video_budget(tuple(video_descriptors), all_images, tuple(audio_descriptors)):
                     raise TaskError("host_group_media_limit", "direct, quoted and forwarded media share one input budget")
                 return images, tuple(quotes), forwards, tuple(audios), tuple(videos)
@@ -719,6 +756,8 @@ class NativeGroupBridge(NativePrivateBridge):
                     images, quotes, forwards, audios, videos = await asyncio.wait_for(prepare(), MEDIA_PREPARE_TIMEOUT)
                 except asyncio.TimeoutError:
                     raise TaskError("host_media_timeout", "group attachment preparation exceeded its intake time") from None
+            if captioned:
+                text = "".join(text_parts)
             if frozen_files:
                 file_text = await prepare_file_text(frozen_files, self.file_loader, file_preferences,
                     client=event_client, scope=scope, payload_budget=65536 - sum(map(len, text_parts)))

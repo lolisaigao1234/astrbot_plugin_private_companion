@@ -1332,7 +1332,7 @@ class MultiHostSession:
                     context = self._select_core_reply_context(target, captured)
                 self.bridge.connections.assert_current(connection_lease)
                 self._validate_core_group_admission(group_admission, context, captured)
-                if (context.scope.kind is ScopeKind.PRIVATE and event.platform_meta.name == "telegram"
+                if (event.platform_meta.name == "telegram"
                         and getattr(event.message_obj.raw_message.message, "media_group_id", None)):
                     await self.bridge.prepare_telegram_album(event)
                     self.bridge.connections.assert_current(connection_lease)
