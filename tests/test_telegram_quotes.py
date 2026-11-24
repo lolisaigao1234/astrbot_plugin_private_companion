@@ -140,6 +140,24 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
             self.assertFalse(result.is_success)
             self.assertEqual(result.failure.code, "quote_original_changed")
 
+    async def test_quote_verifies_original_forward_label_after_redaction(self):
+        session = self.controller.session
+        target = self.controller.settings.target("tg-owner")
+        hidden = {"type": "hidden_user", "sender_user_name": "token=demo", "date": 1699990000}
+        with patch.object(session.application, "worker_limit", 0):
+            event = await self.event(10, text="原文", forward_origin=hidden)
+            captured = require(await self.bridge.capture(event))
+            self.assertIn("token=[REDACTED]", captured.text)
+            self.assertNotIn("token=demo", captured.text)
+            require(await session.receive(event, target))
+            for number, name in ((11, "token=demo"), (12, "token=changed")):
+                embedded = self.message(10, text="原文", forward_origin={**hidden, "sender_user_name": name})
+                result = await session.receive(await self.event(number, text="继续", reply_to_message=embedded), target)
+                if number == 11:
+                    require(result)
+                else:
+                    self.assertEqual(result.failure.code, "quote_original_changed")
+
     async def test_missing_and_external_originals_are_unavailable(self):
         for fields in ({"reply_to_message": self.message(10, date=0, **{"from": None})},
                        {"quote": {"text": "不可见", "position": 0}},
