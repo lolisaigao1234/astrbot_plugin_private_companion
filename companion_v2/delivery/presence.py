@@ -22,6 +22,7 @@ class PresenceCoordinator:
         self.app, self.runtime, self.port = app, app.runtime, port
         self.typing, self.suppressed, self.contexts, self.results = {}, {}, {}, {}
         self.native_replies, self._typing_wakes = {}, {}
+        self._typing_retry_until = {}
         self._result_contexts = {}
         self._active_routes = {}
         self.status_worker = None
@@ -203,9 +204,18 @@ class PresenceCoordinator:
     async def _pulse(self, context):
         # One continuous lease covers the whole turn, including tools and part gaps.
         # Stop refreshing when the lease ends; don't issue an unverified protocol toggle.
-        wake = self._typing_wakes.setdefault(self.route(context), asyncio.Event())
+        route = self.route(context)
+        wake = self._typing_wakes.setdefault(route, asyncio.Event())
+        clock = asyncio.get_running_loop().time
         reported_batch = None
         while not self.closed:
+            retry_at = self._typing_retry_until.get(route)
+            if retry_at is not None:
+                delay = retry_at - clock()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                    continue
+                self._typing_retry_until.pop(route)
             wake.clear()
             values = self._allowed(context, "typing_enabled", "platform.typing")
             turn = self.active_turn(context)
@@ -225,8 +235,8 @@ class PresenceCoordinator:
                             context.scope.native_scope_id, batch, result.get("state"), result.get("code", ""))
                 reported_batch = batch
             if "retry_after" in result:
-                # A delivery-stage wake must not shorten Telegram's flood-control delay.
-                await asyncio.sleep(result["retry_after"])
+                # A replacement reply on this recipient must observe the same flood-control deadline.
+                self._typing_retry_until[route] = clock() + result["retry_after"]
                 continue
             if result.get("state") != "accepted":
                 return
