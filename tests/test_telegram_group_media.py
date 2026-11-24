@@ -12,9 +12,11 @@ from tests.test_conversation_images import image_bytes
 from tests.video_support import video_bytes
 from telegram import Update
 from astrbot.core.message.components import File, Image, Record, Video
+from astrbot_host.audio.decoder import inspect_audio
 from astrbot_host.audio.loader import load_native_audio
 from astrbot_host.files.loader import load_native_file
 from astrbot_host.media import load_native_image
+from astrbot_host.video.decoder import inspect_video
 from astrbot_host.video.loader import load_native_video
 
 
@@ -62,6 +64,8 @@ class TelegramGroupMediaTests(TelegramHostFixture, unittest.IsolatedAsyncioTestC
                                is_video=False, emoji="😀")), "[贴纸 😀]"),
         ]
         with (patch("astrbot_host.media.fetch_image", AsyncMock(return_value=image_bytes())),
+              patch("astrbot_host.audio.loader.decode_audio", AsyncMock(side_effect=inspect_audio)),
+              patch("astrbot_host.video.loader.decode_video", AsyncMock(side_effect=inspect_video)),
               patch("astrbot_host.video.loader.fetch_attachment", AsyncMock(return_value=video_bytes())),
               patch("astrbot_host.files.loader.fetch_attachment", AsyncMock(return_value=b"document body")),
               patch("astrbot.core.platform.sources.telegram.tg_adapter.download_file", download)):

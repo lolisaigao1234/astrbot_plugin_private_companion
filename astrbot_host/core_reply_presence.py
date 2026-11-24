@@ -1,6 +1,18 @@
 """Connect native reply events to the optional, recipient-scoped typing lease."""
 
 
+async def _skip_host_typing():
+    pass
+
+
+def gate_telegram_private_typing(event):
+    if (getattr(getattr(event, "platform_meta", None), "name", None) == "telegram"
+            and getattr(event.message_obj.type, "value", None) == "FriendMessage"):
+        # InternalAgentSubStage awaits this before any waiting-LLM hook. Only
+        # this managed event delegates its initial indicator to the presence lease.
+        event.send_typing = _skip_host_typing
+
+
 def observe_native_reply_presence(application, prepared, stage):
     if not isinstance(prepared, dict):
         return

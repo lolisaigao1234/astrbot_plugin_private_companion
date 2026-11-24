@@ -105,7 +105,7 @@
     : JSON.stringify([person.platform, person.bot_id, person.account_id, ["role", person?.role_id || ""]]);
   const personaDisplayLabel = (person) => personaIdsOf(person).map(value => value || "默认人格").join("、")
     || person?.role_name || "当前人格";
-  const routeSnapshot = (person) => Object.fromEntries(["platform", "bot_id", "account_id", "role_id", "persona_ids",
+  const routeSnapshot = (person) => Object.fromEntries(["platform", "platform_name", "bot_id", "account_id", "role_id", "persona_ids",
     "revision", "settings_available", "private_target", "private_chat", "private_contact",
     "legacy_private_contact", "legacy_maintained", "admin_nickname", "identity_tier",
     "display_name", "native_account_id", "role_name", "private", "groups", "total"]
