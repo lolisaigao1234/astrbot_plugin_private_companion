@@ -464,6 +464,7 @@ class NativeConversationInput:
     group_message_text: str | None = None
     forward_origin: str = ""
     quote_unavailable: bool = False
+    telegram_burst: tuple["NativeConversationInput", ...] = ()
 
 
 NativePrivateInput = NativeConversationInput  # Preserve the private adapter's public snapshot name.

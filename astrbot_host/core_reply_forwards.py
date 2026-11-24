@@ -121,6 +121,13 @@ def event_will_enter_astrbot_llm(event: Any) -> bool:
     return event_has_media_or_reply(event)
 
 
+def telegram_private_forward(event):
+    if getattr(getattr(event, "platform_meta", None), "name", None) != "telegram":
+        return False
+    raw = getattr(getattr(getattr(event, "message_obj", None), "raw_message", None), "message", None)
+    return bool(getattr(raw, "forward_origin", None) and getattr(getattr(raw, "chat", None), "type", "") == "private")
+
+
 def private_debounce_input(event: Any) -> tuple[str, bool] | None:
     """Extract ``(plain_text, has_forward)`` for private-debounce-eligible messages.
 
@@ -137,8 +144,11 @@ def private_debounce_input(event: Any) -> tuple[str, bool] | None:
         return None
     if getattr(getattr(event, "platform_meta", None), "name", None) == "telegram":
         raw = getattr(getattr(message_obj, "raw_message", None), "message", None)
-        if any(getattr(raw, field, None) for field in ("reply_to_message", "external_reply", "quote", "forward_origin")):
+        if any(getattr(raw, field, None) for field in ("reply_to_message", "external_reply", "quote")):
             return None
+    if telegram_private_forward(event):
+        # Native text belongs to the original speaker, never the owner's comment.
+        return "", True
     parts = _message_components(event)
     if not parts:
         return None
