@@ -1046,10 +1046,10 @@ class TelegramGroupRoomToolTests(TelegramHostFixture, unittest.IsolatedAsyncioTe
         name = native_tool_name(create)
         tool = request.func_tool.get_tool(name)
         self.assertIsNotNone(tool)
-        async def invoke(identifier):
-            call = ToolCall(id=identifier, function=ToolCall.FunctionBody(name=name, arguments='{"mode":"call"}'))
+        async def invoke(identifier, mode="call"):
+            call = ToolCall(id=identifier, function=ToolCall.FunctionBody(name=name, arguments=json.dumps({"mode": mode})))
             wrapper = NS(context=NS(event=event), messages=[AgentMessage(role="assistant", tool_calls=[call])])
-            return json.loads(await tool.call(wrapper, mode="call"))
+            return json.loads(await tool.call(wrapper, mode=mode))
 
         for _ in range(2):
             result = await invoke("room-call")
@@ -1086,7 +1086,7 @@ class TelegramGroupRoomToolTests(TelegramHostFixture, unittest.IsolatedAsyncioTe
         self.platform.client.send_message.reset_mock()
         self.platform.client.send_message.side_effect = TimeoutError("Telegram acknowledgement lost")
         for _ in range(2):
-            result = await invoke("uncertain-room-call")
+            result = await invoke("uncertain-room-call", mode="watch")
             self.assertEqual(result["state"], "unknown", result)
         self.platform.client.send_message.assert_awaited_once()
         private = self.platform.client.send_message.await_args.kwargs
