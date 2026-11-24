@@ -601,6 +601,43 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
             self.assertIn("回答", payload["text"])
             self.assertNotIn("None", payload["text"])
 
+    async def test_streamed_reply_uses_topic_headers_when_requested(self):
+        from astrbot.core.message.message_event_result import MessageChain, MessageEventResult, ResultContentType
+        from astrbot_host.core_reply import activate_core_reply_delivery_guard, prepare_core_reply_event
+        from astrbot_host.core_reply_outbound import prepare_core_reply_outbound_message
+        from astrbot_host.core_reply_segmentation import prepare_core_reply_segmentation, uses_managed_group_stream
+        from companion_v2.foundation.outcome import Outcome
+
+        event = await group_event(self.platform, -100400, "supergroup", 23,
+                                  from_user=User(OWNER, "Member", False, username="synthetic_member"))
+        native = require(await self.controller.session.bridge.groups.capture(event))
+        settings = {}
+        prepared = dict(native_input=native, event_id=native.event_id, channel="group",
+                        segmentation_settings={"enabled": False}, outbound_settings=settings)
+        def decorate(current, message, authorize, index, count):
+            return prepare_core_reply_outbound_message(event, current, message, segment_index=index)
+        prepare_core_reply_event(event, prepared, authorize=AsyncMock(return_value=Outcome.success(True)),
+                                 prepare_send=decorate)
+        prepare_core_reply_segmentation(event)
+        self.assertFalse(uses_managed_group_stream(event))
+        settings.update(reply_quote_enabled=True, reply_mention_speaker_enabled=True)
+        self.assertTrue(uses_managed_group_stream(event))
+        event.set_result(MessageEventResult().set_result_content_type(ResultContentType.STREAMING_RESULT))
+        activate_core_reply_delivery_guard(event)
+
+        async def chunks():
+            for word in ("一段", "回答"):
+                yield MessageChain(chain=[Plain(word)])
+
+        await event.send_streaming(chunks())
+        self.platform.client.send_message.assert_awaited_once()
+        payload = self.platform.client.send_message.await_args.kwargs
+        self.assertEqual((payload["chat_id"], payload["message_thread_id"], payload["reply_to_message_id"]),
+                         ("-100400", "23", native.event_id))
+        self.assertTrue(payload["allow_sending_without_reply"])
+        self.assertIn("@synthetic_member", payload["text"].replace(chr(92), ""))
+        self.assertIn("一段回答", payload["text"])
+
     async def test_topic_directory_tracks_group_topic_and_member_renames(self):
         directory = self.controller.session_topology
         for title, topic, member in (("读书群", "小说", "阿青"), ("阅读群", "故事", "青")):
@@ -711,6 +748,22 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
                 self.assertEqual((captured.principal.native_account_id, quote.sender_id, quote.text),
                                  (str(OWNER), "321", "成员" if selection else fields["text"]))
                 self.assertNotIn("成员", captured.text)
+
+    async def test_group_quote_verifies_redacted_forward_origin(self):
+        from telegram import MessageOriginHiddenUser
+        when = datetime.now(timezone.utc)
+        fields = dict(message_id=10, from_user=User(321, "Forwarder", False), text="原文")
+        original = await group_event(self.platform, **fields,
+                                     forward_origin=MessageOriginHiddenUser(when, "token=demo"))
+        require(await self.receive_group(original))
+        for number, name in ((11, "token=demo"), (12, "token=changed")):
+            embedded = await group_event(self.platform, **fields, forward_origin=MessageOriginHiddenUser(when, name))
+            reply = await group_event(self.platform, message_id=number, reply_to_message=embedded.message_obj.raw_message.message)
+            result = await self.receive_group(reply)
+            if number == 11:
+                require(result)
+            else:
+                self.assertEqual(result.failure.code, "quote_original_changed")
 
     async def test_group_quote_of_admitted_forward(self):
         from telegram import MessageOriginUser
