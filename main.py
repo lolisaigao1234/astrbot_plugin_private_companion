@@ -60,6 +60,7 @@ from .astrbot_host.core_reply_tool_guard import (
     close_core_reply_tool_guard, install_core_reply_tool_guard, mark_managed_turn,
 )
 from .astrbot_host.core_reply_mentions import prepare_bare_mention_request
+from .astrbot_host.binding import telegram_forward_message
 from .astrbot_host.core_reply_forwards import (
     apply_debounced_private_merge,
     await_event_forwards_parsed,
@@ -77,7 +78,7 @@ from .astrbot_host.core_reply_forwards import (
     merge_followup_forwards,
     parse_event_forwards,
     prepare_forward_only_request,
-    private_debounce_input, wait_for_quoted_forward,
+    forward_album_key, private_debounce_input, wait_for_quoted_forward,
     telegram_private_forward,
     resolve_forward_intake_policy,
 )
@@ -472,6 +473,9 @@ class PrivateCompanionV2StagingPlugin(Star):
         if message_id is None or message_id == "":
             return False
         key = (str(getattr(target, "target_id", "") or ""), str(message_id))
+        album = forward_album_key(key[0], telegram_forward_message(event))
+        if album:  # Replies to any of its photos can tell that the album has already arrived.
+            self._private_delivery_dedup().duplicate(album)
         return self._private_delivery_dedup().duplicate(key)
 
     def _private_reply_followups(self):
