@@ -351,8 +351,17 @@ class NativeRealityTogetherTests(unittest.IsolatedAsyncioTestCase):
             await provider.execute(req, before_dispatch=lambda: True)
         plugin.notify_telegram_invite_refused.assert_not_awaited()
         restarted = TOGETHER.NativeTogetherProvider(plugin, self.root, version=PRODUCT_VERSION)
+        restarted.NOTICE_RETRY_SECONDS = 0.01
+        route = plugin.telegram_group_invite_route.return_value
+        plugin.telegram_group_invite_route.return_value = None
         await restarted.recover_group_notices()
-        plugin.notify_telegram_invite_refused.assert_awaited_once()
+        plugin.notify_telegram_invite_refused.assert_not_awaited()
+        plugin.telegram_group_invite_route.return_value = route
+        # Reconnection must deliver a confirmed-unsent notice even when the
+        # registered tool returns a cached receipt and never calls this provider.
+        await asyncio.wait_for(restarted._notice_retry, 2)
+        await restarted.close()
+        self.assertEqual(plugin.notify_telegram_invite_refused.await_count, 2)
         for _ in range(3):
             provider = TOGETHER.NativeTogetherProvider(plugin, self.root, version=PRODUCT_VERSION)
             result = await provider.execute(req, before_dispatch=lambda: True)

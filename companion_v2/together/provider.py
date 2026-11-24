@@ -411,6 +411,8 @@ async def _checked(callback: Callable) -> None:
 
 
 class NativeTogetherProvider:
+    NOTICE_RETRY_SECONDS = 30
+
     def __init__(self, plugin: Any, data_dir: Path, *, version: str = VERSION,
                  package_hash: str | None = None):
         self.plugin = plugin
@@ -420,6 +422,7 @@ class NativeTogetherProvider:
         self.store = OperationStore(Path(data_dir) / "native_v2" / "operations.json")
         self.invitations = InvitationStore(Path(data_dir) / "native_v2" / "invitations.json")
         self._room_lock = asyncio.Lock()
+        self._notice_retry = None
         self._closed = False
 
     def _live(self) -> None:
@@ -896,6 +899,17 @@ class NativeTogetherProvider:
                 raise
         return self._response(value, operation)
 
+    def _schedule_notice_retry(self):
+        if not self._closed and (self._notice_retry is None or self._notice_retry.done()):
+            self._notice_retry = asyncio.create_task(self._retry_pending_notices())
+
+    async def _retry_pending_notices(self):
+        delay = self.NOTICE_RETRY_SECONDS
+        while not self._closed and self.store.pending_group_notice_ids():
+            await asyncio.sleep(delay)
+            await self.recover_group_notices()
+            delay = min(300, 2 * delay)
+
     async def recover_group_notices(self):
         for scope, key in self.store.pending_group_notice_ids():
             try:
@@ -904,6 +918,9 @@ class NativeTogetherProvider:
                     await self._resume_group_notice(scope, operation)
             except Exception as error:
                 logger.warning("[TogetherCompanion] 群邀请提示待恢复 error_type=%s", type(error).__name__)
+
+        if self.store.pending_group_notice_ids():
+            self._schedule_notice_retry()
 
     async def _resume_group_notice(self, scope, operation):
         context = operation["request"]["context"]
@@ -920,7 +937,10 @@ class NativeTogetherProvider:
         self.store.update(scope, operation["id"], **fields, result={"group_notice": "unknown"})
         notice = await self.plugin.notify_telegram_invite_refused(route)
         status = "pending" if notice["state"] == "failed" else notice["state"]
-        return self.store.update(scope, operation["id"], **fields, result={"group_notice": status})
+        receipt = self.store.update(scope, operation["id"], **fields, result={"group_notice": status})
+        if status == "pending":
+            self._schedule_notice_retry()
+        return receipt
 
     async def _create_room(self, value, scope, operation, *, user_id, before_dispatch=None):
         """Open one short-lived room and bind it to this V2 scope.
@@ -1070,3 +1090,6 @@ class NativeTogetherProvider:
 
     async def close(self) -> None:
         self._closed = True
+        if self._notice_retry is not None:
+            self._notice_retry.cancel()
+            await asyncio.gather(self._notice_retry, return_exceptions=True)
