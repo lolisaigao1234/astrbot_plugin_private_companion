@@ -27,6 +27,8 @@ from companion_v2.execution.models import TaskError, digest, require
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.foundation.refs import ScopeKind
 
+from .telegram_send import send_private_session
+
 
 logger = logging.getLogger(__name__)
 
@@ -281,6 +283,8 @@ class AstrBotPlatformSender:
                 with redact_telegram_token(lease.client if platform_name == "telegram" else None):
                     if telegram_quote:
                         accepted = await send_optional_reply(lease.client, chain, session.session_id)
+                    elif platform_name == "telegram" and scope.kind is ScopeKind.PRIVATE:
+                        accepted = await send_private_session(platform, session, chain)
                     else:
                         accepted = await platform.send_by_session(session, chain)
                 if platform_name == "telegram" and accepted is False:

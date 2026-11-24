@@ -1,5 +1,6 @@
 """V2 live activity services."""
 from __future__ import annotations
+from companion_v2.adapters.astrbot.telegram_send import send_context_message
 from .common import *
 
 
@@ -524,7 +525,7 @@ class LiveActivityMethods:
                 logger.error('[B站直播] SC 最终兜底失败：未绑定自动回应会话')
                 return False
             reply_text = self._build_bili_support_fallback_reply(selected)
-            await self.context.send_message(session_id, MessageChain([Plain(reply_text)]))
+            await send_context_message(self.context, session_id, MessageChain([Plain(reply_text)]))
             try:
                 await self._push_subtitle(reply_text, source='bili_live')
             except Exception as e:

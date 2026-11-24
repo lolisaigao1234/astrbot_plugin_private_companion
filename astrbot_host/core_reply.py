@@ -795,7 +795,11 @@ def inject_core_reply_prompt(event: Any, req: Any) -> None:
     origin = getattr(original, "forward_origin", "")
     markers = [f"[转发消息，来源：{origin}]"] if origin else []
     for quote in getattr(original, "quotes", ()):
-        if getattr(quote, "forward_origin", None):
+        raw = getattr(getattr(getattr(event, "message_obj", None), "raw_message", None), "message", None)
+        if getattr(raw, "voice", None) and not any(
+                getattr(part.type, "value", part.type) == "Reply" for part in event.message_obj.message):
+            markers.append(quote.observation_text())
+        elif getattr(quote, "forward_origin", None):
             markers.append(f"[引用消息 {quote.message_id}，{quote.forward_origin.attribution(quote.sender_id)}]")
     if markers and isinstance(getattr(req, "prompt", None), str):
         marker = "\n".join(markers) + "\n"

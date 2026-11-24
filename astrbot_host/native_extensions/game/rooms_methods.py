@@ -1,5 +1,6 @@
 """V2 game rooms services."""
 from __future__ import annotations
+from companion_v2.adapters.astrbot.telegram_send import send_context_message
 from .common import *
 from ..usage import tracked_text_chat
 from .native_context import resolve_room_context, room_background
@@ -515,7 +516,7 @@ class GameRoomsMethods:
         if room.player is None and self.manager.empty_player_timeout:
             lines.append(f'请在 {self.manager.empty_player_timeout} 秒内进入玩家席，否则房间会自动销毁。')
         try:
-            delivered = await self.context.send_message(room.session_id, MessageChain([Plain('\n'.join(lines))]))
+            delivered = await send_context_message(self.context, room.session_id, MessageChain([Plain('\n'.join(lines))]))
         except Exception as exc:
             logger.warning('[GameCompanion] 独立发送房间链接失败，将交由模型回复回退: %s', exc)
             return False

@@ -1,5 +1,7 @@
 """Connect native reply events to the optional, recipient-scoped typing lease."""
 
+from companion_v2.adapters.astrbot.telegram_send import suppress_private_event_typing
+
 
 async def _skip_host_typing():
     pass
@@ -11,6 +13,7 @@ def gate_telegram_private_typing(event):
         # InternalAgentSubStage awaits this before any waiting-LLM hook. Only
         # this managed event delegates its initial indicator to the presence lease.
         event.send_typing = _skip_host_typing
+        suppress_private_event_typing(event)
 
 
 def observe_native_reply_presence(application, prepared, stage):

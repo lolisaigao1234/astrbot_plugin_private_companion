@@ -51,7 +51,7 @@ def prepare_quote(sources, parent, audience, captured):
         if origin:
             label = sources.prepare_message(replace(record, payload=origin.label)).payload
             provenance = dict(forward_origin=replace(origin, label=label),
-                origin_resource_hash=digest(["telegram-forward", captured.message_id, origin.label, origin.sent_at]))
+                origin_resource_hash=origin.resource_hash(captured.message_id))
         if captured.self_mentions:
             provenance["self_mentions"] = captured.self_mentions
         if captured.attachment:
