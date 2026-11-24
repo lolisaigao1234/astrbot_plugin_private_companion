@@ -9,6 +9,16 @@ from companion_v2.conversation.private_debounce import MAX_MERGED_CHARS
 from .core_reply_forwards import MAX_CORE_FORWARD_IMAGES, component_kind
 
 
+def _quoted_lines(text):
+    # Keep user-written section markers visibly inside the body that supplied them.
+    return "\n".join("│ " + line if line.lstrip().startswith("[") else line
+                     for line in text.split("\n"))
+
+
+def _origin_label(name):
+    return " ".join(name.splitlines()).replace("[", "［").replace("]", "］")
+
+
 def _bounded_sections(originals, budget=MAX_MERGED_CHARS):
     forward_ids = {item.event_id for item in originals if item.forward_origin}
     replied_to = set()
@@ -16,8 +26,8 @@ def _bounded_sections(originals, budget=MAX_MERGED_CHARS):
     for item in originals:
         body = item.text
         if item.forward_origin:
-            header = f"[转发消息，来源：{item.forward_origin}]\n"
-            body = body.removeprefix(header)
+            body = body.removeprefix(f"[转发消息，来源：{item.forward_origin}]\n")
+            header = f"[转发消息，来源：{_origin_label(item.forward_origin)}]\n"
         else:
             quote = next((q for q in getattr(item, "quotes", ()) if q.message_id in forward_ids), None)
             header = "[发起人的留言]\n"
@@ -27,16 +37,16 @@ def _bounded_sections(originals, budget=MAX_MERGED_CHARS):
                 if getattr(quote, "selection_offset", None) is not None:
                     allowance = max(12, budget // len(originals) - len(header) - 36)
                     selected = quote.text if len(quote.text) <= allowance else quote.text[:allowance-1] + "…"
-                    header = f"[回复转发消息 {quote.message_id}]\n所选片段：{selected}\n[发起人的留言]\n"
+                    header = f"[回复转发消息 {quote.message_id}]\n所选片段：{_quoted_lines(selected)}\n[发起人的留言]\n"
         headers.append(header)
-        bodies.append(body)
+        bodies.append(_quoted_lines(body))
     # Preserve attribution even for a hundred long messages. Shorten labels only
     # when keeping them in full would leave no space for their message bodies.
     fair_share = budget // len(headers)
     if sum(len(header) + min(32, len(body)) + 2 for header, body in zip(headers, bodies)) > budget:
         label_limit = max(1, fair_share - len("[转发消息，来源：]\n") - 34)
         for i, item in enumerate(originals):
-            name = item.forward_origin
+            name = _origin_label(item.forward_origin)
             if len(name) > label_limit:
                 tail = label_limit // 2
                 suffix = name[-tail:] if tail else ""
