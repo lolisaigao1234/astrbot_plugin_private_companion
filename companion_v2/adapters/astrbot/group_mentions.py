@@ -116,53 +116,61 @@ def telegram_plain_text(event, text):
     return text
 
 
-def _telegram_mentioned_text(body, entities, parse, bot_name):
-    # AstrBot moves mentions before Plain and expands text links inline. Apply
-    # both transformations in Telegram's original UTF-16 coordinate space.
-    edits = []
-    mentioned = False
-    for entity in entities:
-        end = entity.offset + entity.length
-        if entity.type == "mention" and parse(entity)[1:].casefold() == bot_name.casefold():
-            edits.append((entity.offset, end, SELF_MENTION))
-            mentioned = True
-        elif entity.type == "text_link" and entity.url:
-            edits.append((end, end, f" ({entity.url})"))
-    if not mentioned:
-        return None
-    encoded = bytearray(body.encode("utf-16-le"))
-    for start, end, value in sorted(edits, reverse=True):
-        encoded[start * 2:end * 2] = value.encode("utf-16-le")
-    return encoded.decode("utf-16-le")
-
-
-def _telegram_parts(event, parts):
-    from .telegram_references import voice_caption_parts
-
+def _telegram_mention_projection(event, parts):
+    """Use raw positions only if the SDK's current text still represents that input."""
     original = event.message_obj.raw_message.message
-    parts = voice_caption_parts(original, parts)
     body = original.text or original.caption or ""
     entities = original.entities if original.text else original.caption_entities
     parse = original.parse_entity if original.text else original.parse_caption_entity
-    mentioned_text = _telegram_mentioned_text(body, entities, parse, event.message_obj.self_id)
+    bot_name = event.message_obj.self_id
+    source = body.encode("utf-16-le")
+    restored, projected = bytearray(source), bytearray(source)
+    has_mention = False
+    for entity in reversed(entities or ()):
+        start = entity.offset * 2
+        end = start + entity.length * 2
+        if entity.type == "mention" and parse(entity)[1:].casefold() == bot_name.casefold():
+            restored[start:end] = SELF_MENTION.encode("utf-16-le")
+            if original.text:
+                del projected[start:end]
+            has_mention = True
+        elif entity.type == "text_link" and entity.url:
+            suffix = f" ({entity.url})".encode("utf-16-le")
+            restored[end:end] = suffix
+            projected[end:end] = suffix
+    if not has_mention:
+        return None
+    expected = projected.decode("utf-16-le")
+    plains = [(i, telegram_plain_text(event, part.text)) for i, part in enumerate(parts)
+              if component_kind(part) == "Plain"]
+    matches = [i for i, value in plains if value == expected]
+    if len(matches) == 1:
+        return matches[0], restored.decode("utf-16-le")
+    if not plains and not expected and any(component_kind(p) == "At" and p.qq == bot_name for p in parts):
+        return len(parts), restored.decode("utf-16-le")
+    return None
+
+
+def _telegram_parts(event, parts):
     from .telegram_media import sticker_marker
+    from .telegram_references import voice_caption_parts
+
+    parts = voice_caption_parts(event.message_obj.raw_message.message, parts)
+    mention = _telegram_mention_projection(event, parts)
     sticker = sticker_marker(event)
     result = []
-    for part in parts:
+    for index, part in enumerate(parts):
         kind = component_kind(part)
         if kind == "At":
-            result.append(SimpleNamespace(type="Plain", text=""))
-            continue
-        if kind == "Plain":
-            text = telegram_plain_text(event, part.text)
-            if mentioned_text is not None:
-                text, mentioned_text = mentioned_text, None
+            part = SimpleNamespace(type="Plain", text="")
+        elif kind == "Plain":
+            text = mention[1] if mention and mention[0] == index else telegram_plain_text(event, part.text)
             if sticker and text.startswith("Sticker: "):
                 text = ""
             part = SimpleNamespace(type="Plain", text=text)
         result.append(part)
-    if mentioned_text is not None:
-        result.append(SimpleNamespace(type="Plain", text=mentioned_text))
+    if mention and mention[0] == len(parts):
+        result.append(SimpleNamespace(type="Plain", text=mention[1]))
     if sticker:
         result.append(SimpleNamespace(type="Plain", text=sticker))
     return tuple(result)
