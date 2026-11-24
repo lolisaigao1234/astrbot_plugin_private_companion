@@ -637,19 +637,29 @@ class SessionTopology:
             recovered_title = None
             if topic_hint and not rename and old_label.endswith("-" + topic_hint):
                 recovered_title = old_label[:-(len(topic_hint) + 1)]
-            prefixes = sorted({title for title in (previous_title, recovered_title, native_title,
-                                                   row["telegram_chat_title"]) if title}, key=len, reverse=True)
+            # Decode an old label with the title that belonged to it. A rename
+            # whose native chat already carries the new title cannot identify
+            # the boundary in a legacy label such as "Book-Club-Science-Fiction".
+            incoming_title = row["telegram_chat_title"]
+            known_native_title = native_title if native_title != incoming_title else None
+            historical_titles = (previous_title, recovered_title, known_native_title)
             for item in siblings:
                 if "telegram_chat_id" in item:
                     continue
                 label = item.get("group_name") or ""
-                prefix = next((title for title in prefixes if label.startswith(title + "-")), None)
-                if prefix:
+                titles = historical_titles
+                if item.get("telegram_legacy_title_unknown"):
+                    titles = (recovered_title,)
+                elif native_title is None:
+                    titles = (*historical_titles, incoming_title)
+                prefix = next((title for title in titles if title and
+                               (label == title or label.startswith(title + "-"))), None)
+                if prefix and label != prefix:
                     item["telegram_topic_name"] = label[len(prefix) + 1:]
-                elif label and label not in prefixes and item.get("unified_msg_origin") != chat_origin:
-                    # A rename may arrive before we have evidence of the old title.
-                    # Keep the combined label until its own topic supplies a name.
+                elif not prefix and label and item.get("unified_msg_origin") != chat_origin:
+                    item["telegram_legacy_title_unknown"] = True
                     continue
+                item.pop("telegram_legacy_title_unknown", None)
                 item["telegram_chat_id"] = chat_id
             row["telegram_topic_name"] = row["telegram_topic_name"] or previous.get("telegram_topic_name")
             title = row["telegram_chat_title"]
@@ -667,6 +677,7 @@ class SessionTopology:
                     and previous.get("group_name") and previous["unified_msg_origin"] != chat_origin):
                 row["group_name"] = previous["group_name"]
                 row.pop("telegram_chat_id", None)
+                row["telegram_legacy_title_unknown"] = True
         if key is not None:
             rows[key] = row
         self.path.parent.mkdir(parents=True, exist_ok=True)
