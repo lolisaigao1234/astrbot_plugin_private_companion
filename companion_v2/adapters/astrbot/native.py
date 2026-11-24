@@ -461,6 +461,7 @@ class NativeConversationInput:
     merged_event_ids: tuple[str, ...] = ()
     group_message_text: str | None = None
     forward_origin: str = ""
+    telegram_burst: tuple["NativeConversationInput", ...] = ()
 
 
 NativePrivateInput = NativeConversationInput  # Preserve the private adapter's public snapshot name.

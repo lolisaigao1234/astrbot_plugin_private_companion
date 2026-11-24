@@ -1,5 +1,6 @@
 """Synthetic Telegram updates passed through AstrBot's installed converter."""
 
+import asyncio
 import base64
 from dataclasses import replace
 from datetime import timedelta
@@ -69,6 +70,63 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
         inject_core_reply_prompt(event, request)
         inject_core_reply_prompt(event, request)
         return request.prompt + request.system_prompt
+
+    async def test_forward_burst_and_comment_produce_one_attributed_turn(self):
+        from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA
+
+        plugin = self.started_plugin()
+        events = [await self.event(number=80 + i, text=body,
+            forward_origin={"type": "hidden_user", "sender_user_name": author, "date": 1700000000})
+            for i, (author, body) in enumerate((("Ada", "first-paper"), ("Bo", "second-paper"),
+                                                ("Chen", "third-paper")))]
+        events.append(await self.event(number=83, text="my-comment"))
+        with patch.object(self.controller, "prepare_core_reply",
+                          wraps=self.controller.prepare_core_reply) as prepare:
+            await asyncio.gather(*(plugin.receive_companion_message(item) for item in events))
+        self.assertEqual(prepare.await_count, 1)
+        winner, = [item for item in events if item.get_extra(CORE_REPLY_CONTEXT_EXTRA)]
+        original = winner.get_extra(CORE_REPLY_CONTEXT_EXTRA)["prepared"]["native_input"]
+        self.assertEqual([item.event_id for item in original.telegram_burst], ["80", "81", "82", "83"])
+        for author, body in (("Ada", "first-paper"), ("Bo", "second-paper"), ("Chen", "third-paper")):
+            self.assertIn(f"来源：{author}]\n{body}", winner.message_str)
+            self.assertEqual(winner.message_str.count(body), 1)
+        self.assertEqual(winner.message_str.count("my-comment"), 1)
+        from astrbot.core.astr_main_agent import collect_initial_request
+        with patch("astrbot.core.astr_main_agent._get_session_conv", AsyncMock(return_value=NS(history="[]"))):
+            request, _ = await collect_initial_request(winner, NS(), NS(provider_wake_prefix="", provider_settings={}))
+        payload = json.dumps(await request.assemble_context(), ensure_ascii=False)
+        for body in ("first-paper", "second-paper", "third-paper", "my-comment"):
+            self.assertEqual(payload.count(body), 1)
+        session = self.controller.session
+        target = self.controller.settings.target("tg-owner")
+        context = session.authority.select(target, original.route.scope, original.role)
+        session.core_reply_observations.owner.capture_input(
+            context, original, turn_id=winner.get_extra(CORE_REPLY_CONTEXT_EXTRA)["prepared"]["turn_id"])
+        rows = self.controller.runtime.read_all(
+            "SELECT event_id, json_extract(source_json, '$.owner') AS owner "
+            "FROM conversation_native_observations WHERE event_id IN ('80','81','82','83') ORDER BY event_id", ())
+        self.assertEqual([row["owner"] for row in rows],
+                         ["conversation.native_reference"] * 3 + ["conversation.native_input"])
+
+    async def test_forward_burst_ending_in_photo_keeps_media_and_comment(self):
+        from astrbot_host.telegram_forward_burst import merge_forward_burst
+        from tests.test_conversation_images import image_bytes
+
+        comment = await self.event(number=90, text="look at this")
+        photo = [{"file_id": "file", "file_unique_id": "unique", "width": 2, "height": 2}]
+        with patch.object(PhotoSize, "get_file", new=AsyncMock(return_value=NS(
+                file_path="base64://" + base64.b64encode(image_bytes("green")).decode()))):
+            forwarded = await self.event(number=91, photo=photo, caption="green picture",
+                forward_origin={"type": "hidden_user", "sender_user_name": "Ada", "date": 1700000000})
+        target = self.controller.settings.target("tg-owner")
+        prepare = self.controller.prepare_core_reply_context
+        plan = (await prepare(forwarded, target)).unwrap()
+        merged = await merge_forward_burst(forwarded, target, plan,
+            ((comment, "look at this", None), (forwarded, "", None)), prepare)
+        self.assertEqual([item.forward_origin for item in merged.captured.telegram_burst], ["", "Ada"])
+        self.assertEqual(sum(isinstance(part, Image) for part in forwarded.message_obj.message), 1)
+        for word in ("look at this", "green picture", "来源：Ada"):
+            self.assertEqual(forwarded.message_str.count(word), 1)
 
     async def test_numeric_instance_id_is_not_the_author_of_a_quote(self):
         from astrbot_host.core_reply_decision import core_decision_facts
@@ -235,7 +293,7 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
         )
         for index, (origin, name) in enumerate(origins):
             event = await self.event(number=40 + index, text="别人的话", forward_origin=dict(origin, date=1700000000))
-            self.assertIsNone(private_debounce_input(event))
+            self.assertEqual(private_debounce_input(event), ("", True))
             full = require(await self.bridge.capture(event))
             self.assertNotIn("别人的话", full.text)
             node, = full.forwards[0].nodes
