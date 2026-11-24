@@ -197,13 +197,12 @@ class MultiPrivateBridge(NativePrivateBridge):
         from astrbot.core.message.components import File, Image, Record, Reply, Video
 
         parts = event.message_obj.message
-        if any(isinstance(part, (File, Video)) for part in parts):
-            return True
-        return (any(isinstance(part, (File, Image, Record, Video)) for part in parts)
-                and any(isinstance(child, Image) for part in parts if isinstance(part, Reply)
-                        for child in part.chain or ()))
+        return any(isinstance(part, (File, Video)) or
+                   isinstance(part, Reply) and any(isinstance(child, (Image, Record, File, Video))
+                                                   for child in part.chain or ())
+                   for part in parts)
 
-    async def prepare_telegram_album(self, event, context):
+    async def prepare_telegram_album(self, event, context, *, quotes=()):
         """Budget direct attachments and embedded quote photos before SDK request collection."""
         import base64
         from astrbot.core.message.components import File, Image, Plain, Record, Reply, Video
@@ -213,7 +212,7 @@ class MultiPrivateBridge(NativePrivateBridge):
         from companion_v2.conversation.media.audio.models import MAX_AUDIO_BYTES, MAX_INPUT_AUDIOS
         from companion_v2.conversation.media.models import MAX_IMAGE_BYTES, MAX_INPUT_IMAGES, MAX_TURN_BYTES, fits_budget
         from companion_v2.conversation.media.video.models import MAX_VIDEO_BYTES, MAX_VIDEOS
-        from companion_v2.conversation.media.understanding import settings as understanding_settings
+        from companion_v2.conversation.media.understanding import media_scope_enabled, settings as understanding_settings
         from .audio.loader import fetch_native_audio_bytes
         from .core_reply_media import frozen_image_locators
         from .core_reply_video_sources import video_positions
@@ -225,7 +224,6 @@ class MultiPrivateBridge(NativePrivateBridge):
         quote_images = {(quote.position, image.position): image for quote in locators
                         if not isinstance(quote, NativeImageLocator) for image in quote.images}
         message = event.message_obj
-        videos = {v.position: v for v in video_positions(event, video_type=Video, limit=None)}
         limited = "[附件超过读取上限，本轮未读取]"
         timed_out = "[附件读取超时，本轮未读取]"
         deadline = asyncio.get_running_loop().time() + MEDIA_PREPARE_TIMEOUT
@@ -265,25 +263,30 @@ class MultiPrivateBridge(NativePrivateBridge):
             photos.append(photo.descriptor)
             return Image.fromBytes(photo.content)
 
-        file_preferences = None
+        configured_preferences = None
         file_deadline = None
-        for position, part in enumerate(message.message):
+
+        def preferences():
+            nonlocal configured_preferences
+            if configured_preferences is None:
+                values = self.file_settings(context.scope, context.role_binding.role) if self.file_settings else {}
+                configured_preferences = understanding_settings(values)
+            return configured_preferences
+
+        async def prepare_part(position, part, *, image=None):
+            nonlocal remaining, file_deadline
             kind = type(part)
-            if kind not in limits:
-                continue
             if counts[kind] >= limits[kind] or remaining <= 0:
-                replacements[position] = Plain(exhausted_note)
-                continue
+                return Plain(exhausted_note)
             try:
                 if kind is Image:
-                    replacements[position] = await load_photo(images[position])
-                    continue
+                    return await load_photo(image) if image is not None else Plain("[附件不可用]")
                 if kind is Video:
-                    if position not in videos:
-                        replacements[position] = Plain(limited)
-                        continue
+                    video = next(iter(video_positions(event, video_type=Video, component_reader=lambda _: (part,))), None)
+                    if video is None:
+                        return Plain(limited)
                     data = await read_attachment(fetch_native_video_bytes(
-                        videos[position], maximum_bytes=min(remaining, MAX_VIDEO_BYTES)))
+                        video, maximum_bytes=min(remaining, MAX_VIDEO_BYTES)))
                     size = len(data)
                     replacement = Video(file="base64://" + base64.b64encode(data).decode("ascii"))
                 elif kind is Record:
@@ -295,39 +298,59 @@ class MultiPrivateBridge(NativePrivateBridge):
                     replacement = Record(file="base64://" + base64.b64encode(data).decode("ascii"))
                 else:
                     locator = freeze_attachment(event, file_locator(position, part))
-                    if file_preferences is None:
-                        values = self.file_settings(context.scope, context.role_binding.role) if self.file_settings else {}
-                        file_preferences = understanding_settings(values)
+                    file_preferences = preferences()
+                    if file_deadline is None:
                         file_deadline = asyncio.get_running_loop().time() + file_preferences["file_understanding_timeout_seconds"]
                     replacement, size = await read_attachment(bounded_file_component(
                         event, locator, remaining, file_preferences, context.scope, file_deadline))
                 if size > remaining:
                     remaining = 0
-                    replacements[position] = Plain(limited)
-                    continue
+                    return Plain(limited)
                 remaining -= size
                 counts[kind] += 1
-                replacements[position] = replacement
+                return replacement
             except TaskError as exc:
                 remaining = max(0, remaining - getattr(exc, "bytes_read", 0))
-                replacements[position] = unavailable(exc)
-        # AstrBot gathers Reply.chain independently of the direct message components.
+                return unavailable(exc)
+
+        for position, part in enumerate(message.message):
+            if type(part) in limits:
+                replacements[position] = await prepare_part(position, part, image=images.get(position))
+
+        # AstrBot reads embedded reply components independently. Only a verified
+        # native original may supply media, after direct attachments have been admitted.
+        original = getattr(event.message_obj.raw_message.message, "reply_to_message", None)
         for position, reply in enumerate(message.message):
             if not isinstance(reply, Reply):
                 continue
             chain = list(reply.chain or ())
+            verified = any(q.position == position and q.message_id == str(reply.id)
+                           and q.sender_id == str(reply.sender_id) and q.selection_offset is None for q in quotes)
+            expected_kind = None
+            if verified and original is not None:
+                if original.document:
+                    expected_kind = File
+                elif original.video or original.video_note or original.animation:
+                    expected_kind = Video
+                elif original.voice or original.audio:
+                    expected_kind = Record
             for index, child in enumerate(chain):
-                if not isinstance(child, Image):
-                    continue
-                locator = quote_images.get((position, index))
-                if locator is None:
-                    chain[index] = Plain("[附件不可用]")
-                    continue
-                try:
-                    chain[index] = await load_photo(locator)
-                except TaskError as exc:
-                    remaining = max(0, remaining - getattr(exc, "bytes_read", 0))
-                    chain[index] = unavailable(exc)
+                kind = type(child)
+                if kind is Image:
+                    locator = quote_images.get((position, index))
+                    chain[index] = await prepare_part(index, child, image=locator) if locator else Plain("[附件不可用]")
+                elif kind in (File, Video, Record):
+                    if kind is not expected_kind:
+                        chain[index] = Plain("[附件不可用]")
+                        continue
+                    expected_kind = None
+                    if kind is Video:
+                        settings = preferences()
+                        if not (settings["video_understanding_enabled"] and settings["video_understanding_quoted_enabled"]
+                                and media_scope_enabled(settings, "video_understanding", context.scope)):
+                            chain[index] = Plain("[引用视频理解未启用，本轮未读取]")
+                            continue
+                    chain[index] = await prepare_part(index, child)
             reply.chain = chain
         notes = list(dict.fromkeys(part.text for part in replacements.values() if isinstance(part, Plain)))
         message.message = [replacements.get(position, part) for position, part in enumerate(message.message)]
@@ -1434,7 +1457,7 @@ class MultiHostSession:
                     or self.bridge.needs_telegram_media_budget(event)
                     or (context.scope.kind is ScopeKind.PRIVATE and captured.telegram_burst)
                 ):
-                    await self.bridge.prepare_telegram_album(event, context)
+                    await self.bridge.prepare_telegram_album(event, context, quotes=captured.quotes)
                     self.bridge.connections.assert_current(connection_lease)
                 turn_id = "core-reply:" + digest([context.key, captured.event_id])
                 presence = self.application.presence
