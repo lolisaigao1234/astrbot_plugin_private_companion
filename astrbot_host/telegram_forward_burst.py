@@ -25,8 +25,9 @@ def _bounded_sections(originals, budget=MAX_MERGED_CHARS):
                 replied_to.add(quote.message_id)
                 header = f"[发起人的留言，回复转发消息 {quote.message_id}]\n"
                 if getattr(quote, "selection_offset", None) is not None:
-                    header = f"[回复转发消息 {quote.message_id}]\n"
-                    body = f"所选片段：{quote.text}\n[发起人的留言]\n{body}"
+                    allowance = max(12, budget // len(originals) - len(header) - 36)
+                    selected = quote.text if len(quote.text) <= allowance else quote.text[:allowance-1] + "…"
+                    header = f"[回复转发消息 {quote.message_id}]\n所选片段：{selected}\n[发起人的留言]\n"
         headers.append(header)
         bodies.append(body)
     # Preserve attribution even for a hundred long messages. Shorten labels only

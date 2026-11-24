@@ -282,6 +282,18 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
             self.assertIn("paper" * 4, section)
         self.assertIn("my comment", sections[-1][1])
 
+    def test_bounded_burst_preserves_selected_passage_and_speaker(self):
+        from astrbot_host.telegram_forward_burst import _bounded_sections
+        from companion_v2.conversation.private_debounce import MAX_MERGED_CHARS
+        quote = NS(message_id="80", selection_offset=0, text="specific passage")
+        originals = [NS(event_id="80", forward_origin="Ada", text=quote.text + "x" * 4080),
+                     NS(event_id="81", forward_origin="", text="a" * 4096),
+                     NS(event_id="82", forward_origin="", text="b" * 4096, quotes=[quote])]
+        text = "\n\n".join(section for _, section in _bounded_sections(originals))
+        self.assertLessEqual(len(text), MAX_MERGED_CHARS)
+        self.assertIn("所选片段：specific passage\n[发起人的留言]\n", text)
+        self.assertTrue(text.endswith("b" * 20))
+
     async def test_long_forward_burst_keeps_each_source_and_owner_comment(self):
         from astrbot_host.telegram_forward_burst import merge_forward_burst
         from companion_v2.conversation.private_debounce import MAX_MERGED_CHARS
