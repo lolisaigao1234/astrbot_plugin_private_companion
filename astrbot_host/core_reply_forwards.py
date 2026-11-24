@@ -136,9 +136,17 @@ def quoted_telegram_forward(event):
 
     def matches(candidate):
         forward = telegram_forward_message(candidate)
-        return (forward is not None and candidate.client is event.client
-                and forward.chat.id == raw.chat.id and forward.message_id == original.message_id)
+        # AstrBot merges an album into one event that carries its first message.
+        return (forward is not None and candidate.client is event.client and forward.chat.id == raw.chat.id
+                and (forward.message_id == original.message_id
+                     or original.media_group_id is not None and forward.media_group_id == original.media_group_id))
     return matches
+
+
+def forward_album_key(target_id, message):
+    """Delivery key shared by every message of one forwarded album."""
+    album = getattr(message, "media_group_id", None)
+    return (str(target_id), f"album:{album}") if album else None
 
 
 async def wait_for_quoted_forward(event, target, manager, prepare_context, delivery_seen):
@@ -150,7 +158,11 @@ async def wait_for_quoted_forward(event, target, manager, prepare_context, deliv
     if not getattr(original, "forward_origin", None) or telegram_private_forward(event):
         return
     matches = quoted_telegram_forward(event)
-    if matches is None or delivery_seen((target.target_id, str(original.message_id))):
+
+    def finished():
+        album = forward_album_key(target.target_id, original)
+        return delivery_seen((target.target_id, str(original.message_id))) or (album and delivery_seen(album))
+    if matches is None or finished():
         return
     try:
         result = await prepare_context(event, target, group_admission=None)
@@ -160,7 +172,7 @@ async def wait_for_quoted_forward(event, target, manager, prepare_context, deliv
         return
     policy = result.unwrap().debounce
     if (policy and policy.enabled and (raw.date - original.date).total_seconds() <= policy.total_seconds
-            and not delivery_seen((target.target_id, str(original.message_id)))):
+            and not finished()):
         await manager.wait_for_event(target.target_id, matches, policy.max_seconds)
 
 
