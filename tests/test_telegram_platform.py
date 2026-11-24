@@ -4,9 +4,10 @@ from tests import astrbot_data_root  # noqa: F401 - isolate the SDK before impor
 
 import asyncio
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace as NS
 import unittest
+from unittest.mock import AsyncMock, Mock
 
 from telegram import Chat, Message, Update, User
 from astrbot.core.message.components import Plain
@@ -14,9 +15,11 @@ from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.platform.sources.telegram.tg_event import TelegramPlatformEvent
 from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA
+from astrbot_host.recalls import authenticate_notice_route
 from companion_v2.adapters.astrbot.group import group_event_route
 from companion_v2.adapters.astrbot.native import event_native_client, supported_platform_name
 from companion_v2.execution.models import TaskError, require
+from companion_v2.foundation.refs import ScopeKind
 from tests.multi_host_support import MultiFixture, multi_config
 from tests.test_main_no_reply import ENTRY
 
@@ -31,6 +34,9 @@ class TelegramPlatform:
     def __init__(self):
         self.metadata = NS(name="telegram", id="tg-main")
         self.client = telegram_bot()
+        self._terminating = False
+        self._application_started = True
+        self.application = NS(running=True, updater=NS(running=True))
 
     def meta(self):
         return self.metadata
@@ -39,19 +45,30 @@ class TelegramPlatform:
         return self.client
 
 
-def telegram_event(platform, number=1, text="你好 😀"):
+def telegram_event(platform, number=1, text="你好 😀", peer=OWNER):
     message = AstrBotMessage()
     message.type, message.self_id, message.message_id = MessageType.FRIEND_MESSAGE, "synthetic_bot", str(number)
-    message.sender, message.message, message.message_str = MessageMember(str(OWNER), "Synthetic"), [Plain(text)], text
+    message.session_id = str(peer)
+    message.sender, message.message, message.message_str = MessageMember(str(peer), "Synthetic"), [Plain(text)], text
     message.raw_message = Update(number, message=Message(number, date=datetime.now(timezone.utc),
-                                                         chat=Chat(OWNER, "private"),
-                                                         from_user=User(OWNER, "Synthetic", False), text=text))
-    event = TelegramPlatformEvent(text, message, platform.meta(), str(OWNER), platform.client)
+                                                         chat=Chat(peer, "private"),
+                                                         from_user=User(peer, "Synthetic", False), text=text))
+    event = TelegramPlatformEvent(text, message, platform.meta(), str(peer), platform.client)
     event.set_extra("activated_handlers", [])
     return event
 
 
 class TelegramPlatformTests(unittest.TestCase):
+    def test_running_application_without_start_flag_requires_the_right_account(self):
+        from companion_v2.adapters.astrbot.native import native_client_connected
+
+        platform = TelegramPlatform()
+        del platform._application_started
+        self.assertTrue(native_client_connected(platform, "tg-main"))
+        self.assertFalse(native_client_connected(platform, "other-platform"))
+        platform.application.updater.running = False
+        self.assertFalse(native_client_connected(platform, "tg-main"))
+
     def test_the_bot_is_the_event_client(self):
         event = telegram_event(TelegramPlatform())
         self.assertTrue(supported_platform_name("telegram"))
@@ -107,6 +124,263 @@ class TelegramHostFixture(MultiFixture):
         await plugin.on_companion_platform_loaded()
         if plugin._host_start_task is not None:
             await asyncio.wait_for(plugin._host_start_task, timeout=20)
+
+
+class TelegramPrivateCommandTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        await self.start_host()
+        self.plugin = self.started_plugin()
+        self.platform.send_by_session = AsyncMock()
+        self.number = 0
+
+    async def dispatch(self, text, peer=OWNER):
+        self.number += 1
+        event = telegram_event(self.platform, self.number, text, peer)
+        event.created_at = self.clock.now().timestamp()
+        await self.plugin.receive_companion_message(event)
+        return event
+
+    async def wait_for_contention(self, lock):
+        async def waiting():
+            while not lock._waiters:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(waiting(), timeout=30)
+
+    async def dispatch_overlapping_notices(self, peer, owner=None):
+        from astrbot_host.private_notice import notice_cooldown_lock
+
+        lock = notice_cooldown_lock(self.controller, owner)
+
+        sending, release = asyncio.Event(), asyncio.Event()
+
+        async def send(*args):
+            sending.set()
+            await release.wait()
+
+        self.platform.send_by_session.side_effect = send
+        first = asyncio.create_task(self.dispatch("你好", peer))
+        try:
+            await asyncio.wait_for(sending.wait(), timeout=10)
+            second = asyncio.create_task(self.dispatch("你好", peer))
+            await self.wait_for_contention(lock)
+            self.clock.advance(timedelta(seconds=61))
+        finally:
+            release.set()
+        await asyncio.gather(first, second)
+
+    def sent_text(self, peer=OWNER):
+        session, message = self.platform.send_by_session.await_args.args
+        self.assertEqual(str(session), f"tg-main:FriendMessage:{peer}")
+        return message.chain[0].text
+
+    async def test_calendar_commands_run_once_and_suppress_the_model(self):
+        planner = AsyncMock()
+        self.controller.session.plan_calendar = planner
+        for prefix in ("", "陪伴 "):
+            for action in ("生成", "刷新", "重新生成"):
+                for period, mode, label in (("", "daily", "今天的日程"), ("周", "horizon", "未来日程")):
+                    with self.subTest(prefix=prefix, action=action, period=period):
+                        planner.return_value = {"state": "succeeded", "saved": 2, "mode": mode}
+                        event = await self.dispatch(prefix + action + period + "日程")
+                        self.assertTrue(event.call_llm)
+                        planner.assert_awaited_once_with(event, self.controller.settings.target("tg-owner"),
+                                                         mode=mode, refresh=action != "生成")
+                        self.platform.send_by_session.assert_awaited_once()
+                        self.assertEqual(self.sent_text(), label + "已生成，共写入 2 项。")
+                        planner.reset_mock()
+                        self.platform.send_by_session.reset_mock()
+
+    async def test_stranger_notice_honors_switch_and_cooldown(self):
+        peer = OWNER + 1
+        defaults = {"stranger_notice": False, "denied_reply": "陌生人提示",
+                    "stranger_daily_cap": 3, "notice_cooldown_seconds": 60}
+        self.controller.session.application.private_access_settings.defaults_installation = Mock(return_value=defaults)
+        await self.dispatch("你好", peer)
+        self.platform.send_by_session.assert_not_awaited()
+        defaults["stranger_notice"] = True
+        await self.dispatch_overlapping_notices(peer)
+        self.platform.send_by_session.assert_awaited_once()
+        self.assertEqual(self.sent_text(peer), "陌生人提示")
+        self.clock.advance(timedelta(seconds=60))
+        await self.dispatch("你好", peer)
+        self.assertEqual(self.platform.send_by_session.await_count, 2)
+
+    async def test_refused_stranger_notice_remains_due(self):
+        peer = OWNER + 1
+        self.controller.session.application.private_access_settings.defaults_installation = Mock(return_value={
+            "stranger_notice": True, "denied_reply": "陌生人提示",
+            "stranger_daily_cap": 1, "notice_cooldown_seconds": 60,
+        })
+        self.platform.send_by_session.side_effect = [False, None]
+        for _ in range(3):
+            await self.dispatch("你好", peer)
+        self.assertEqual(self.platform.send_by_session.await_count, 2)
+
+    async def test_stranger_cooldown_keeps_legacy_notice_on_its_own_platform(self):
+        from astrbot_host.stranger_notice import COOLDOWN_KIND, StrangerNotice
+        from companion_v2.execution.models import stamp
+
+        notices = StrangerNotice(self.controller)
+        now = self.clock.now()
+        qq = NS(platform_id="qq-main", login="12345", peer="67890")
+        telegram = NS(platform_id="12345", login=qq.login, peer=qq.peer)
+        notices._write("stranger-notice:12345:67890", COOLDOWN_KIND,
+                       {"platform_id": qq.platform_id, "last_notice_at": stamp(now)}, now)
+        self.assertFalse(notices._cooldown_ok(qq, now, 60))
+        self.assertTrue(notices._cooldown_ok(telegram, now, 60))
+
+    async def test_stranger_notice_uses_delivery_day_for_daily_cap(self):
+        defaults = {"stranger_notice": True, "denied_reply": "陌生人提示",
+                    "stranger_daily_cap": 1, "notice_cooldown_seconds": 60}
+        self.controller.session.application.private_access_settings.defaults_installation = Mock(return_value=defaults)
+        self.platform.send_by_session.side_effect = lambda *_: self.clock.advance(timedelta(days=1))
+        await self.dispatch("你好", OWNER + 1)
+        await self.dispatch("你好", OWNER + 2)
+        self.platform.send_by_session.assert_awaited_once()
+
+    async def test_queued_stranger_notice_observes_new_mute(self):
+        from astrbot_host.private_notice import notice_cooldown_lock
+        from astrbot_host.stranger_notice import BLOCK_KIND, stranger_block_view_id
+        from companion_v2.execution.models import encode, stamp
+
+        peer = OWNER + 1
+        defaults = {"stranger_notice": True, "denied_reply": "陌生人提示",
+                    "stranger_daily_cap": 3, "notice_cooldown_seconds": 60}
+        self.controller.session.application.private_access_settings.defaults_installation = Mock(return_value=defaults)
+        lock = notice_cooldown_lock(self.controller)
+        async with lock:
+            queued = asyncio.create_task(self.dispatch("你好", peer))
+            await self.wait_for_contention(lock)
+            key = stranger_block_view_id("tg-main", "tg-main", str(peer))
+            with self.controller.runtime.transaction() as connection:
+                connection.execute("INSERT INTO memory_views VALUES (?, ?, ?, ?, 'active', ?, ?, ?)",
+                                   (key, key, BLOCK_KIND, 1, encode({}), encode({}), stamp(self.clock.now())))
+        await queued
+        self.platform.send_by_session.assert_not_awaited()
+
+    async def test_queued_notices_recheck_binding_and_dialogue_access(self):
+        from astrbot_host.private_notice import notice_cooldown_lock
+        from companion_v2.identity_policy.models import AuthorizationTier
+
+        session = self.controller.session
+        app = session.application
+        target = self.controller.settings.target("tg-owner")
+        context = self.controller.authority.context("tg-owner", "role-tg")
+        grants = self.controller.authority.identities
+        grants.revoke_grant(self.controller.authority.grant_id(context.scope, "conversation.reply"),
+                            revoked_at=self.clock.now(), expected_revision=grants.revision)
+        defaults = {"stranger_notice": True, "denied_reply": "权限提示",
+                    "stranger_daily_cap": 3, "notice_cooldown_seconds": 60}
+        app.private_access_settings.defaults_installation = Mock(return_value=defaults)
+        app.private_notice.settings = NS(defaults=lambda context: defaults)
+        for peer, owner in ((OWNER, app.private_notice.owner_key(context)), (OWNER + 1, None)):
+            lock = notice_cooldown_lock(self.controller, owner)
+            async with lock:
+                queued = asyncio.create_task(self.dispatch("你好", peer))
+                await self.wait_for_contention(lock)
+                if peer == OWNER:
+                    grants.issue_grant(grant_id="restored-dialogue", subject=context.actor.subject,
+                                       scope=context.scope, capability="conversation.reply",
+                                       tier=AuthorizationTier.STANDARD, valid_from=self.clock.now(),
+                                       expected_revision=grants.revision)
+                else:
+                    new_target = replace(target, target_id="new-peer", participant_id=str(peer))
+                    self.controller.settings = replace(self.controller.settings, targets=(target, new_target))
+            await queued
+            self.platform.send_by_session.assert_not_awaited()
+
+    async def test_revoked_dialogue_honors_blank_copy_and_cooldown(self):
+        authority = self.controller.authority
+        context = authority.context("tg-owner", "role-tg")
+        authority.identities.revoke_grant(authority.grant_id(context.scope, "conversation.reply"),
+            revoked_at=self.clock.now(), expected_revision=authority.identities.revision)
+        defaults = {"denied_reply": "", "notice_cooldown_seconds": 60}
+        self.controller.session.application.private_notice.settings = NS(defaults=lambda context: defaults)
+        await self.dispatch("你好")
+        self.platform.send_by_session.assert_not_awaited()
+        defaults["denied_reply"] = "权限提示"
+        await self.dispatch_overlapping_notices(OWNER, self.controller.session.application.private_notice.owner_key(context))
+        self.platform.send_by_session.assert_awaited_once()
+        self.assertEqual(self.sent_text(), "权限提示")
+        self.clock.advance(timedelta(seconds=60))
+        await self.dispatch("你好")
+        self.assertEqual(self.platform.send_by_session.await_count, 2)
+
+    async def test_reset_requires_admin_and_confirmation(self):
+        authority = self.controller.authority
+        context = authority.context("tg-owner", "role-tg")
+        from astrbot_host.reset_command import receive_reset_command
+        plain = telegram_event(self.platform, text="全部重置")
+        self.assertIsNone(await receive_reset_command(self.controller, plain))
+        self.platform.send_by_session.assert_not_awaited()
+        event = await self.dispatch("陪伴 全部重置")
+        self.assertTrue(event.call_llm)
+        self.assertIn("只允许安装核心管理员", self.sent_text())
+        authority.provision_scope(authority.settings.target("tg-owner"), context.scope,
+                                  context.role_binding.role, core_admin=True)
+        application = self.controller.session.application
+        reset = application.reset_conversation_window = Mock(wraps=application.reset_conversation_window)
+        await self.dispatch("陪伴 全部重置")
+        preview = self.sent_text()
+        self.assertIn("尚未执行", preview)
+        reset.assert_not_called()
+        confirmation = preview.split("确认请回复「")[1].split("」")[0]
+        await self.dispatch(confirmation)
+        reset.assert_called_once()
+        self.assertIn("已执行", self.sent_text())
+
+    async def test_route_requires_matching_client_connection_and_session(self):
+        def route(event):
+            return authenticate_notice_route(self.controller, event, ScopeKind.PRIVATE, expected_post="message")
+
+        event = telegram_event(self.platform)
+        self.assertIs(route(event).platform, self.platform)
+        event.client = telegram_bot()
+        self.assertIsNone(route(event))
+        event = telegram_event(self.platform)
+        event.session.session_id = str(OWNER + 1)
+        self.assertIsNone(route(event))
+        event = telegram_event(self.platform)
+        event.message_obj.raw_message = telegram_event(self.platform, peer=OWNER + 1).message_obj.raw_message
+        self.assertIsNone(route(event))
+        event = telegram_event(self.platform)
+        self.platform.application.updater.running = False
+        with self.assertRaises(TaskError) as refused:
+            route(event)
+        self.assertEqual(refused.exception.code, "host_account_offline")
+
+    async def test_calendar_reply_survives_rebuild_of_the_same_bot(self):
+        async def plan(event, target, *, mode, refresh):
+            self.platform.client = telegram_bot()
+            return {"state": "succeeded", "saved": 1}
+
+        self.controller.session.plan_calendar = plan
+        await self.dispatch("生成日程")
+        self.platform.send_by_session.assert_awaited_once()
+        self.assertIn("1", self.sent_text())
+
+    async def test_calendar_reply_requires_the_same_bot_after_planning(self):
+        async def plan(event, target, *, mode, refresh):
+            self.platform.client = telegram_bot("535353:synthetic")
+            return {"state": "succeeded", "saved": 1}
+
+        self.controller.session.plan_calendar = plan
+        event = await self.dispatch("生成日程")
+        self.assertTrue(event.call_llm)
+        self.platform.send_by_session.assert_not_awaited()
+
+    async def test_phone_confirmation_reaches_the_configured_checkout(self):
+        actions = self.controller.session.application.phone_actions
+        actions.answer_checkout = Mock()
+        event = await self.dispatch("确认支付")
+        self.assertTrue(event.call_llm)
+        actions.answer_checkout.assert_called_once()
+        context, token = actions.answer_checkout.call_args.args
+        self.assertEqual(context.scope.native_scope_id, str(OWNER))
+        self.assertIsNone(token)
+        self.assertTrue(actions.answer_checkout.call_args.kwargs["approve"])
+        self.assertEqual(self.sent_text(), "收到确认，我会先核对手机上的订单。")
 
 
 class TelegramPrivateAdmissionTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):

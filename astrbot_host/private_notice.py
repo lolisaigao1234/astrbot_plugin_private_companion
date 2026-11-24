@@ -17,7 +17,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
+from weakref import WeakValueDictionary
 
 from companion_v2.execution.models import TaskError, digest
 from companion_v2.foundation.refs import ScopeKind
@@ -130,8 +132,18 @@ async def send_private_notice(controller, event, *, text, route, transport=None)
         from astrbot.core.message.message_event_result import MessageChain
         from astrbot.core.platform.message_session import MessageSession
         from astrbot.core.platform.message_type import MessageType
-        await platform.send_by_session(MessageSession(route.platform_id, MessageType.FRIEND_MESSAGE, peer),
-                                       MessageChain([Plain(str(text))]))
+        lease = getattr(route, "connection_lease", None)
+        if lease is not None:
+            connections = controller.session.bridge.connections
+            if connections is not route.connections:
+                return {"state": "failed", "reason": "private_route_changed"}
+            # A running adapter may have rebuilt the client for the same pinned bot.
+            lease = connections.acquire(lease.account_key)
+            platform = lease.platform
+        session = MessageSession(route.platform_id, MessageType.FRIEND_MESSAGE, peer)
+        accepted = await platform.send_by_session(session, MessageChain(chain=[Plain(str(text))]))
+        if platform_name == "telegram" and accepted is False:
+            return {"state": "failed", "reason": "platform_call_failed"}
     except Exception:  # noqa: BLE001 - send outcome is unknown, never replayed here
         return {"state": "failed", "reason": "platform_call_failed"}
     receipt = digest(["private-session-notice.v1", route.platform_id, route.login, peer, str(text)])
@@ -179,6 +191,17 @@ def private_notice_allowed(settings, *, group=False):
     return True
 
 
+def notice_cooldown_lock(controller, owner=None):
+    """Strangers share the daily quota. Configured recipients have individual cooldowns."""
+    locks = getattr(controller, "_notice_cooldown_locks", None)
+    if locks is None:
+        locks = controller._notice_cooldown_locks = WeakValueDictionary()
+    lock = locks.get(owner)
+    if lock is None:
+        lock = locks[owner] = asyncio.Lock()
+    return lock
+
+
 async def notify_refusal(controller, session, event, *, context):
     """没有对话权限时按配置回一句；返回有界回执或 ``None``（没发就没发）。
 
@@ -190,14 +213,17 @@ async def notify_refusal(controller, session, event, *, context):
     if context is None or not private_notice_allowed(controller.settings):
         return None
     application = session.application
-    at = controller.now()
-    text = application.private_notice.due(context, at)
-    if not text:
-        return None
-    route = authenticate_notice_route(controller, event, ScopeKind.PRIVATE, expected_post="message")
-    if route is None:
-        return None
-    receipt = await send_private_notice(controller, event, text=text, route=route)
-    if receipt.get("state") == "delivered":
-        application.private_notice.mark_sent(context, context.actor.subject.subject_id, text, at)
-    return receipt
+    async with notice_cooldown_lock(controller, application.private_notice.owner_key(context)):
+        at = controller.now()
+        if session is not controller.session or not application.private_access_gate.denied(context, at=at):
+            return None
+        text = application.private_notice.due(context, at)
+        if not text:
+            return None
+        route = authenticate_notice_route(controller, event, ScopeKind.PRIVATE, expected_post="message")
+        if route is None:
+            return None
+        receipt = await send_private_notice(controller, event, text=text, route=route)
+        if receipt.get("state") == "delivered":
+            application.private_notice.mark_sent(context, context.actor.subject.subject_id, text, controller.now())
+        return receipt

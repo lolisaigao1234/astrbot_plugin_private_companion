@@ -25,10 +25,11 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from companion_v2.adapters.astrbot.native import account_number
-from companion_v2.execution.models import encode, stamp
+from companion_v2.execution.models import TaskError, encode, stamp
 from companion_v2.foundation.refs import ScopeKind
 
-from .private_notice import private_notice_allowed, send_private_notice
+from .private_notice import notice_cooldown_lock, private_notice_allowed, send_private_notice
+from .recalls import telegram_private_message_route
 
 
 UPSERT = """INSERT INTO memory_views VALUES (?, ?, ?, ?, 'active', ?, ?, ?)
@@ -40,6 +41,10 @@ DAILY_KIND = "relationship.stranger_notice_day.v1"
 CONTACT_KIND = "relationship.stranger_contact.v1"
 BLOCK_KIND = "relationship.stranger_block.v1"
 OWNER = "relationship.stranger_notice"
+
+
+def stranger_cooldown_key(route):
+    return "stranger-notice:" + route.platform_id + ":" + route.login + ":" + route.peer
 
 
 def stranger_block_view_id(platform_id, login, peer):
@@ -68,6 +73,11 @@ def stranger_route(controller, event):
     """认证"这是本插件某个账号收到的一条私聊"；不是就返回 ``None``。"""
     raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
     meta = getattr(event, "platform_meta", None)
+    if getattr(meta, "name", None) == "telegram":
+        try:
+            return telegram_private_message_route(controller, event, configured_peer=False)
+        except TaskError:
+            return None
     if not isinstance(raw, Mapping) or meta is None:
         return None
     if raw.get("post_type") != "message" or raw.get("message_type") != "private":
@@ -155,7 +165,11 @@ class StrangerNotice:
     def _cooldown_ok(self, route, at, cooldown):
         if cooldown <= 0:
             return True
-        document = self._read("stranger-notice:" + route.login + ":" + route.peer, COOLDOWN_KIND)
+        document = self._read(stranger_cooldown_key(route), COOLDOWN_KIND)
+        if not document:
+            legacy = self._read("stranger-notice:" + route.login + ":" + route.peer, COOLDOWN_KIND)
+            if legacy.get("platform_id") == route.platform_id:
+                document = legacy
         previous = document.get("last_notice_at")
         if not isinstance(previous, str) or not previous:
             return True
@@ -165,13 +179,11 @@ class StrangerNotice:
             return True
         return (at - moment).total_seconds() >= cooldown
 
-    def _daily_room(self, at, cap):
-        if cap <= 0:
-            return None
+    def _daily_count(self, at):
         view_id = "stranger-notice-day:" + at.date().isoformat()
         document = self._read(view_id, DAILY_KIND)
         count = int(document.get("count") or 0)
-        return None if count >= cap else (view_id, count)
+        return view_id, count
 
     # -- 主流程 --------------------------------------------------------------
 
@@ -204,43 +216,50 @@ class StrangerNotice:
             report("no_reply", reason_code)
             return None
 
-        session = controller.session
         replied = False
         try:
-            if stranger_blocked(controller, route):
-                # 被屏蔽的账号不收回执：既不回那句固定文案，也不占冷却与当天额度。
-                # finally 仍会记一条有界的联系记录，管理页据此显示「已屏蔽」。
-                return no_reply("stranger_blocked")
-            if session is None or controller.runtime is None or session.application.state != "running":
-                return no_reply("stranger_notice_session_unavailable")
-            defaults = self.defaults()
-            if defaults is None:
-                return no_reply("stranger_notice_settings_unavailable")
-            if not defaults["stranger_notice"]:
-                return no_reply("stranger_notice_disabled")
-            text = defaults["denied_reply"]
-            if not text or not private_notice_allowed(controller.settings):
-                return no_reply("stranger_notice_delivery_unavailable")
-            at = controller.now()
-            if not self._cooldown_ok(route, at, defaults["notice_cooldown_seconds"]):
-                return no_reply("stranger_notice_cooldown")
-            room = self._daily_room(at, defaults["stranger_daily_cap"])
-            if room is None:
-                return no_reply("stranger_notice_daily_cap")
-            view_id, count = room
-            receipt = await send_private_notice(controller, event, text=text, route=route)
-            if receipt.get("state") != "delivered":
-                return no_reply("stranger_notice_send_failed")
-            replied = True
-            report("replied", "stranger_notice_sent")
-            # 只有真的送出去了才记账：失败不占用冷却，也不占当天的额度。
-            self._write("stranger-notice:" + route.login + ":" + route.peer, COOLDOWN_KIND,
-                        {"version": 1, "platform_id": route.platform_id, "login": route.login,
-                         "peer": route.peer, "text_sha": receipt.get("receipt"), "last_notice_at": stamp(at)}, at)
-            self._write(view_id, DAILY_KIND,
-                        {"version": 1, "date": at.date().isoformat(), "count": count + 1}, at)
-            return {"platform_id": route.platform_id, "login": route.login, "peer": route.peer,
-                    "count_today": count + 1, "sent_at": stamp(at), "receipt": receipt.get("receipt")}
+            async with notice_cooldown_lock(controller):
+                # Binding or adapter replacement may have happened while another notice was sending.
+                route = stranger_route(controller, event)
+                if route is None:
+                    return None
+                session = controller.session
+                if stranger_blocked(controller, route):
+                    # 被屏蔽的账号不收回执：既不回那句固定文案，也不占冷却与当天额度。
+                    # finally 仍会记一条有界的联系记录，管理页据此显示「已屏蔽」。
+                    return no_reply("stranger_blocked")
+                if session is None or controller.runtime is None or session.application.state != "running":
+                    return no_reply("stranger_notice_session_unavailable")
+                defaults = self.defaults()
+                if defaults is None:
+                    return no_reply("stranger_notice_settings_unavailable")
+                if not defaults["stranger_notice"]:
+                    return no_reply("stranger_notice_disabled")
+                text = defaults["denied_reply"]
+                if not text or not private_notice_allowed(controller.settings):
+                    return no_reply("stranger_notice_delivery_unavailable")
+                at = controller.now()
+                if not self._cooldown_ok(route, at, defaults["notice_cooldown_seconds"]):
+                    return no_reply("stranger_notice_cooldown")
+                view_id, count = self._daily_count(at)
+                if count >= defaults["stranger_daily_cap"]:
+                    return no_reply("stranger_notice_daily_cap")
+                receipt = await send_private_notice(controller, event, text=text, route=route)
+                if receipt.get("state") != "delivered":
+                    return no_reply("stranger_notice_send_failed")
+                sent_at = controller.now()
+                replied = True
+                report("replied", "stranger_notice_sent")
+                # 只有真的送出去了才记账：失败不占用冷却，也不占当天的额度。
+                self._write(stranger_cooldown_key(route), COOLDOWN_KIND,
+                            {"version": 1, "platform_id": route.platform_id, "login": route.login,
+                             "peer": route.peer, "text_sha": receipt.get("receipt"), "last_notice_at": stamp(sent_at)}, sent_at)
+                if sent_at.date() != at.date():
+                    view_id, count = self._daily_count(sent_at)
+                self._write(view_id, DAILY_KIND,
+                            {"version": 1, "date": sent_at.date().isoformat(), "count": count + 1}, sent_at)
+                return {"platform_id": route.platform_id, "login": route.login, "peer": route.peer,
+                        "count_today": count + 1, "sent_at": stamp(sent_at), "receipt": receipt.get("receipt")}
         except Exception:
             if not reported:
                 report("no_reply", "stranger_notice_processing_failed")
@@ -249,7 +268,8 @@ class StrangerNotice:
             # Visibility outlives every gate: a stranger is listed even when the
             # notice was disabled, rate-limited or failed to send.
             try:
-                self._touch_contact(route, controller.now(), outcome[0])
+                if route is not None:
+                    self._touch_contact(route, controller.now(), outcome[0])
             except Exception:  # noqa: BLE001 - the ledger must never block message handling
                 pass
 
