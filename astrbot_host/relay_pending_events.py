@@ -11,13 +11,13 @@ from companion_v2.foundation.refs import ScopeKind
 from .core_reply_forwards import telegram_private_forward
 from .private_notice import prepare_relay_transport, send_group_notice, send_private_notice
 from .relay_pending import (claim_expired, claim_group, claim_private_receipts, claim_telegram_receipt, finish,
-                            mark_waiting_permission, requeue)
+                            mark_waiting_permission, release_unprocessed_telegram_claim, requeue)
 
 
 # Match the complete QQ answer, including common courtesies around an affirmative
 # clause. An approval verb inside a question, quotation or refusal grants nothing.
-_QQ_ASSENT = r"(?:当然)?(?:可以|同意|好|行|没问题)(?:的|滴|呀|啊|哦|吧)?"
-_QQ_SHARE = r"(?:请|你|帮我|麻烦你)?(?:转告|转发|带回去)(?:一下|吧)?"
+_QQ_ASSENT = r"(?:我(?:当然)?同意|(?:当然)?(?:可以|同意|好|行|没问题))(?:的|滴|呀|啊|哦|吧)?"
+_QQ_SHARE = r"(?:请|你|帮我|麻烦你)?(?:转告|转发|带回去)(?:给?[他她]|给对方)?(?:一下|吧)?"
 _QQ_PERMISSION = re.compile(
     r"(?:不好意思(?:刚看到)?|刚看到|嗯|没问题|没什么不好)?[，, ]*"
     rf"(?:{_QQ_ASSENT}(?:[，, ]*{_QQ_SHARE})?|{_QQ_SHARE})"
@@ -199,9 +199,18 @@ async def process_private_receipts(controller, event, target):
         reply_to = None
         if original is not None:
             reply_to = (original.message_id if original.chat.id == raw.chat.id else -1)
-        permission_tasks, reply_tasks = await asyncio.to_thread(
-            claim_telegram_receipt, controller.runtime, account, target_user_id,
-            getattr(raw, "message_id", None), reply_to=reply_to, permission_answer=confirmed or rejected)
+        message_id = getattr(raw, "message_id", None)
+        claim = asyncio.create_task(asyncio.to_thread(claim_telegram_receipt, controller.runtime,
+            account, target_user_id, message_id, reply_to=reply_to, permission_answer=confirmed or rejected))
+        try:
+            permission_tasks, reply_tasks = await asyncio.shield(claim)
+        except asyncio.CancelledError:
+            # The worker may commit after cancellation. Keep the peer lock until
+            # the unprocessed claim can be released for replay of this exact update.
+            claimed = await claim
+            await asyncio.to_thread(release_unprocessed_telegram_claim, controller.runtime,
+                                    account, target_user_id, message_id, claimed)
+            raise
     interrupted_report_state = "unknown" if account is not None else "failed"
     settled_permission: set[str] = set()
     in_flight_permission: str | None = None

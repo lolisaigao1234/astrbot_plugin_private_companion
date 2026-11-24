@@ -180,7 +180,7 @@ class RelayPendingEventTests(unittest.IsolatedAsyncioTestCase):
         from astrbot_host.relay_pending import _read
 
         target = SimpleNamespace(participant_id="2002", platform_id="onebot", account_id="account")
-        for i, answer in enumerate(("可以，谢谢", "好的，谢谢", "当然可以", "可以带回去",
+        for i, answer in enumerate(("我同意", "可以，转告她吧", "可以，谢谢", "好的，谢谢", "当然可以", "可以带回去",
                                     "不好意思刚看到，同意转告。", "好的，你转告吧", "行吧"), 1):
             with self.subTest(answer=answer):
                 task = add_task(self.runtime, {

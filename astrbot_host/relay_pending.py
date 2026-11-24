@@ -168,14 +168,35 @@ def claim_private_receipts(runtime, target_user_id, now=None, *, permission=Fals
         return claimed
 
 
+def _seen_message_block(account, user_id, message_id):
+    peer = json.dumps([*account, user_id], separators=(",", ":"))
+    # SQLite INTEGER is signed. Each row records 63 independent message IDs.
+    block, offset = divmod(message_id, 63)
+    return peer, f"conversation.relay.private_seen_block:{peer}:{block}", 1 << offset
+
+
+def release_unprocessed_telegram_claim(runtime, account, user_id, message_id, claimed):
+    """Undo the claim and its seen bit together when intake stops before dispatch."""
+    permission, replies = claimed
+    if not (permission or replies):
+        return
+    task_id = (permission or replies)[0]["id"]
+    _, block_key, mask = _seen_message_block(account, user_id, message_id)
+    with runtime.transaction() as connection:
+        data = _read(runtime)
+        task = data["tasks"].get(task_id)
+        if task is None or task["state"] != "reporting":
+            return
+        task["state"] = task.pop("requeue_state")
+        connection.execute("UPDATE runtime_metadata SET value=value & ? WHERE key=?", (~mask, block_key))
+        _write(connection, data)
+
+
 def claim_telegram_receipt(runtime, account, user_id, message_id, *, reply_to=None, permission_answer=False):
     """One native private message can advance one receipt, including after restart."""
     if type(message_id) is not int or message_id <= 0:
         return [], []
-    peer = json.dumps([*account, user_id], separators=(",", ":"))
-    # SQLite INTEGER is signed. Each row records 63 independent message IDs.
-    block, offset = divmod(message_id, 63)
-    block_key = f"conversation.relay.private_seen_block:{peer}:{block}"
+    peer, block_key, mask = _seen_message_block(account, user_id, message_id)
     legacy_key = "conversation.relay.private_seen:" + peer
     with runtime.transaction() as connection:
         now = time()
@@ -188,7 +209,7 @@ def claim_telegram_receipt(runtime, account, user_id, message_id, *, reply_to=No
             "(SELECT 1 FROM runtime_metadata WHERE key=? AND CAST(value AS INTEGER)>=?) "
             "ON CONFLICT(key) DO UPDATE SET value=runtime_metadata.value | excluded.value "
             "WHERE (runtime_metadata.value & excluded.value)=0",
-            (block_key, 1 << offset, legacy_key, message_id),
+            (block_key, mask, legacy_key, message_id),
         )
         if not cursor.rowcount:
             return [], []
