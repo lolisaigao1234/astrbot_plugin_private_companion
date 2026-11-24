@@ -591,10 +591,27 @@ class SessionTopology:
             if last_rename:
                 row["telegram_topic_rename_id"] = last_rename
             platform_prefix = row["unified_msg_origin"].partition(":")[0] + ":"
-            siblings = [item for item in rows.values() if isinstance(item, dict)
-                        and item.get("telegram_chat_id") == chat_id and item.get("account_id") == row["account_id"]
-                        and item.get("unified_msg_origin", "").startswith(platform_prefix)]
+            chat_origin = platform_prefix + "GroupMessage:" + chat_id
+            siblings = []
+            for item in rows.values():
+                if not isinstance(item, dict) or item.get("account_id") != row["account_id"]:
+                    continue
+                origin = item.get("unified_msg_origin") or ""
+                if origin == chat_origin or origin.startswith(chat_origin + "#"):
+                    siblings.append(item)
             latest = max(siblings, key=lambda item: item.get("telegram_chat_title_id", 0), default={})
+            # Legacy topic rows stored a combined label. A known former chat title
+            # lets us recover the suffix even when the title itself contains hyphens.
+            previous_title = latest.get("telegram_chat_title") or next((
+                item.get("group_name") for item in siblings if item.get("unified_msg_origin") == chat_origin
+                and item.get("group_name")), "")
+            for item in siblings:
+                if "telegram_chat_id" not in item:
+                    item["telegram_chat_id"] = chat_id
+                    label = item.get("group_name") or ""
+                    if previous_title and label.startswith(previous_title + "-"):
+                        item["telegram_topic_name"] = label[len(previous_title) + 1:]
+            row["telegram_topic_name"] = row["telegram_topic_name"] or previous.get("telegram_topic_name")
             title = row["telegram_chat_title"]
             title_id = message_id
             if not title or message_id < latest.get("telegram_chat_title_id", 0):
