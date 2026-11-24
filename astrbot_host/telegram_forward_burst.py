@@ -100,7 +100,7 @@ def _bounded_sections(originals, budget=MAX_MERGED_CHARS):
         yield i, prefix + headers[i] + body
 
 
-async def bounded_file_component(event, locator, remaining, preferences, scope):
+async def bounded_file_component(event, locator, remaining, preferences, scope, deadline):
     import aiohttp
     import asyncio
     from pathlib import Path
@@ -117,12 +117,16 @@ async def bounded_file_component(event, locator, remaining, preferences, scope):
         return Plain(f"[文件 {locator.name}：文件理解未启用，未读取正文]"), 0
     if Path(locator.name).suffix.lower() not in preferences["file_understanding_allowed_suffixes"]:
         return Plain(f"[文件 {locator.name}：文件格式暂不支持]"), 0
+    time_left = deadline - asyncio.get_running_loop().time()
+    if time_left <= 0:
+        return Plain(f"[文件 {locator.name}：文件读取超时，本轮未读取]"), 0
     maximum_bytes = min(remaining, preferences["file_understanding_max_size_mb"] * 1024**2)
     try:
         data = await asyncio.wait_for(fetch_attachment(fetch_location(locator), maximum_bytes=maximum_bytes),
-                                      preferences["file_understanding_timeout_seconds"])
+                                      time_left)
     except TimeoutError:
-        raise
+        # A cancelled prefetch can have consumed at most the offered document allowance.
+        return Plain(f"[文件 {locator.name}：文件读取超时，本轮未读取]"), maximum_bytes
     except (aiohttp.ClientError, OSError):
         raise TaskError("host_file_unavailable", "document could not be retrieved") from None
     directory = Path(get_astrbot_temp_path())
