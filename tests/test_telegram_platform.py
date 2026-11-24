@@ -72,6 +72,7 @@ class TelegramPlatformTests(unittest.TestCase):
             ("", None, "handle", OWNER, "handle"),
             ("", None, None, OWNER, ""),
             ("Unknown", None, "Unknown", OWNER, ""),
+            ("Unknown", "Artist", None, OWNER, "Unknown Artist"),
             ("其他人", None, "other", OWNER + 1, ""),
         ):
             with self.subTest(expected=expected, sender_id=sender_id):
