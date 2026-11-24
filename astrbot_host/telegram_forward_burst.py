@@ -70,6 +70,29 @@ def _bounded_sections(originals):
         yield i, prefix + headers[i] + body
 
 
+async def bounded_file_component(event, locator, remaining):
+    import aiohttp
+    from pathlib import Path
+    from tempfile import NamedTemporaryFile
+    from astrbot.core.message.components import File
+    from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
+    from companion_v2.adapters.astrbot.telegram_media import fetch_location
+    from companion_v2.execution.models import TaskError
+    from .media import fetch_attachment
+
+    # SDK File.get_file would download the original without the burst's remaining cap.
+    try:
+        data = await fetch_attachment(fetch_location(locator), maximum_bytes=min(remaining, 16 * 1024 * 1024))
+    except (aiohttp.ClientError, OSError):
+        raise TaskError("host_file_unavailable", "document could not be retrieved") from None
+    directory = Path(get_astrbot_temp_path())
+    directory.mkdir(parents=True, exist_ok=True)
+    with NamedTemporaryFile(dir=directory, suffix=Path(locator.name).suffix[:20], delete=False) as stream:
+        event.track_temporary_local_file(stream.name)
+        stream.write(data)
+    return File(name=locator.name, file=stream.name), len(data)
+
+
 async def merge_forward_burst(event, target, plan, entries, prepare_context):
     verified, parts, sections = [], [], []
     remaining_media = MAX_CORE_FORWARD_IMAGES

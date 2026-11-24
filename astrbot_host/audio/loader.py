@@ -55,17 +55,17 @@ async def decode_audio(content, position):
             await process.communicate()
 
 
-def _read_record_bytes(stream):
+def _read_record_bytes(stream, maximum_bytes):
     # AstrBot has already downloaded and converted the Telegram file at this point.
     info = os.fstat(stream.fileno())
     if not stat.S_ISREG(info.st_mode):
         raise ValueError
-    if info.st_size > MAX_AUDIO_BYTES:
+    if info.st_size > maximum_bytes:
         raise TaskError("host_audio_limit", "voice exceeds the intake byte budget")
-    return stream.read(MAX_AUDIO_BYTES + 1)
+    return stream.read(maximum_bytes + 1)
 
 
-def _read_temp_record(value):
+def _read_temp_record(value, maximum_bytes):
     from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
     root = Path(get_astrbot_temp_path()).resolve()
     try:
@@ -86,36 +86,44 @@ def _read_temp_record(value):
                     stack.callback(os.close, directory)
                 fd = os.open(relative.name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=directory)
                 with os.fdopen(fd, "rb") as stream:
-                    return _read_record_bytes(stream)
+                    return _read_record_bytes(stream, maximum_bytes)
         with path.open("rb") as stream:
             if not path.resolve(strict=True).is_relative_to(root) or not os.path.samestat(
                     os.fstat(stream.fileno()), path.stat()):
                 raise ValueError
-            return _read_record_bytes(stream)
+            return _read_record_bytes(stream, maximum_bytes)
     except TaskError:
         raise
     except (OSError, ValueError, RuntimeError):
         raise TaskError("host_audio_location_invalid", "voice requires an AstrBot temporary file") from None
 
 
-async def load_native_audio(locator):
+async def load_native_audio(locator, *, maximum_bytes=MAX_AUDIO_BYTES):
+    content = await fetch_native_audio_bytes(locator, maximum_bytes=maximum_bytes)
+    return await decode_audio(content, locator.position)
+
+
+async def fetch_native_audio_bytes(locator, *, maximum_bytes):
+    maximum_bytes = min(maximum_bytes, MAX_AUDIO_BYTES)
     if type(locator) is not NativeAudioLocator:
         raise TaskError("host_audio_location_invalid", "voice requires a frozen original component")
     try:
         value = fetch_location(locator)
         if value.startswith("base64://"):
             encoded = value[9:]
-            if len(encoded) > (MAX_AUDIO_BYTES + 2) // 3 * 4:
+            if len(encoded) > (maximum_bytes + 2) // 3 * 4:
                 raise TaskError("host_audio_limit", "voice exceeds the intake byte budget")
             content = base64.b64decode(encoded, validate=True)
         elif locator.telegram_temp and Path(value).is_absolute():
-            content = await asyncio.to_thread(_read_temp_record, value)
+            content = await asyncio.to_thread(_read_temp_record, value, maximum_bytes)
         else:
             # The existing public attachment transport enforces this same byte
             # ceiling and checks redirects plus the actual connector DNS result.
             assert MAX_AUDIO_BYTES == MAX_IMAGE_BYTES
-            content = await fetch_public_attachment(value)
-        return await decode_audio(content, locator.position)
+            content = await fetch_public_attachment(value, maximum_bytes=maximum_bytes)
+        if len(content) > maximum_bytes:
+            raise TaskError("host_audio_limit", "voice exceeds remaining capacity")
+        return content
     except TaskError as error:
         if error.code.startswith("host_image_"):
             raise TaskError(error.code.replace("host_image_", "host_audio_", 1), "original voice attachment is unavailable") from None

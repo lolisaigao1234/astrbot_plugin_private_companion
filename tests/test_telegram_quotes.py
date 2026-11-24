@@ -455,8 +455,11 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
         with patch.object(PhotoSize, "get_file", get_file):
             event = await self.event(photo=[dict(photo, file_id="direct")], caption="current",
                 reply_to_message=self.message(10, 424242, photo=[photo], caption="original"))
-        with patch("companion_v2.conversation.media.models.MAX_TURN_BYTES", max(len(direct), len(quoted))):
+        loader = AsyncMock(wraps=self.bridge.image_loader)
+        with patch.object(self.bridge, "image_loader", loader), patch(
+                "companion_v2.conversation.media.models.MAX_TURN_BYTES", len(direct) + 1):
             captured = require(await self.bridge.capture(event))
+        self.assertEqual([call.kwargs["maximum_bytes"] for call in loader.await_args_list], [len(direct) + 1, 1])
         self.assertEqual([image.content for image in captured.images], [direct])
         self.assertIn("current", captured.text)
         quote, = captured.quotes

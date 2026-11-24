@@ -141,9 +141,12 @@ class StaticImageLoaderTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_fetch_revalidates_redirects_and_stream_length(self):
         class Content:
-            async def iter_chunked(self, _):
-                yield b"x" * MAX_IMAGE_BYTES
-                yield b"x"
+            def __init__(self):
+                self.read_sizes = []
+
+            async def read(self, size):
+                self.read_sizes.append(size)
+                return b"x" * min(2, size)
         class Response:
             status, headers, content_length, content = 200, {}, None, Content()
             async def __aenter__(self): return self
@@ -159,7 +162,8 @@ class StaticImageLoaderTests(unittest.IsolatedAsyncioTestCase):
         session = Session(response)
         with patch("astrbot_host.media.aiohttp.TCPConnector"), patch("astrbot_host.media.aiohttp.ClientSession", return_value=session):
             with self.assertRaises(TaskError) as caught:
-                await fetch_image("https://public.example/image")
+                await fetch_image("https://public.example/image", maximum_bytes=3)
+            self.assertEqual(response.content.read_sizes, [4, 2])
             self.assertEqual(caught.exception.code, "host_image_limit")
             response.status, response.headers = 302, {"Location": "http://127.0.0.1/secret"}
             with self.assertRaises(TaskError) as caught:
