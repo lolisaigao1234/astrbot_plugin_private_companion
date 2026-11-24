@@ -238,6 +238,12 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
         self.assertEqual((receipt.status, receipt.failure_code), ("unknown", None))
         self.assertEqual(self.platform.client.send_message.await_count, 2)
 
+    async def test_negative_session_ack_never_records_delivery(self):
+        self.platform.send_by_session = AsyncMock(return_value=False)
+        receipt = await self.send()
+        self.assertEqual(receipt.status, "not_sent")
+        self.assertIsNone(receipt.delivered_at)
+
     async def test_refusal_after_text_before_voice_is_unknown(self):
         audio = self.root / "synthetic.wav"
         with wave.open(str(audio), "wb") as stream:
