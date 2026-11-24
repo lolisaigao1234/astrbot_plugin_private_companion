@@ -150,6 +150,23 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
             self.assertFalse(result.is_success)
             self.assertEqual(result.failure.code, "quote_original_changed")
 
+    async def test_forward_chat_proof_uses_the_native_chat_id(self):
+        session = self.controller.session
+        target = self.controller.settings.target("tg-owner")
+        first = dict(type="chat", date=1699990000, sender_chat=dict(id=-1001, type="supergroup", title="Club"),
+                     author_signature="A (-1002)")
+        other = dict(type="chat", date=first["date"], sender_chat=dict(id=-1002, type="supergroup",
+                     title="Club (-1001)，署名 A"))
+        with patch.object(session.application, "worker_limit", 0):
+            require(await session.receive(await self.event(10, text="原文", forward_origin=first), target))
+            for number, origin in ((11, first), (12, other)):
+                embedded = self.message(10, text="原文", forward_origin=origin)
+                result = await session.receive(await self.event(number, text="继续", reply_to_message=embedded), target)
+                if number == 11:
+                    require(result)
+                else:
+                    self.assertEqual(result.failure.code, "quote_original_changed")
+
     async def test_quote_verifies_original_forward_label_after_redaction(self):
         session = self.controller.session
         target = self.controller.settings.target("tg-owner")
