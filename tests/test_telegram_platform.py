@@ -180,6 +180,22 @@ class TelegramGroupTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(payload["allow_sending_without_reply"])
         self.assertIn("成员 稍后回复", payload["text"])
 
+    async def test_mention_preserves_leading_fenced_code_in_markdown_and_plain_retry(self):
+        from astrbot.core.message.components import At
+        from astrbot.core.message.message_event_result import MessageChain
+        from companion_v2.adapters.astrbot.telegram_wire import send_optional_reply, telegram_mentions
+
+        body = "```python\nprint(42)\n```"
+        parts, mentions = telegram_mentions([At(qq=str(OWNER)), Plain(body)], {})
+        client = NS(send_message=AsyncMock(side_effect=[BadRequest("synthetic Markdown refusal"), None]),
+                    send_chat_action=AsyncMock())
+        await send_optional_reply(client, MessageChain(chain=parts), "-400#23", mentions=mentions)
+        markdown, plain = [call.kwargs for call in client.send_message.await_args_list]
+        self.assertIn("\n```python\nprint(42)", markdown["text"])
+        self.assertEqual(plain["text"].strip(), "成员\n" + body)
+        entity, = plain["entities"]
+        self.assertEqual((entity.offset, entity.length, entity.url), (0, 2, f"tg://user?id={OWNER}"))
+
     async def test_delayed_mention_redacts_httpx_membership_request(self):
         from companion_v2.adapters.astrbot.telegram_wire import member_usernames
 
