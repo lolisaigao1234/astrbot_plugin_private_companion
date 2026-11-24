@@ -724,17 +724,23 @@ window.CompanionStateMaintenance = (() => {
     ["presence_enabled","启用 QQ 自定义短状态","把角色的公开短文案显示成 QQ 自定义状态。"],
     ["online_status_enabled","启用 QQ 在线状态","按角色的模拟状态上报在线／离开／忙碌。"],
   ];
-  function searchEntries() {
+  /* 未选窗口时状态页按角色所在账号取平台，这里保持一致。 */
+  function qqStatusUnavailable() {
+    const row=window.CompanionProduct?.target?.()||window.CompanionProduct?.roleTarget?.();
+    return ["telegram","unknown"].includes(row?.platform_name||row?.platform_id);
+  }
+  function searchEntries({offeredOnly=false}={}) {
     const kinds=Object.keys(titles).filter(kind=>groups[kind]);
     const entries=kinds.flatMap(kind=>(groups[kind]||[]).filter(name=>definitions[name]).map(field=>({
       group:"role.state",groupTitle:"角色状态",field,
       label:definitions[field].label||field,help:definitions[field].help||"",
       section:kind,sectionTitle:titles[kind],sectionCount:kinds.length,
     })));
-    return entries.concat(presentationFields.map(([field,label,help])=>({
+    const hidden=offeredOnly&&qqStatusUnavailable()?["presence_enabled","online_status_enabled"]:[];
+    return entries.concat(presentationFields.filter(([field])=>!hidden.includes(field)).map(([field,label,help])=>({
       group:"role.state",groupTitle:"角色状态",field,label,help,
       section:"settings",sectionTitle:titles.settings,sectionCount:kinds.length,
     })));
   }
-  return {fields,label,validField,normalized,weatherLocationParts,weatherLocationValue,toggleChecklist,applyAnnualInput,annualAction,snapshot,canAlign,alignment,form,summary,planningSummary,titles,homeFeatures,pendingText,phases,actionSummary,syncDurationPreview,selectPhase,selectCycleView,resetPhase,searchEntries};
+  return {fields,label,validField,normalized,weatherLocationParts,weatherLocationValue,toggleChecklist,applyAnnualInput,annualAction,snapshot,canAlign,alignment,form,summary,planningSummary,titles,homeFeatures,pendingText,phases,actionSummary,syncDurationPreview,selectPhase,selectCycleView,resetPhase,searchEntries,qqStatusUnavailable};
 })();
