@@ -206,7 +206,9 @@ class TelegramPresenceTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
     async def test_host_indicator_respects_setting_and_leaves_unmanaged_peer_alone(self):
         await self.run_to_host_waiting_hook(1)
         self.action.assert_not_awaited()
-        await self.run_to_host_waiting_hook(2, peer=OWNER + 1)
+        with patch.object(self.app.private_access_settings, "defaults_installation",
+                          return_value={"stranger_notice": False}):
+            await self.run_to_host_waiting_hook(2, peer=OWNER + 1)
         self.action.assert_awaited_once_with(chat_id=str(OWNER + 1), action="typing")
 
     async def test_host_indicator_with_disconnected_client(self):
