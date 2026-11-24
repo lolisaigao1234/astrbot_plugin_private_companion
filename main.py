@@ -1244,7 +1244,12 @@ class PrivateCompanionV2StagingPlugin(Star):
         elif channel == "private" and getattr(target, "participant_id", None):
             processor = getattr(self.staging, "process_private_relay_receipts", None)
             if callable(processor):
-                await processor(event, target)
+                try:
+                    await processor(event, target)
+                except asyncio.CancelledError:
+                    if getattr(getattr(event, "platform_meta", None), "name", None) == "telegram":
+                        self._private_delivery_dedup().forget((target.target_id, str(event.message_obj.message_id)))
+                    raise
         if channel == "group":
             # 群 LLM 开关必须先于候选准入处理：封锁期间普通消息不再请求模型，
             # 但「开启 LLM」这条命令本身仍要能执行并回执。

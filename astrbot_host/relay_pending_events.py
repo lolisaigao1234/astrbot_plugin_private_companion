@@ -16,12 +16,14 @@ from .relay_pending import (claim_expired, claim_group, claim_private_receipts, 
 
 # Match the complete QQ answer, including common courtesies around an affirmative
 # clause. An approval verb inside a question, quotation or refusal grants nothing.
-_QQ_ASSENT = r"(?:我(?:当然)?同意|(?:当然)?(?:可以|同意|好|行|没问题))(?:的|滴|呀|啊|哦|吧)?"
-_QQ_SHARE = r"(?:请|你|帮我|麻烦你)?(?:转告|转发|带回去)(?:给?[他她]|给对方)?(?:一下|吧)?"
+_QQ_PAUSE = r"[，,。.!！、 ]*"
+_QQ_ASSENT = (r"(?:我(?:当然)?同意|(?:当然)?(?:可以|同意|好|行|没问题))"
+              r"(?:的|滴|哒|嘞)?(?:呀|啊|哦|吧|啦|呢)?")
+_QQ_SHARE = r"(?:请|你|帮我|麻烦你)?(?:转告|转发|带回去|告诉[他她])(?:给?[他她]|给对方)?(?:一下|吧)?"
 _QQ_PERMISSION = re.compile(
-    r"(?:不好意思(?:刚看到)?|刚看到|嗯|没问题|没什么不好)?[，, ]*"
-    rf"(?:{_QQ_ASSENT}(?:[，, ]*{_QQ_SHARE})?|{_QQ_SHARE})"
-    r"(?:[，, ]*(?:谢谢你?|麻烦你了|没关系))?[。！!.~～]*"
+    rf"(?:不好意思(?:{_QQ_PAUSE}刚看到)?|刚看到|嗯嗯?|没问题|没什么不好|没事|那)?{_QQ_PAUSE}"
+    rf"(?:{_QQ_ASSENT}(?:{_QQ_PAUSE}{_QQ_ASSENT}){{0,2}}(?:{_QQ_PAUSE}{_QQ_SHARE})?|{_QQ_SHARE})"
+    rf"(?:{_QQ_PAUSE}(?:谢谢你?|麻烦你了|辛苦了|没关系))?[。！!.~～]*"
 )
 
 
@@ -207,9 +209,18 @@ async def process_private_receipts(controller, event, target):
         except asyncio.CancelledError:
             # The worker may commit after cancellation. Keep the peer lock until
             # the unprocessed claim can be released for replay of this exact update.
-            claimed = await claim
-            await asyncio.to_thread(release_unprocessed_telegram_claim, controller.runtime,
-                                    account, target_user_id, message_id, claimed)
+            async def rollback():
+                claimed = await claim
+                await asyncio.to_thread(release_unprocessed_telegram_claim, controller.runtime,
+                                        account, target_user_id, message_id, claimed)
+
+            cleanup = asyncio.create_task(rollback())
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    continue
+            cleanup.result()
             raise
     interrupted_report_state = "unknown" if account is not None else "failed"
     settled_permission: set[str] = set()

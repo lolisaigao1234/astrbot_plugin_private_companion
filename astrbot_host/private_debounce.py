@@ -468,6 +468,10 @@ class PrivateDeliveryDedup:
         self._clock = clock
         self._seen: dict[tuple[str, str], float] = {}
 
+    def forget(self, key: tuple[str, str]) -> None:
+        """Allow another delivery when the handler stopped before reply intake."""
+        self._seen.pop(key, None)
+
     def seen(self, key: tuple[str, str]) -> bool:
         """Check a previous delivery without extending its lifetime."""
         previous = self._seen.get(key)

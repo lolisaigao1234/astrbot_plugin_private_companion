@@ -1719,10 +1719,9 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
     async def test_cancelled_telegram_claim_can_replay_without_sending_twice(self):
         import threading
         from astrbot_host.relay_pending import _read, claim_telegram_receipt
-        target = self.controller.settings.target("tg-owner")
         task = self.private_relay_task("waiting_reply", False, question_id=101)
         event = telegram_event(self.platform, 102, "my answer")
-        receive = self.controller.process_private_relay_receipts
+        receive = self.started_plugin().receive_companion_message
         loop = asyncio.get_running_loop()
         entered = asyncio.Event()
         release = threading.Event()
@@ -1735,18 +1734,21 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
             return result
 
         with patch("astrbot_host.relay_pending_events.claim_telegram_receipt", claim):
-            handling = asyncio.create_task(receive(event, target))
+            handling = asyncio.create_task(receive(event))
             try:
                 await asyncio.wait_for(entered.wait(), 5)
                 handling.cancel()
+                await asyncio.sleep(0)
+                handling.cancel()
+                await asyncio.sleep(0)
             finally:
                 release.set()
             with self.assertRaises(asyncio.CancelledError):
                 await handling
         self.assertEqual(_read(self.controller.runtime)["tasks"][task]["state"], "waiting_reply")
         self.platform.client.send_message.assert_not_awaited()
-        await receive(event, target)
-        await receive(event, target)
+        await receive(event)
+        await receive(event)
         self.platform.client.send_message.assert_awaited_once()
         self.assertEqual(_read(self.controller.runtime)["tasks"][task]["state"], "reported")
 
