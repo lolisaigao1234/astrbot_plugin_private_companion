@@ -56,6 +56,14 @@ def file_locator(position, part):
     return NativeFileLocator(position, safe_name(getattr(part, "name", None)), value if type(value) is str else "")
 
 
+class FileExtractionError(TaskError):
+    """The file was read successfully but its text could not be extracted."""
+
+    def __init__(self, code, bytes_read):
+        super().__init__(code, "document extraction failed")
+        self.bytes_read = bytes_read
+
+
 async def prepare_file_text(locators, loader, preferences, *, client, scope, payload_budget=65536, byte_budget=None):
     remaining = preferences["file_understanding_max_chars"]
     deadline = asyncio.get_running_loop().time() + preferences["file_understanding_timeout_seconds"]
@@ -91,9 +99,13 @@ async def prepare_file_text(locators, loader, preferences, *, client, scope, pay
                              coverage="部分正文" if value.truncated else "已提取正文")
                 remaining -= len(value.text)
             except TimeoutError:
+                if byte_budget is not None:
+                    byte_budget = 0
                 entry["status"] = "文件读取超时，未取得正文"
                 logger.warning("[CompanionV2] 文件理解未完成 position=%s reason=host_file_timeout", locator.position)
             except Exception as error:
+                if byte_budget is not None and isinstance(error, FileExtractionError):
+                    byte_budget = max(0, byte_budget - error.bytes_read)
                 code = error.code if isinstance(error, TaskError) else "host_file_failed"
                 if code == "host_file_decoder_unavailable":
                     # 点名是哪种格式缺组件：泛化的「暂不可用」会让人以为是文件坏了。
