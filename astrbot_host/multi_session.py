@@ -395,7 +395,7 @@ class MultiGroupBridge(NativeGroupBridge):
         scope = context.scope
         if scope.kind is not ScopeKind.GROUP or self.platform_name(scope) != "telegram":
             return False
-        target = self.settings.group_target(scope.platform, scope.account_id, scope.native_scope_id)
+        target = self.settings.group_target(scope.platform, scope.account_id, scope.native_scope_id, allow_template=False)
         if target is None or target.bot_id != scope.bot_id or scope.session_id != scope.native_scope_id:
             return False
         sender = context.actor.principal.native_account_id

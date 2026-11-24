@@ -1,5 +1,6 @@
 """Read group standing from authenticated OneBot events and Telegram memberships."""
 
+import asyncio
 from collections.abc import Mapping
 from time import monotonic
 
@@ -56,16 +57,19 @@ async def resolve_group_standing(event, cache, *, fresh=False):
     else:
         try:
             with redact_telegram_token(client):
-                member = await bounded_native_lookup(
-                    client.get_chat_member(chat_id=chat, user_id=int(route.sender_id)), operation="group_standing")
-            if str(member.user.id) != route.sender_id:
-                return None
-            role = {"creator": "owner", "administrator": "admin", "member": "member"}.get(member.status)
+                lookup = client.get_chat_member(chat_id=chat, user_id=int(route.sender_id))
+                if fresh:
+                    member = await bounded_native_lookup(lookup, operation="group_standing")
+                else:
+                    # Advisory observations share the per-window intake queue.
+                    member = await asyncio.wait_for(lookup, timeout=1)
+            role = ({"creator": "owner", "administrator": "admin", "member": "member"}.get(member.status)
+                    if str(member.user.id) == route.sender_id else None)
         except Exception:
-            return None
-        if role is None:
-            return None
+            role = None
         if len(cache) >= 1024:
             cache.pop(next(iter(cache)))
-        cache[key] = client, monotonic() + 30, role
+        cache[key] = client, monotonic() + (30 if role else 5), role
+    if role is None:
+        return None
     return {"account_id": route.sender_id, "role": role, "group_id": route.group_id}

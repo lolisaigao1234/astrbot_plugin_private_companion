@@ -57,7 +57,7 @@ class TogetherRoomsMethods:
         if pinned is None or pinned[0].meta().name != "telegram":
             return None
         group = scope.get("native_scope_id")
-        target = self.controller.settings.group_target(platform_id, account, group)
+        target = self.controller.settings.group_target(platform_id, account, group, allow_template=False)
         if not target or target.bot_id != scope["bot_id"] or group != scope["session_id"]:
             return None
         lease = bridge.connections.acquire((platform_id, account))

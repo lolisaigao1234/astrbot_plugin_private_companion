@@ -548,7 +548,7 @@ class NativeTogetherProvider:
                 raise NativeTogetherError("invalid_host_scope")
         return request
 
-    def _response(self, request: dict[str, Any], operation: dict[str, Any]) -> dict[str, Any]:
+    def _response(self, request: dict[str, Any], operation: dict[str, Any], *, verify_ticket=False) -> dict[str, Any]:
         succeeded = operation.get("state") == "succeeded"
         failed = operation.get("state") == "failed"
         state = "succeeded" if succeeded else "failed" if failed else "unknown"
@@ -557,7 +557,11 @@ class NativeTogetherProvider:
         if isinstance(result, dict):
             result.pop("closed_ticket_token", None)
             if "delivered_privately" in result:
-                result.pop("room", None)
+                room = result.pop("room", None) or {}
+                result["ticket_expires_at"] = room.get("expires_at")
+                result["message"] = "房间链接已私发给发起人。凭证限用一次，过期或服务重启后需重新建房。"
+                if verify_ticket:
+                    result["ticket_available"] = self.plugin.ticket_store.get(room.get("ticket_token", "")) is not None
         response = {
             "schema": SCHEMA, "invocation_id": request["invocation_id"],
             "origin_key": request["origin_key"], "arguments_hash": request["arguments_hash"],
@@ -843,7 +847,7 @@ class NativeTogetherProvider:
         if not fresh:
             if self.store.pending_group_notice(operation):
                 operation = await self._resume_group_notice(scope, operation)
-            return self._response(value, operation)
+            return self._response(value, operation, verify_ticket=True)
         action = value["action"]
         if action in _READ_ACTIONS:
             try:
@@ -923,6 +927,9 @@ class NativeTogetherProvider:
             self._schedule_notice_retry()
 
     async def _resume_group_notice(self, scope, operation):
+        if time.time() - operation["created_at"] >= INVITE_DEFAULT_SECONDS:
+            return self.store.update(scope, operation["id"], state="failed", effect="not_committed",
+                                     error=operation["error"], result={"group_notice": "expired"})
         context = operation["request"]["context"]
         if scope_key(context) == scope and context["audience"]["scope"].get("kind") == "group":
             route = self.plugin.telegram_group_invite_route(context["audience"]["scope"], _user_id(context))
@@ -1017,7 +1024,8 @@ class NativeTogetherProvider:
                 needs_notice = delivery.get("reason") in {"telegram_bot_blocked", "telegram_chat_not_found",
                                                          "telegram_forbidden"}
                 failed = self.store.update(scope, operation["id"], state="failed", effect="not_committed",
-                                           error="together_private_invite_refused",
+                                           error=("together_private_invite_refused" if needs_notice else
+                                                  "together_private_delivery_failed"),
                                            result={"group_notice": "pending" if needs_notice else "skipped"})
                 if needs_notice:
                     return await self._notify_invite_refused(scope, failed, private_route)
@@ -1086,7 +1094,7 @@ class NativeTogetherProvider:
                 raise NativeTogetherError("native_operation_not_found")
             operation = candidates[0]
         self._same_request(value, operation)
-        return self._response(value, operation)
+        return self._response(value, operation, verify_ticket=True)
 
     async def close(self) -> None:
         self._closed = True

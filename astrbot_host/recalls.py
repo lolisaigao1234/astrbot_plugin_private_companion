@@ -193,7 +193,7 @@ def authenticate_notice_route(controller, event, kind, *, expected_post="notice"
     if meta.name == "telegram" and kind is ScopeKind.GROUP and expected_post == "message":
         from companion_v2.adapters.astrbot.group import group_event_route
         group = group_event_route(event)
-        target = controller.settings.group_target(*group.route_key)
+        target = controller.settings.group_target(*group.route_key, allow_template=False)
         if target is None:
             return None
         lease = session.bridge.connections.acquire((group.platform_id, group.account_id))

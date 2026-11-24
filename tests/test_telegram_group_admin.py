@@ -62,6 +62,9 @@ class TelegramAdministrationTests(unittest.IsolatedAsyncioTestCase):
         with patch("astrbot_host.group_standing.monotonic", return_value=100):
             self.assertEqual((await resolve_group_standing(event, cache))["role"], "member")
             self.assertIsNone(await resolve_group_standing(other, cache))
+            self.assertIsNone(await resolve_group_standing(other, cache))
+            bot.get_chat_member.side_effect = [admin]
+            self.assertEqual((await resolve_group_standing(other, cache, fresh=True))["role"], "admin")
 
     async def test_relays_resolve_only_configured_windows_and_keep_confirmation(self):
         import json
