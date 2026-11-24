@@ -92,6 +92,8 @@ def _read_temp_record(value):
                     os.fstat(stream.fileno()), path.stat()):
                 raise ValueError
             return _read_record_bytes(stream)
+    except TaskError:
+        raise
     except (OSError, ValueError, RuntimeError):
         raise TaskError("host_audio_location_invalid", "voice requires an AstrBot temporary file") from None
 
