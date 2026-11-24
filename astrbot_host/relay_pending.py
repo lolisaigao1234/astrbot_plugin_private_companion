@@ -138,6 +138,26 @@ def claim_private_receipts(runtime, target_user_id, now=None, *, permission=Fals
     return claimed
 
 
+def claim_telegram_receipt(runtime, account, user_id, message_id):
+    """One native private message can advance one receipt, including after restart."""
+    if type(message_id) is not int or message_id <= 0:
+        return [], []
+    key = "conversation.relay.private_seen:" + json.dumps([*account, user_id], separators=(",", ":"))
+    with runtime.transaction() as connection:
+        cursor = connection.execute(
+            "INSERT INTO runtime_metadata(key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value "
+            "WHERE CAST(runtime_metadata.value AS INTEGER) < CAST(excluded.value AS INTEGER)",
+            (key, str(message_id)),
+        )
+        if not cursor.rowcount:
+            return [], []
+        permission = claim_private_receipts(runtime, user_id, permission=True, telegram_account=account)
+        if permission:
+            return permission, []
+        return [], claim_private_receipts(runtime, user_id, telegram_account=account)
+
+
 def claim_expired(runtime, group_id=None, now=None, *, telegram_account=None):
     """Take expired tasks once so their origin window can be told the relay was dropped.
 

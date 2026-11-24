@@ -777,23 +777,25 @@ class RelayToolPort:
                                                "instruction": "没有获得平台成功回执，禁止自动重发"},
                                   state="unknown", effect="unknown", operation_id=operation_id,
                                   error_code="relay_delivery_unknown")
-        require(operations.transition_outbox(operation_id, part_id,
-            expected_operation_state=OperationState.UNKNOWN, next_operation_state=OperationState.COMPLETED,
-            expected_outbox_state="unknown", next_outbox_state="accepted", observed_at=self._app().now(),
-            receipt_ref=receipt_ref))
-        if plan.need_receipt:
-            await asyncio.to_thread(add_task, self._app().runtime, {
-                "kind": "private_receipt", "state": "waiting_reply", "telegram_account": telegram_account,
-                "target_user_id": plan.destination_id,
-                "source_kind": invocation.context.scope.kind.value,
-                "source_id": invocation.context.scope.native_scope_id,
-                "source_user": invocation.context.actor.principal.native_account_id,
-                "question": plan.text, "sent_text": plan.text,
-                "confirm_before_report": plan.confirm_before_report,
-                "operation_id": operation_id,
-                "expires_at": time() + 12 * 3600,
-                "signature": digest(["relay-private-receipt", operation_id]),
-            })
+        runtime = self._app().runtime
+        with runtime.transaction():
+            require(operations.transition_outbox(operation_id, part_id,
+                expected_operation_state=OperationState.UNKNOWN, next_operation_state=OperationState.COMPLETED,
+                expected_outbox_state="unknown", next_outbox_state="accepted", observed_at=self._app().now(),
+                receipt_ref=receipt_ref))
+            if plan.need_receipt:
+                add_task(runtime, {
+                    "kind": "private_receipt", "state": "waiting_reply", "telegram_account": telegram_account,
+                    "target_user_id": plan.destination_id,
+                    "source_kind": invocation.context.scope.kind.value,
+                    "source_id": invocation.context.scope.native_scope_id,
+                    "source_user": invocation.context.actor.principal.native_account_id,
+                    "question": plan.text, "sent_text": plan.text,
+                    "confirm_before_report": plan.confirm_before_report,
+                    "operation_id": operation_id,
+                    "expires_at": time() + 12 * 3600,
+                    "signature": digest(["relay-private-receipt", operation_id]),
+                })
         return self._response(invocation, {"state": "sent", "operation_id": operation_id,
             "destination_kind": plan.destination_kind, "destination_id": plan.destination_id,
             "mention_id": plan.mention_id, "receipt_ref": receipt_ref, "audit": plan.audit},

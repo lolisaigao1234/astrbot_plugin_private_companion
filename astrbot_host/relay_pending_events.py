@@ -9,7 +9,7 @@ from companion_v2.foundation.refs import ScopeKind
 
 from .core_reply_forwards import telegram_private_forward
 from .private_notice import prepare_relay_transport, send_group_notice, send_private_notice
-from .relay_pending import (claim_expired, claim_group, claim_private_receipts, finish,
+from .relay_pending import (claim_expired, claim_group, claim_private_receipts, claim_telegram_receipt, finish,
                             mark_waiting_permission, requeue)
 
 
@@ -154,11 +154,18 @@ async def process_private_receipts(controller, event, target):
         return
     target_user_id = str(target.participant_id)
     text = _text(getattr(event, "message_str", ""), 800)
-    confirmed = any(token in text for token in ("可以", "同意", "好", "行", "转告", "带回去", "转发"))
-    rejected = any(token in text for token in ("不要", "不用", "不行", "不可以", "拒绝", "别转", "算了"))
-
-    permission_tasks = await asyncio.to_thread(claim_private_receipts, controller.runtime,
-                                               target_user_id, permission=True, telegram_account=_telegram_account(event, target))
+    answer = text.rstrip("。！!.").strip()
+    confirmed = answer in {"可以", "同意", "好", "好的", "行", "转告", "带回去", "转发"}
+    rejected = answer in {"不同意", "不要", "不用", "不行", "不可以", "拒绝", "别转", "算了"}
+    account = _telegram_account(event, target)
+    if account is None:
+        permission_tasks = await asyncio.to_thread(
+            claim_private_receipts, controller.runtime, target_user_id, permission=True)
+    else:
+        raw = getattr(getattr(event.message_obj, "raw_message", None), "message", None)
+        permission_tasks, reply_tasks = await asyncio.to_thread(
+            claim_telegram_receipt, controller.runtime, account, target_user_id,
+            getattr(raw, "message_id", None))
     settled_permission: set[str] = set()
     in_flight_permission: str | None = None
     in_flight_permission_state = "failed"
@@ -195,8 +202,8 @@ async def process_private_receipts(controller, event, target):
             except Exception:
                 pass
 
-    reply_tasks = await asyncio.to_thread(claim_private_receipts, controller.runtime, target_user_id,
-                                          telegram_account=_telegram_account(event, target))
+    if account is None:
+        reply_tasks = await asyncio.to_thread(claim_private_receipts, controller.runtime, target_user_id)
     settled_reply: set[str] = set()
     in_flight_report: str | None = None
     in_flight_report_state = "failed"

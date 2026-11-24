@@ -1389,6 +1389,26 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
                 if confirm:
                     self.assertEqual(task["reply_text"], "my answer")
 
+    async def test_private_relay_permission_requires_an_explicit_new_answer(self):
+        from astrbot_host.relay_pending import _read
+
+        target = self.controller.settings.target("tg-owner")
+        first = self.private_relay_task("waiting_permission", True)
+        receive = self.controller.process_private_relay_receipts
+        await receive(telegram_event(self.platform, 80, "今天心情很好"), target)
+        self.assertEqual(_read(self.controller.runtime)["tasks"][first]["state"], "waiting_permission")
+        await receive(telegram_event(self.platform, 81, "不同意"), target)
+        self.assertEqual(_read(self.controller.runtime)["tasks"][first]["state"], "declined")
+        self.platform.client.send_message.assert_not_awaited()
+        second = self.private_relay_task("waiting_permission", True)
+        answer = telegram_event(self.platform, 82, "可以。")
+        await receive(answer, target)
+        self.assertEqual(_read(self.controller.runtime)["tasks"][second]["state"], "reported")
+        third = self.private_relay_task("waiting_permission", True)
+        await receive(answer, target)
+        self.assertEqual(_read(self.controller.runtime)["tasks"][third]["state"], "waiting_permission")
+        self.platform.client.send_message.assert_awaited_once()
+
     async def test_only_direct_telegram_words_can_grant_private_relay_permission(self):
         from telegram import MessageOriginHiddenUser
         from astrbot_host.relay_pending import _read
