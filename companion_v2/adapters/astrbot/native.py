@@ -988,8 +988,7 @@ class NativePrivateBridge:
                 elif kind == "Reply" and self.reply_type is not None and type(part) is self.reply_type:
                     if onebot:
                         quote_locators.append(NativeQuoteLocator(position, message_number(part.id)))
-                    if not telegram or not telegram.unavailable:
-                        text_parts.append("\n[引用消息]\n")
+                    text_parts.append("" if telegram and telegram.unavailable else "\n[引用消息]\n")
                 elif kind == "Forward" and self.forward_type is not None and type(part) is self.forward_type:
                     if onebot:
                         forward_locators.append(NativeForwardLocator(position, resource_id(part.id)))
