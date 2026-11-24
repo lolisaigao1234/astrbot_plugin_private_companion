@@ -12,7 +12,7 @@ from .core_reply_forwards import MAX_CORE_FORWARD_IMAGES, component_kind
 def _quoted_lines(text):
     # Keep user-written section markers visibly inside the body that supplied them.
     return "\n".join("│ " + line if line.lstrip().startswith("[") else line
-                     for line in text.split("\n"))
+                     for line in text.splitlines())
 
 
 def _origin_label(name):
