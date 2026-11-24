@@ -827,6 +827,12 @@ class NativeTogetherProvider:
         scope = scope_key(value["context"])
         operation, fresh = self.store.begin(scope, value)
         if not fresh:
+            if (operation.get("error") == "together_private_invite_refused"
+                    and (operation.get("result") or {}).get("group_notice") == "pending"):
+                native_scope = value["context"]["audience"]["scope"]
+                route = self.plugin.telegram_group_invite_route(native_scope, _user_id(value["context"]))
+                if route is not None:
+                    operation = await self._notify_invite_refused(scope, operation, route)
             return self._response(value, operation)
         action = value["action"]
         if action in _READ_ACTIONS:
@@ -882,6 +888,15 @@ class NativeTogetherProvider:
             if isinstance(exc, asyncio.CancelledError):
                 raise
         return self._response(value, operation)
+
+    async def _notify_invite_refused(self, scope, operation, route):
+        # Persist the claim before calling Telegram. Losing the acknowledgement
+        # must not duplicate a notice, even if the process restarts.
+        fields = dict(state="failed", effect="not_committed", error="together_private_invite_refused")
+        self.store.update(scope, operation["id"], **fields, result={"group_notice": "unknown"})
+        notice = await self.plugin.notify_telegram_invite_refused(route)
+        status = "pending" if notice["state"] == "failed" else notice["state"]
+        return self.store.update(scope, operation["id"], **fields, result={"group_notice": status})
 
     async def _create_room(self, value, scope, operation, *, user_id, before_dispatch=None):
         """Open one short-lived room and bind it to this V2 scope.
@@ -946,19 +961,22 @@ class NativeTogetherProvider:
                        "scope_kind": native_scope["kind"]})
         url = self.plugin._ticket_url(ticket)
         if private_route is not None:
-            try:
-                delivered = await self.plugin.send_telegram_group_invite(private_route, url)
-            except BaseException:
-                self.plugin._revoke_unused_ticket(ticket)
-                raise
-            if not delivered:
+            delivery = await self.plugin.send_telegram_group_invite(private_route, url)
+            if delivery["state"] == "unknown":
+                # The requester may already have the ticket. Leave it usable up to expiry.
+                return self.store.update(scope, operation["id"], state="unknown", effect="unknown",
+                                         error="together_room_result_unconfirmed")
+            if delivery["state"] != "delivered":
                 if not self.plugin._revoke_unused_ticket(ticket):
                     return self.store.update(scope, operation["id"], state="unknown", effect="unknown",
                                              error="together_room_result_unconfirmed")
-                # A replay must not issue another ticket or repeat the group notice.
+                needs_notice = delivery.get("reason") in {"telegram_bot_blocked", "telegram_chat_not_found",
+                                                         "telegram_forbidden"}
                 failed = self.store.update(scope, operation["id"], state="failed", effect="not_committed",
-                                           error="together_private_invite_refused")
-                await self.plugin.notify_telegram_invite_refused(private_route)
+                                           error="together_private_invite_refused",
+                                           result={"group_notice": "pending" if needs_notice else "skipped"})
+                if needs_notice:
+                    return await self._notify_invite_refused(scope, failed, private_route)
                 return failed
         result = {"room": {"mode": ticket.mode, "ticket_token": ticket.token,
                            "url": url, "created_at": ticket.created_at,

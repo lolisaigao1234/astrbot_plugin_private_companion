@@ -315,7 +315,7 @@ class NativeRealityTogetherTests(unittest.IsolatedAsyncioTestCase):
                 root = self.root / type(failure).__name__
                 plugin = FakeTogether()
                 plugin.telegram_group_invite_route = Mock(return_value=object())
-                plugin.send_telegram_group_invite = AsyncMock(return_value=False)
+                plugin.send_telegram_group_invite = AsyncMock(return_value={"state": "failed", "reason": "telegram_forbidden"})
                 plugin._revoke_unused_ticket = lambda ticket: plugin.ticket_store.tickets.pop(ticket.token) is not None
                 plugin.notify_telegram_invite_refused = AsyncMock(side_effect=failure)
                 provider = TOGETHER.NativeTogetherProvider(plugin, root, version=PRODUCT_VERSION)
@@ -333,6 +333,30 @@ class NativeRealityTogetherTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(plugin.issued, 1)
                 self.assertFalse(plugin.ticket_store.tickets)
                 plugin.notify_telegram_invite_refused.assert_awaited_once()
+
+    async def test_group_invite_replay_resumes_only_a_confirmed_unsent_notice(self):
+        identity = context()
+        identity["audience"]["scope"].update(platform="tg-main", kind="group", session_id="-100#23")
+        plugin = FakeTogether()
+        plugin.telegram_group_invite_route = Mock(return_value=object())
+        plugin.send_telegram_group_invite = AsyncMock(return_value={"state": "failed", "reason": "telegram_forbidden"})
+        plugin._revoke_unused_ticket = lambda ticket: plugin.ticket_store.tickets.pop(ticket.token) is not None
+        plugin.notify_telegram_invite_refused = AsyncMock(side_effect=[{"state": "failed"}, {"state": "delivered"}])
+        provider = TOGETHER.NativeTogetherProvider(plugin, self.root, version=PRODUCT_VERSION)
+        req = request(provider, "together.room.create", invocation="refused", identity=identity,
+                      arguments={"mode": "call"})
+        # The refusal is on disk, but the process stops before reserving the group send.
+        provider._notify_invite_refused = AsyncMock(side_effect=asyncio.CancelledError())
+        with self.assertRaises(asyncio.CancelledError):
+            await provider.execute(req, before_dispatch=lambda: True)
+        plugin.notify_telegram_invite_refused.assert_not_awaited()
+        for _ in range(3):
+            provider = TOGETHER.NativeTogetherProvider(plugin, self.root, version=PRODUCT_VERSION)
+            result = await provider.execute(req, before_dispatch=lambda: True)
+            self.assertEqual((result["state"], result["effect"]), ("failed", "not_committed"))
+        self.assertEqual(plugin.notify_telegram_invite_refused.await_count, 2)
+        plugin.send_telegram_group_invite.assert_awaited_once()
+        self.assertEqual(plugin.issued, 1)
 
     async def test_together_create_rejects_missing_or_mismatched_persona(self):
         plugin = FakeTogether()

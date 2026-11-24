@@ -70,8 +70,7 @@ class TogetherRoomsMethods:
     async def send_telegram_group_invite(self, route, message):
         from astrbot_host.private_notice import send_private_notice
 
-        result = await send_private_notice(self.controller, None, route=route, text=message)
-        return result["state"] == "delivered"
+        return await send_private_notice(self.controller, None, route=route, text=message)
 
     async def notify_telegram_invite_refused(self, private_route):
         from dataclasses import replace
@@ -80,7 +79,7 @@ class TogetherRoomsMethods:
 
         group = replace(private_route, kind=ScopeKind.GROUP,
                         peer=private_route.group_id, session_id=private_route.group_id)
-        await send_group_notice(self.controller, group, text="请先私聊启动 Bot，再申请房间。")
+        return await send_group_notice(self.controller, group, text="请先私聊启动 Bot，再申请房间。")
 
     async def _send_private_room_link(self, event: AstrMessageEvent, message: str) -> bool:
         sender_id = _single_line(event.get_sender_id(), 80)
@@ -95,7 +94,8 @@ class TogetherRoomsMethods:
             if group is None or group.sender != sender_id:
                 return False
             private = replace(group, kind=ScopeKind.PRIVATE, peer=sender_id, session_id=sender_id)
-            return await self.send_telegram_group_invite(private, message)
+            receipt = await self.send_telegram_group_invite(private, message)
+            return receipt["state"] == "delivered"
         bot = getattr(event, 'bot', None)
         if bot is None:
             return False

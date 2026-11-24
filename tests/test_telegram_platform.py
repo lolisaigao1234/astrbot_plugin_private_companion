@@ -1030,6 +1030,18 @@ class TelegramGroupRoomToolTests(TelegramHostFixture, unittest.IsolatedAsyncioTe
         self.assertIn("私聊启动", notice.kwargs["text"])
         self.assertNotIn(refused, notice.kwargs["text"] + json.dumps(result))
 
+        self.platform.client.send_message.reset_mock()
+        self.platform.client.send_message.side_effect = TimeoutError("Telegram acknowledgement lost")
+        for _ in range(2):
+            result = await invoke("uncertain-room-call")
+            self.assertEqual(result["state"], "unknown", result)
+        self.platform.client.send_message.assert_awaited_once()
+        private = self.platform.client.send_message.await_args.kwargs
+        self.assertEqual(str(private["chat_id"]), str(OWNER + 1))
+        uncertain = private["text"].replace(chr(92), "").split("/join/")[1].split("?")[0]
+        self.assertIsNotNone(plugin.ticket_store.get(uncertain))
+        self.assertNotIn(uncertain, json.dumps(result))
+
 
 class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):

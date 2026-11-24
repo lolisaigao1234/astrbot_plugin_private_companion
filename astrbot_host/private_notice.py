@@ -48,6 +48,16 @@ async def send_text_notice(controller, route, *, text, transport=None):
             "receipt": digest(["text-notice.v1", route.platform_id, route.login, route.peer, str(text)])}
 
 
+def _telegram_notice_failure(error, dispatched):
+    from companion_v2.adapters.astrbot.platform_sender import _telegram_refusal
+
+    try:
+        reason = _telegram_refusal(error, dispatched)
+    except Exception:
+        reason = None
+    return {"state": "failed", "reason": reason} if reason else {"state": "unknown", "reason": "platform_call_failed"}
+
+
 async def send_group_notice(controller, route, *, text, mention_id="", transport=None):
     """Send one bounded group relay through the authenticated account route."""
     if not text or not str(text).strip():
@@ -83,6 +93,7 @@ async def send_group_notice(controller, route, *, text, mention_id="", transport
     # synthetic receipt is deterministic and is never used to replay.
     if platform is None or not callable(getattr(platform, "send_by_session", None)):
         return {"state": "failed", "reason": "group_transport_unavailable"}
+    dispatched = None
     try:
         from astrbot.core.message.components import At, Plain
         from astrbot.core.message.message_event_result import MessageChain
@@ -107,10 +118,13 @@ async def send_group_notice(controller, route, *, text, mention_id="", transport
             chain.append(Plain(str(text)))
             session = MessageSession(route.platform_id, MessageType.GROUP_MESSAGE, peer)
             with redact_telegram_token(platform.get_client() if platform_name == "telegram" else None):
-                accepted = await platform.send_by_session(session, MessageChain(chain=chain))
+                dispatched = MessageChain(chain=chain)
+                accepted = await platform.send_by_session(session, dispatched)
             if platform_name == "telegram" and accepted is False:
                 return {"state": "failed", "reason": "platform_call_failed"}
-    except Exception:  # noqa: BLE001 - send outcome is unknown, never replayed here
+    except Exception as exc:
+        if platform_name == "telegram" and dispatched is not None:
+            return _telegram_notice_failure(exc, dispatched)
         return {"state": "failed", "reason": "platform_call_failed"}
     return {"state": "delivered", "message_id": "session:" + digest(
         ["group-session-notice.v1", route.platform_id, route.login, peer, mention, str(text)]),
@@ -147,6 +161,7 @@ async def send_private_notice(controller, event, *, text, route, transport=None)
     platform = getattr(route, "platform", None)
     if platform is None or not callable(getattr(platform, "send_by_session", None)):
         return {"state": "failed", "reason": "private_transport_unavailable"}
+    dispatched = None
     try:
         from astrbot.core.message.components import Plain
         from astrbot.core.message.message_event_result import MessageChain
@@ -162,10 +177,13 @@ async def send_private_notice(controller, event, *, text, route, transport=None)
             platform = lease.platform
         session = MessageSession(route.platform_id, MessageType.FRIEND_MESSAGE, peer)
         with redact_telegram_token(platform.get_client() if platform_name == "telegram" else None):
-            accepted = await send_private_session(platform, session, MessageChain(chain=[Plain(str(text))]))
+            dispatched = MessageChain(chain=[Plain(str(text))])
+            accepted = await send_private_session(platform, session, dispatched)
         if platform_name == "telegram" and accepted is False:
             return {"state": "failed", "reason": "platform_call_failed"}
-    except Exception:  # noqa: BLE001 - send outcome is unknown, never replayed here
+    except Exception as exc:
+        if platform_name == "telegram" and dispatched is not None:
+            return _telegram_notice_failure(exc, dispatched)
         return {"state": "failed", "reason": "platform_call_failed"}
     receipt = digest(["private-session-notice.v1", route.platform_id, route.login, peer, str(text)])
     return {"state": "delivered", "message_id": "session:" + receipt, "receipt": receipt}
