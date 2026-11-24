@@ -193,11 +193,11 @@ class MultiPrivateBridge(NativePrivateBridge):
         return safe_text(event, "".join(pieces))
 
     @staticmethod
-    def has_direct_and_quoted_photo(event):
-        from astrbot.core.message.components import Image, Reply
+    def has_attachment_and_quoted_photo(event):
+        from astrbot.core.message.components import File, Image, Record, Reply, Video
 
         parts = event.message_obj.message
-        return (any(isinstance(part, Image) for part in parts)
+        return (any(isinstance(part, (File, Image, Record, Video)) for part in parts)
                 and any(isinstance(child, Image) for part in parts if isinstance(part, Reply)
                         for child in part.chain or ()))
 
@@ -238,6 +238,7 @@ class MultiPrivateBridge(NativePrivateBridge):
             size = photo.descriptor.retained_bytes
             if (photo.descriptor.position != locator.position or size > remaining
                     or not fits_budget((*photos, photo.descriptor))):
+                remaining = max(0, remaining - len(photo.content))
                 raise TaskError("host_image_limit", "image exceeds turn limits")
             remaining -= size
             photos.append(photo.descriptor)
@@ -272,6 +273,7 @@ class MultiPrivateBridge(NativePrivateBridge):
                     locator = freeze_attachment(event, file_locator(position, part))
                     replacement, size = await bounded_file_component(event, locator, remaining)
                 if size > remaining:
+                    remaining = 0
                     replacements[position] = Plain(limited)
                     continue
                 remaining -= size
@@ -1400,7 +1402,7 @@ class MultiHostSession:
                 self._validate_core_group_admission(group_admission, context, captured)
                 if event.platform_meta.name == "telegram" and (
                     getattr(event.message_obj.raw_message.message, "media_group_id", None)
-                    or self.bridge.has_direct_and_quoted_photo(event)
+                    or self.bridge.has_attachment_and_quoted_photo(event)
                     or (context.scope.kind is ScopeKind.PRIVATE and captured.telegram_burst)
                 ):
                     await self.bridge.prepare_telegram_album(event)

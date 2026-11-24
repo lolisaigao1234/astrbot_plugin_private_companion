@@ -14,7 +14,7 @@ from companion_v2.conversation.media.models import CapturedImage, MAX_TURN_BYTES
 from companion_v2.conversation.media.video.models import CapturedVideo, VideoDescriptor, MAX_VIDEO_BYTES
 from companion_v2.adapters.astrbot.telegram_media import fetch_location
 from companion_v2.execution.models import TaskError
-from ..media import fetch_attachment
+from ..media import AttachmentReadError, account_for_decode, fetch_attachment
 
 
 DECODE_TIMEOUT = 12
@@ -67,7 +67,9 @@ async def _decode(content, position, scratch):
 
 
 async def load_native_video(locator, *, maximum_bytes=MAX_VIDEO_BYTES):
-    return await decode_video(await fetch_native_video_bytes(locator, maximum_bytes=min(MAX_VIDEO_BYTES, maximum_bytes)), locator.position)
+    content = await fetch_native_video_bytes(locator, maximum_bytes=min(MAX_VIDEO_BYTES, maximum_bytes))
+    with account_for_decode(content):
+        return await decode_video(content, locator.position)
 
 
 def _b64decode_strict(encoded: str) -> bytes:
@@ -89,11 +91,12 @@ async def fetch_native_video_bytes(locator, *, maximum_bytes=MAX_VIDEO_BYTES):
         else:
             content = await fetch_attachment(value, maximum_bytes=limit)
         if not 0 < len(content) <= limit:
-            raise TaskError("host_video_limit", "video exceeds its intake byte budget")
+            raise AttachmentReadError("host_video_limit", "video exceeds its intake byte budget", len(content))
         return content
     except TaskError as error:
         if error.code.startswith("host_image_"):
-            raise TaskError(error.code.replace("host_image_", "host_video_", 1), "original video attachment is unavailable") from None
+            raise AttachmentReadError(error.code.replace("host_image_", "host_video_", 1),
+                                      "original video attachment is unavailable", getattr(error, "bytes_read", 0)) from None
         raise
     except Exception:
         raise TaskError("host_video_fetch_failed", "original video could not be prepared") from None
