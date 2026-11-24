@@ -3,6 +3,7 @@
 from tests import astrbot_data_root  # noqa: F401 - isolate the SDK before import
 
 import asyncio
+import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace as NS
@@ -19,6 +20,7 @@ from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.platform.sources.telegram.tg_adapter import TelegramPlatformAdapter
 from astrbot.core.platform.sources.telegram.tg_event import TelegramPlatformEvent
+from astrbot_host.display_names import event_person_names
 from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA
 from astrbot_host.recalls import authenticate_notice_route
 from companion_v2.adapters.astrbot.group import group_event_route
@@ -60,6 +62,26 @@ def telegram_event(platform, number=1, text="你好 😀", peer=OWNER):
 
 
 class TelegramPlatformTests(unittest.TestCase):
+    def test_names_come_only_from_the_original_message_sender(self):
+        event = telegram_event(TelegramPlatform())
+        event.message_obj.sender.nickname = "Unknown"
+        quoted = event.message_obj.raw_message.message
+        for first, last, username, sender_id, expected in (
+            ("小", "林", "handle", OWNER, "小 林"),
+            ("小林", None, "handle", OWNER, "小林"),
+            ("", None, "handle", OWNER, "handle"),
+            ("", None, None, OWNER, ""),
+            ("Unknown", None, "Unknown", OWNER, ""),
+            ("Unknown", "Artist", None, OWNER, "Unknown Artist"),
+            ("其他人", None, "other", OWNER + 1, ""),
+        ):
+            with self.subTest(expected=expected, sender_id=sender_id):
+                author = User(sender_id, first, False, last_name=last, username=username)
+                event.message_obj.raw_message = Update(1, message=Message(
+                    1, date=quoted.date, chat=quoted.chat, from_user=author,
+                    reply_to_message=quoted, text="@other"))
+                self.assertEqual(event_person_names(event), (expected, ""))
+
     def test_connection_tracks_polling_shutdown_and_rebuild(self):
         platform = TelegramPlatform()
         for started, running, polling, terminating, expected in (
@@ -553,6 +575,33 @@ class TelegramPrivateCommandTests(TelegramHostFixture, unittest.IsolatedAsyncioT
 
 
 class TelegramPrivateAdmissionTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_session_directory_ignores_unknown_and_keeps_the_observed_name(self):
+        event = telegram_event(self.platform)
+        original = event.message_obj.raw_message
+        event.message_obj.sender.nickname = "Unknown"
+        message = original.message
+        unnamed = Update(1, message=Message(1, date=message.date, chat=message.chat,
+                                            from_user=User(OWNER, "", False)))
+        directory = self.controller.session_topology
+        for update, expected in ((unnamed, ""), (original, "Synthetic"), (unnamed, "Synthetic")):
+            event.message_obj.raw_message = update
+            await directory.observe(event)
+            rows = json.loads(directory.path.read_text(encoding="utf-8"))
+            self.assertEqual([row.get("display_name", "") for row in rows.values()], [expected])
+
+    async def test_directory_reads_old_telegram_observations_without_the_placeholder(self):
+        event = telegram_event(self.platform)
+        directory = self.controller.session_topology
+        await directory.observe(event)
+        rows = json.loads(directory.path.read_text(encoding="utf-8"))
+        stored = next(iter(rows.values()))
+        for name, expected in (("Unknown", ""), ("Unknown Artist", "Unknown Artist")):
+            stored["display_name"] = name
+            directory.path.write_text(json.dumps(rows), encoding="utf-8")
+            windows = await directory.inventory()
+            self.assertEqual([row.get("display_name", "") for row in windows
+                              if row.get("unified_msg_origin") == event.unified_msg_origin], [expected])
+
     async def test_private_text_is_admitted_with_the_bot_astrbot_rebuilt(self):
         await self.start_host()
         # AstrBot replaces the bot object after repeated polling errors (same token).

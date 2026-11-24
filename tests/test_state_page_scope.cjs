@@ -10,7 +10,7 @@ function harness(windowKind="none",section="state") {
   const requests=[],scopes=[],statuses=[];
   const targets=[
     {target_id:"representative",bot_id:"bot-1",scope_kind:"private"},
-    {target_id:"selected",bot_id:windowKind==="other_bot"?"bot-2":"bot-1",scope_kind:windowKind==="group"?"group":"private"},
+    {target_id:"selected",platform_id:"default",platform_name:["telegram","unknown"].includes(windowKind)?windowKind:"aiocqhttp",bot_id:windowKind==="other_bot"?"bot-2":"bot-1",scope_kind:windowKind==="group"?"group":"private"},
   ].map(target=>({...target,roles:[{role_id:"role-1",state_api:`/astrbot_plugin_private_companion/state/${target.target_id}`}]}));
   const status={state:{values:{energy:70}},settings:{enabled:true,presence_enabled:true,online_status_enabled:false,
     typing_enabled:true,typing_refresh_seconds:7},sleep_schedule:{},role_edit_token:"role-edit",edit_token:"window-edit",
@@ -24,11 +24,11 @@ function harness(windowKind="none",section="state") {
     directory:()=>({installation_id:"install",operator_id:"operator",targets}),
     selection:()=>({target_id:windowKind==="none"?null:"selected",bot_id:"bot-1",role_id:"role-1"}),roleTarget:()=>targets[0]},
     CompanionStateEditor:{create:()=>({setScope:value=>scopes.push(value),setStatus:value=>{if(value)statuses.push(value);},
-      invalidate(){},markup:()=>"",destroy(){},discardIfPristine:()=>true,interacting:false})}};
+      open(){},invalidate(){},markup:()=>"",destroy(){},discardIfPristine:()=>true,interacting:false})}};
   const document={addEventListener(){},querySelector:()=>null,body:{classList:{toggle(){}}},hidden:false};
   const root={isConnected:true,innerHTML:"",addEventListener(){},removeEventListener(){},querySelector:()=>null,
     querySelectorAll:()=>[],contains:()=>false};
-  vm.runInNewContext(source,{window,document,Promise,Intl,Date,console,setTimeout:()=>1,clearTimeout(){}});
+  vm.runInNewContext(source,{window,document,Promise,Intl,Date,console,requestAnimationFrame(){},setTimeout:()=>1,clearTimeout(){}});
   const page=window.CompanionStatePage;
   return {page,root,requests,scopes,statuses,ready:page.mount(root,{section,feature:"presentation"})};
 }
@@ -62,5 +62,25 @@ for(const kind of ["none","group","other_bot"])test(`contact state never reads a
   const h=harness(kind,"contact");await h.ready;
   assert.deepEqual(h.requests,[]);
   assert.match(h.root.innerHTML,/请先选择当前角色的私聊窗口/);
+  h.page.unmount();
+});
+
+test("a Telegram presentation link displays window typing and hides QQ channels",async()=>{
+  const h=harness("telegram");await h.ready;
+  assert.match(h.root.innerHTML,/Telegram/);
+  assert.equal(h.scopes.at(-1).telegram,true);
+  assert.match(h.root.innerHTML,/输入提示刷新间隔.*7 秒/s);
+  assert.doesNotMatch(h.root.innerHTML,/QQ 状态|在线状态|自定义短状态/);
+  assert.equal(h.page.openEditor("settings","typing_refresh_seconds"),true);
+  assert.equal(h.page.openEditor("settings","online_status_enabled"),false);
+  h.page.unmount();
+});
+
+test("an unavailable adapter exposes no platform-specific presentation controls", async()=>{
+  const h=harness("unknown");await h.ready;
+  assert.doesNotMatch(h.root.innerHTML,/QQ 状态|Telegram 正在输入|在线状态|自定义短状态/);
+  assert.equal(h.page.openFeature("presentation"),false);
+  assert.equal(h.page.openEditor("settings","online_status_enabled"),false);
+  assert.equal(h.scopes.at(-1).unknownPlatform,true);
   h.page.unmount();
 });

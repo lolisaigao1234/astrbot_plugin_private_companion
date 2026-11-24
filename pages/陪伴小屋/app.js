@@ -4219,7 +4219,7 @@ function renderExpressionOriginal(){
         ${expressionPerceptionJump('管理撤回原文转写（感知页）')}
         <div id="pokePolicyWorkspace"></div>
         ${settingsJump('管理主动联系中的平台动作','contact')}
-        ${expressionLifeJump('QQ 自定义短状态','state','activity')}</div>`,'expression-platform'],
+        ${window.CompanionStateMaintenance?.qqStatusUnavailable?.()?'':expressionLifeJump('QQ 自定义短状态','state','activity')}</div>`,'expression-platform'],
     ['群聊表达','',`<div class="expression-group-workspace">${configEditors('groupDenoiseWorkspace',['group_participation'],'群聊表达去噪')}</div>`,'expression-group'],
   ];
   if(!sections.some(section=>section[3]===expressionModule))expressionModule='expression-text';
@@ -5107,7 +5107,7 @@ function extractDedicatedAllFeatureRows({replyPayload,statePayload,memoryPayload
   }
   /* 2. 角色状态与日程 (state_api) */
   if(statePayload?.settings&&typeof statePayload.settings==='object'){
-    const stateEntries=window.CompanionStateMaintenance?.searchEntries?.()||[];
+    const stateEntries=window.CompanionStateMaintenance?.searchEntries?.({offeredOnly:true})||[];
     for(const info of stateEntries){
       if(!(info.field in statePayload.settings)||typeof statePayload.settings[info.field]!=='boolean')continue;
       pushRow({
@@ -6416,7 +6416,7 @@ function searchableConfigEntries(){
   const hostOptions=window.CompanionHostOptionsPage?.searchEntries?.()||[];
   /* 三个由专用编辑器承接的分区，此前整组不在索引里（role.state 85、memory 30、
      conversation.perception 11，共 126 个可编辑字段搜不到）。 */
-  const states=window.CompanionStateMaintenance?.searchEntries?.()||[];
+  const states=window.CompanionStateMaintenance?.searchEntries?.({offeredOnly:true})||[];
   const memories=window.CompanionMemorySettingsSection?.searchEntries?.()||[];
   const perceptions=window.CompanionNativePerceptionPage?.searchEntries?.()||[];
   const registered=registry?.collectSettings?.()||[];

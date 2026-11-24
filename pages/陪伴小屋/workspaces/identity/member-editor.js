@@ -210,14 +210,9 @@
   const selection = () => current?.services.bridge?.getContext?.()?.selection;
   const matchesSelection = route => !selection() || Boolean(route && route.bot_id === selection().bot_id
     && route.role_id === selection().role_id);
-  const routeLabel = route => [personaLabel(route), accountLabel(route)].join(" · ");
+  const routeLabel = route => [personaLabel(route), current.services.accountLabel(route)].join(" · ");
   const personaLabel = person => Array.isArray(person?.persona_ids) && person.persona_ids.length
     ? person.persona_ids.map(value => value || "默认人格").join("、") : person?.role_name || "当前角色";
-  const peerLabel = person => (person.platform_name === "wechat_native" ? "微信" :
-    person.platform_name === "weixin_oc" ? "微信" : /^\d+$/.test(String(person.native_account_id || "")) ? "QQ" : "账号")
-    + " " + (person.native_account_id || "未知");
-  const accountLabel = person => person.account_name || (/^\d+$/.test(String(person.account_id || ""))
-    ? `QQ ${person.account_id}` : "当前 Bot 账号");
   const operation = () => "member:" + Date.now().toString(36) + ":" + Math.random().toString(36).slice(2, 10);
   const shortTime = value => value ? new Intl.DateTimeFormat("zh-CN", {month: "numeric", day: "numeric"}).format(new Date(value)) : "暂无";
   function unwrap(response) {
@@ -1101,7 +1096,7 @@
     const person = activePerson();
     const hint = element("details", undefined, "member-scope-hint");
     const summary = element("summary", "ⓘ"); summary.setAttribute("aria-label", "查看保存范围");
-    const scopeText = `保存到：${personaLabel(person)} 与 ${nameOf(person)} 的关系 · ${accountLabel(person)}`;
+    const scopeText = `保存到：${personaLabel(person)} 与 ${nameOf(person)} 的关系 · ${current.services.accountLabel(person)}`;
     hint.append(summary, element("span", scopeText, "member-scope-tooltip"));
     save.title = scopeText;
     bar.append(hint, cancel, save);
@@ -1206,7 +1201,7 @@
     const bridge = current.services.bridge;
     const box = element("section", undefined, "member-account-links");
     box.append(element("h3", "关联用户"), element("p",
-      "仅关联同一人格下的私聊账号。微信输入回微信，QQ 输入回 QQ；关联不会改变回复去向。"));
+      "仅关联同一人格下的私聊账号。回复仍发送到收到消息的账号。"));
     const links = state.accountLinks ||= {loaded: false, loading: false, busy: false, data: null, selected: new Set()};
     const apiPath = ROOT + "/account-links";
     const candidateKey = item => JSON.stringify([item.subject_id, routeKey(item.route)]);
@@ -1580,8 +1575,8 @@
     nameRow.append(element("h3", nameOf(person)), element("span", tierLabels[tier], "member-tier-badge"));
     const metaRow = element("div", undefined, "member-meta-row");
     const metaTexts = [];
-    for (const [glyph, text] of [["at-sign", peerLabel(person)],
-        ["bot", accountLabel(person)], ["sparkles", personaLabel(person)]]) {
+    for (const [glyph, text] of [["at-sign", current.services.peerLabel(person)],
+        ["bot", current.services.accountLabel(person)], ["sparkles", personaLabel(person)]]) {
       if (text && !metaTexts.some(entry => entry[1] === text)) metaTexts.push([glyph, text]);
     }
     for (const [glyph, text] of metaTexts) {

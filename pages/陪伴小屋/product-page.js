@@ -57,8 +57,8 @@ window.CompanionProduct = (() => {
        后者要做的才是去确认已经发出去的那条。少了这一行，新码会落进
        fail() 的兜底「暂不可读取，请刷新核对。」——用户会以为页面读不到数据。 */
     setup_steps_incomplete:"还有引导步骤没有完成，请先完成（或跳过）剩下的步骤，再做这次测试。",
-    staging_delivery_not_enabled:"这个运行实例没有可用的 OneBot 私聊通道。请核对绑定的 Bot 账号、私聊对象和人格。",
-    staging_delivery_window_invalid:"当前 OneBot 投递通道配置无效，请核对账号与目标。",
+    staging_delivery_not_enabled:"这个运行实例没有可用的私聊通道。请核对绑定的 Bot 账号、私聊对象和人格。",
+    staging_delivery_window_invalid:"当前投递通道配置无效，请核对账号与目标。",
     staging_delivery_profile_required:"这个窗口的角色配置尚未就绪，请重新读取账号与会话。",
     staging_delivery_session_active:"当前运行实例正在接收消息，请先停止再修改目标。",
     staging_delivery_expiry_invalid:"角色配置无效，请重新读取连接状态。",
@@ -1018,8 +1018,13 @@ window.CompanionProduct = (() => {
   const subjectLabel = item => item?.display_name || nativeId(item?.group_id || item?.participant_id) || "当前聊天对象";
   const platformLabel = item => ({qq:"QQ · OneBot",default:"QQ · OneBot",aiocqhttp:"QQ · OneBot",onebot:"QQ · OneBot",qq_official:"QQ 官方机器人",qq_official_webhook:"QQ 官方机器人（Webhook）",lark:"飞书机器人",telegram:"Telegram",discord:"Discord",slack:"Slack",kook:"KOOK",dingtalk:"钉钉",line:"LINE",satori:"Satori",mattermost:"Mattermost",misskey:"Misskey",webchat:"WebChat",wecom:"企业微信",wecom_ai_bot:"企业微信 AI 机器人",weixin_oc:"微信开放平台",weixin_official_account:"微信公众号"})[item?.platform_name || item?.platform_id] || "当前平台";
   const accountLabel = item => {
-    const id = nativeId(item.account_id);
-    return item.account_name ? item.account_name + (id ? `（${id}）` : "") : id ? `QQ ${id}` : "当前账号";
+    const platform = platformLabel(item);
+    const id = platform === "Telegram" ? String(item.account_id || "") : nativeId(item.account_id);
+    if (item.account_name) return item.account_name + (id ? `（${id}）` : "");
+    if (!id) return "当前账号";
+    if (platform.startsWith("QQ")) return `QQ ${id}`;
+    const prefix = platform === "当前平台" ? "账号" : platform;
+    return `${prefix} ${id}`;
   };
   function readableLabel(value, fallback) {
     const text = typeof value === "string" ? value.trim() : "";
