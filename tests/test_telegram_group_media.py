@@ -84,6 +84,32 @@ class TelegramGroupMediaTests(TelegramHostFixture, unittest.IsolatedAsyncioTestC
                     else:
                         self.assertIn(expected, captured.text)
 
+    async def test_group_quote_of_document_or_forward_with_bot_mention(self):
+        async def receive(update):
+            message = await self.platform.convert_message(update, NS(bot=self.platform.client))
+            event = self.platform.create_event(message)
+            event.created_at = self.clock.now().timestamp()
+            return (await self.controller.session.receive(event, self.controller.settings.target("test-group"))).unwrap()
+
+        async def decode(content, locator, **options):
+            return extract_document(content, locator.position, locator.name, **options)
+
+        body = "😀 @Synthetic_bot 看看"
+        entities = [dict(type="mention", offset=3, length=14)]
+        with (patch("astrbot_host.files.loader.decode_document", decode),
+              patch("astrbot_host.files.loader.fetch_attachment", AsyncMock(return_value=b"document body"))):
+            for number, fields in (
+                (10, dict(document=dict(file_id="f", file_unique_id="f1", file_name="fixture.txt"),
+                          caption=body, caption_entities=entities)),
+                (20, dict(text=body, entities=entities, forward_origin={"type": "user", "date": 1600000000,
+                          "sender_user": {"id": 321, "first_name": "Source", "is_bot": False}})),
+            ):
+                original = self.update(number, **fields)
+                await receive(original)
+                for offset, quote in ((1, {}), (2, {"quote": dict(text="看看", position=18)})):
+                    with self.subTest(message_id=number, partial=bool(quote)):
+                        await receive(self.update(number + offset, text="怎么看", reply_to_message=original.message.to_dict(), **quote))
+
     async def test_caption_keeps_mention_link_and_photo(self):
         from companion_v2.conversation.group_timing import SELF_MENTION
 
