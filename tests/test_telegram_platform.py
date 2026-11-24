@@ -1195,6 +1195,28 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
                 self.platform.client.send_message.assert_awaited_once()
                 self.platform.client.send_message.reset_mock()
 
+    async def test_forwarded_private_reply_leaves_receipts_waiting(self):
+        from telegram import MessageOriginHiddenUser
+        from astrbot_host.relay_pending import _read
+        target = self.controller.settings.target("tg-owner")
+        event = telegram_event(self.platform, 1, "forwarded answer")
+        raw = event.message_obj.raw_message.message
+        with raw._unfrozen():
+            raw.forward_origin = MessageOriginHiddenUser(raw.date, "Synthetic")
+        for confirm in (False, True):
+            with self.subTest(confirm=confirm):
+                task_id = self.private_relay_task("waiting_reply", confirm)
+                await self.controller.process_private_relay_receipts(event, target)
+                self.platform.client.send_message.assert_not_awaited()
+                self.assertEqual(_read(self.controller.runtime)["tasks"][task_id]["state"], "waiting_reply")
+                await self.controller.process_private_relay_receipts(telegram_event(self.platform, 2, "my answer"), target)
+                self.platform.client.send_message.assert_awaited_once()
+                self.platform.client.send_message.reset_mock()
+                task = _read(self.controller.runtime)["tasks"][task_id]
+                self.assertEqual(task["state"], "waiting_permission" if confirm else "reported")
+                if confirm:
+                    self.assertEqual(task["reply_text"], "my answer")
+
     async def test_only_direct_telegram_words_can_grant_private_relay_permission(self):
         from telegram import MessageOriginHiddenUser
         from astrbot_host.relay_pending import _read

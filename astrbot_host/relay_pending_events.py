@@ -150,11 +150,12 @@ async def _ask_permission(controller, event, target, task):
 
 async def process_private_receipts(controller, event, target):
     """Handle a target member's reply and optionally ask before reporting it."""
+    if telegram_private_forward(event):
+        return
     target_user_id = str(target.participant_id)
     text = _text(getattr(event, "message_str", ""), 800)
-    direct = not telegram_private_forward(event)
-    confirmed = direct and any(token in text for token in ("可以", "同意", "好", "行", "转告", "带回去", "转发"))
-    rejected = direct and any(token in text for token in ("不要", "不用", "不行", "不可以", "拒绝", "别转", "算了"))
+    confirmed = any(token in text for token in ("可以", "同意", "好", "行", "转告", "带回去", "转发"))
+    rejected = any(token in text for token in ("不要", "不用", "不行", "不可以", "拒绝", "别转", "算了"))
 
     permission_tasks = await asyncio.to_thread(claim_private_receipts, controller.runtime,
                                                target_user_id, permission=True, telegram_account=_telegram_account(event, target))
