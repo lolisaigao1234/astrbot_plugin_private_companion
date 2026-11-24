@@ -50,7 +50,7 @@ def prepare_quote(sources, parent, audience, captured):
             label = sources.prepare_message(replace(record, payload=origin.label)).payload
             return TelegramForwardedQuoteDescriptor(*values, selection_offset=captured.selection_offset,
                 link_suffixes=captured.link_suffixes, forward_origin=replace(origin, label=label),
-                origin_resource_hash=digest(["telegram-forward", captured.message_id, origin.label, origin.sent_at])), record
+                origin_resource_hash=origin.resource_hash(captured.message_id)), record
         if captured.link_suffixes:
             return TelegramLinkedQuoteDescriptor(*values, selection_offset=captured.selection_offset,
                                                  link_suffixes=captured.link_suffixes), record

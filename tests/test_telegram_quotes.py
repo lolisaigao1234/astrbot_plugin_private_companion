@@ -108,6 +108,38 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
             sdk_text = parser.extract_text_from_reply_component(parser.find_first_reply_component(event))
             self.assertEqual(self.prompt(event, result, sdk_text + event.message_str).count(original), 1)
 
+    async def test_external_bot_quote_is_not_an_admitted_bot_reference(self):
+        from astrbot_host.core_reply_decision import core_decision_facts
+
+        foreign = self.message(10, self.platform.client.id, chat={"type": "private", "id": OWNER + 1}, text="别处")
+        event = await self.event(text="继续", reply_to_message=foreign)
+        native = require(await self.bridge.capture_core_reply(event))
+        self.assertFalse(native.quotes)
+        facts = core_decision_facts(event, {"channel": "private", "native_input": native}, None, at=self.clock.now())
+        self.assertFalse(facts["quoted_bot_message"])
+
+        from astrbot.core.astr_main_agent import _process_quote_message, collect_initial_request
+
+        with patch("astrbot.core.astr_main_agent._get_session_conv", AsyncMock(return_value=NS(history="[]"))):
+            request, _ = await collect_initial_request(event, NS(), NS(provider_wake_prefix="", provider_settings={}))
+            await _process_quote_message(event, request, "", NS())
+        payload = json.dumps(await request.assemble_context(), ensure_ascii=False)
+        self.assertIn("继续", payload)
+        self.assertNotIn("别处", payload)
+
+    async def test_forward_label_cannot_change_the_kind_of_an_admitted_origin(self):
+        session = self.controller.session
+        target = self.controller.settings.target("tg-owner")
+        hidden = {"type": "hidden_user", "sender_user_name": "Group (-111)", "date": 1699990000}
+        chat = {"type": "chat", "sender_chat": {"id": -111, "type": "supergroup", "title": "Group"},
+                "date": hidden["date"]}
+        with patch.object(session.application, "worker_limit", 0):
+            require(await session.receive(await self.event(10, text="相同正文", forward_origin=hidden), target))
+            forged = self.message(10, text="相同正文", forward_origin=chat)
+            result = await session.receive(await self.event(11, text="继续", reply_to_message=forged), target)
+            self.assertFalse(result.is_success)
+            self.assertEqual(result.failure.code, "quote_original_changed")
+
     async def test_missing_and_external_originals_are_unavailable(self):
         for fields in ({"reply_to_message": self.message(10, date=0, **{"from": None})},
                        {"quote": {"text": "不可见", "position": 0}},
