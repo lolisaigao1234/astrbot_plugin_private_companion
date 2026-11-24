@@ -1,6 +1,5 @@
 """Keep implicit Telegram typing out of Companion's private message delivery."""
 
-from copy import copy
 from functools import wraps
 from types import MethodType
 
@@ -25,9 +24,9 @@ class _DeliveryClient:
 class _DeliveryReceiver:
     """Bind SDK methods to a per-send client while keeping state on the owner."""
 
-    def __init__(self, owner):
+    def __init__(self, owner, **overrides):
         object.__setattr__(self, "_owner", owner)
-        object.__setattr__(self, "client", _DeliveryClient(owner.client))
+        vars(self).update(overrides)
 
     @property
     def __class__(self):
@@ -41,13 +40,13 @@ class _DeliveryReceiver:
         return value
 
     def __setattr__(self, name, value):
-        if name == "client":
+        if name in vars(self):
             object.__setattr__(self, name, value)
         else:
             setattr(self._owner, name, value)
 
     def __delattr__(self, name):
-        if name == "client":
+        if name in vars(self):
             object.__delattr__(self, name)
         else:
             delattr(self._owner, name)
@@ -62,7 +61,7 @@ def _private_adapter_for_delivery(platform, session):
 
     if not isinstance(platform, TelegramPlatformAdapter):
         return platform
-    return _DeliveryReceiver(platform)
+    return _DeliveryReceiver(platform, client=_DeliveryClient(platform.client))
 
 
 async def send_private_session(platform, session, message):
@@ -76,7 +75,7 @@ async def send_context_message(context, session, message):
     send = context.send_message
     from astrbot.core.star.context import Context
 
-    if getattr(send, "__func__", None) is Context.send_message:
+    if isinstance(context, Context) and isinstance(send, MethodType) and send.__self__ is context:
         from astrbot.core.platform.message_session import MessageSession
         from astrbot.core.platform.message_type import MessageType
 
@@ -92,10 +91,9 @@ async def send_context_message(context, session, message):
                 local = _private_adapter_for_delivery(platform, target)
                 if local is not platform:
                     # Context owns matching, send tracing and its return value.
-                    # Limit the view to the first match it would have used.
-                    local_context = copy(context)
-                    local_context.platform_manager = copy(manager)
-                    local_context.platform_manager.platform_insts = [local]
+                    platforms = [local if item is platform else item for item in manager.platform_insts]
+                    local_manager = _DeliveryReceiver(manager, platform_insts=platforms)
+                    local_context = _DeliveryReceiver(context, platform_manager=local_manager)
                     with redact_telegram_token(platform.client):
                         return await local_context.send_message(session, message)
                 break
@@ -113,7 +111,7 @@ def suppress_private_event_typing(event):
     def wrap(method):
         @wraps(method)
         async def send(*args, **kwargs):
-            local = _DeliveryReceiver(event)
+            local = _DeliveryReceiver(event, client=_DeliveryClient(event.client))
             # The SDK uses receiver identity to avoid recording a stream twice.
             token = streaming_response_event.set(local) if streaming_response_event.get() is event else None
             try:

@@ -195,45 +195,69 @@ class MultiPrivateBridge(NativePrivateBridge):
     async def prepare_telegram_album(self, event):
         """Keep album components within the shared budget before AstrBot builds its request."""
         import base64
-        from astrbot.core.message.components import Image, Plain, Video
-        from companion_v2.conversation.media.models import MAX_INPUT_IMAGES
-        from companion_v2.conversation.media.video.models import MAX_TURN_BYTES, MAX_VIDEO_BYTES, MAX_VIDEOS
+        from astrbot.core.message.components import File, Image, Plain, Record, Video
+        from companion_v2.adapters.astrbot.files import MAX_FILES, file_locator
+        from companion_v2.adapters.astrbot.native import NativeAudioLocator
+        from companion_v2.adapters.astrbot.telegram_media import freeze_attachment
+        from companion_v2.conversation.media.audio.models import MAX_AUDIO_BYTES, MAX_INPUT_AUDIOS
+        from companion_v2.conversation.media.models import MAX_IMAGE_BYTES, MAX_INPUT_IMAGES, MAX_TURN_BYTES, fits_budget
+        from companion_v2.conversation.media.video.models import MAX_VIDEO_BYTES, MAX_VIDEOS
+        from .audio.loader import fetch_native_audio_bytes
         from .core_reply_media import direct_image_locators, frozen_image_locators
         from .core_reply_video_sources import video_positions
+        from .telegram_forward_burst import bounded_file_component
         from .video.loader import fetch_native_video_bytes
 
-        images = direct_image_locators(frozen_image_locators(event))
+        images = {i.position: i for i in direct_image_locators(frozen_image_locators(event))}
         message = event.message_obj
         videos = {v.position: v for v in video_positions(event, video_type=Video, limit=None)}
         limited = "[附件超过读取上限，本轮未读取]"
-        replacements = {item.position: Plain(limited) for item in images[MAX_INPUT_IMAGES:]}
-
-        async def load_photo(loader, locator):
-            try:
-                return await loader(locator)
-            except TaskError as exc:
-                replacements[locator.position] = Plain(limited if exc.code == "host_image_limit" else "[附件不可用]")
-                return None
-
-        admitted = await self._capture_images(images[:MAX_INPUT_IMAGES], load_optional=load_photo)
-        remaining = MAX_TURN_BYTES - sum(photo.descriptor.retained_bytes for photo in admitted)
-        replacements.update((photo.descriptor.position, Image.fromBytes(photo.content)) for photo in admitted)
-        kept_videos = 0
+        replacements = {}
+        remaining = MAX_TURN_BYTES
+        limits = {Image: MAX_INPUT_IMAGES, Record: MAX_INPUT_AUDIOS, Video: MAX_VIDEOS, File: MAX_FILES}
+        counts = defaultdict(int)
+        photos = []
         for position, part in enumerate(message.message):
-            if type(part) is not Video:
+            kind = type(part)
+            if kind not in limits:
                 continue
-            locator = videos.get(position)
-            if locator is None or remaining <= 0 or kept_videos >= MAX_VIDEOS:
+            if counts[kind] >= limits[kind] or remaining <= 0:
                 replacements[position] = Plain(limited)
                 continue
             try:
-                content = await fetch_native_video_bytes(locator, maximum_bytes=min(remaining, MAX_VIDEO_BYTES))
+                if kind is Image:
+                    photo = await self.image_loader(images[position], maximum_bytes=min(remaining, MAX_IMAGE_BYTES))
+                    if photo.descriptor.position != position or not fits_budget((*photos, photo.descriptor)):
+                        raise TaskError("host_image_limit", "image exceeds album limits")
+                    size = photo.descriptor.retained_bytes
+                    replacement = Image.fromBytes(photo.content)
+                elif kind is Video:
+                    if position not in videos:
+                        replacements[position] = Plain(limited)
+                        continue
+                    data = await fetch_native_video_bytes(videos[position], maximum_bytes=min(remaining, MAX_VIDEO_BYTES))
+                    size = len(data)
+                    replacement = Video(file="base64://" + base64.b64encode(data).decode("ascii"))
+                elif kind is Record:
+                    location = part.url or part.file
+                    locator = NativeAudioLocator(position, location, telegram_temp=location == part.path)
+                    data = await fetch_native_audio_bytes(freeze_attachment(event, locator),
+                                                          maximum_bytes=min(remaining, MAX_AUDIO_BYTES))
+                    size = len(data)
+                    replacement = Record(file="base64://" + base64.b64encode(data).decode("ascii"))
+                else:
+                    locator = freeze_attachment(event, file_locator(position, part))
+                    replacement, size = await bounded_file_component(event, locator, remaining)
+                if size > remaining:
+                    replacements[position] = Plain(limited)
+                    continue
+                if kind is Image:
+                    photos.append(photo.descriptor)
+                remaining -= size
+                counts[kind] += 1
+                replacements[position] = replacement
             except TaskError as exc:
-                replacements[position] = Plain(limited if exc.code == "host_video_limit" else "[附件不可用]")
-                continue
-            kept_videos += 1
-            remaining -= len(content)
-            replacements[position] = Video(file="base64://" + base64.b64encode(content).decode("ascii"))
+                replacements[position] = Plain(limited if exc.code.endswith("_limit") else "[附件不可用]")
         notes = list(dict.fromkeys(part.text for part in replacements.values() if isinstance(part, Plain)))
         message.message = [replacements.get(position, part) for position, part in enumerate(message.message)]
         if notes:

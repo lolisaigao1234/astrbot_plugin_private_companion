@@ -193,16 +193,20 @@ class NativeAccountConnections:
                 if record.state == "online" and record.platform is not None and record.client is not None
             }
 
-    def recognizes_telegram_client(self, account, client):
-        """Identify current or previously accepted bots for inbound reply suppression."""
+    def telegram_client_state(self, account, client):
+        """Distinguish queued events from current and previously accepted SDK clients."""
         if client is None:
-            return False
+            return None
         with self._lock:
             self.refresh(account)
             record = self._record(account)
-            return record.platform_name == "telegram" and (
-                client is record.client or client is record.last_retired_telegram_client
-                or record.retired_telegram_clients.get(id(client)) is client)
+            if record.platform_name == "telegram":
+                if client is record.client:
+                    return "current"
+                if (client is record.last_retired_telegram_client
+                        or record.retired_telegram_clients.get(id(client)) is client):
+                    return "retired"
+            return None
 
     def acquire(self, account, *, connected=True):
         with self._lock:
