@@ -84,6 +84,20 @@ class TelegramGroupMediaTests(TelegramHostFixture, unittest.IsolatedAsyncioTestC
                     else:
                         self.assertIn(expected, captured.text)
 
+    async def test_caption_keeps_mention_link_and_photo(self):
+        from companion_v2.conversation.group_timing import SELF_MENTION
+
+        url = "https://example.org/guide"
+        update = self.update(1, photo=[dict(file_id="photo", file_unique_id="p", width=2, height=3)],
+                             caption="😀 @Synthetic_bot guide", caption_entities=[
+                                 dict(type="mention", offset=3, length=14),
+                                 dict(type="text_link", offset=18, length=5, url=url)])
+        message = await self.platform.convert_message(update, NS(bot=self.platform.client))
+        with patch("astrbot_host.media.fetch_image", AsyncMock(return_value=image_bytes())):
+            captured = await self.capture(message)
+        self.assertEqual(len(captured.images), 1)
+        self.assertIn(f"😀 {SELF_MENTION} guide ({url})", captured.text)
+
     async def test_group_album_keeps_both_photos_and_caption(self):
         items = [(self.update(n, photo=[dict(file_id=str(n), file_unique_id=str(n), width=2, height=3)],
                              media_group_id="album", caption="相册" if n == 1 else None), NS(bot=self.platform.client))
