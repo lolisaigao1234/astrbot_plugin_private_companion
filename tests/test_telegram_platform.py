@@ -892,6 +892,37 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
             prepare.assert_not_awaited()
         self.platform.client.send_message.assert_not_awaited()
 
+    async def test_renames_without_a_member_sender_update_configured_windows(self):
+        plugin = self.started_plugin()
+        directory = self.controller.session_topology
+        keys = [("tg-main", "tg-main", peer) for peer in ("-100400", "-100400#23")]
+        await directory.observe(await group_event(self.platform, -100400, "supergroup", 23, text=None,
+            title="Club", message_id=30, forum_topic_created=ForumTopicCreated("Books", 0)))
+        anonymous = dict(from_user=User(1087968824, "Group", True, username="GroupAnonymousBot"),
+                         sender_chat=Chat(-100400, "supergroup", title="Club", is_forum=True))
+        for number, sender in ((31, anonymous), (33, dict(from_user=User(777, "Manager", True)))):
+            for offset, topic, fields in ((0, 23, {"forum_topic_edited": ForumTopicEdited(name=f"Topic {number}")}),
+                                          (1, None, {"new_chat_title": f"Club {number}"})):
+                event = await group_event(self.platform, -100400, "supergroup", topic, text=None, title="Club",
+                                          message_id=number + offset, **fields, **sender)
+                self.assertFalse(self.controller.claims(event))
+                await plugin.receive_companion_message(event)
+                await asyncio.gather(*tuple(directory._pending))
+            names = directory.stored_group_names()
+            self.assertEqual([names.get(key) for key in keys],
+                             [f"Club {number}", f"Club {number}-Topic {number}"])
+        ordinary = await group_event(self.platform, -100400, "supergroup", 23, message_id=40, **anonymous)
+        for rename in (False, True):
+            with self.assertRaises(TaskError):
+                group_event_route(ordinary, rename=rename)
+        foreign = await group_event(self.platform, -100400, "supergroup", 23, text=None, message_id=41,
+                                    forum_topic_edited=ForumTopicEdited(name="Foreign"), **anonymous)
+        foreign.client = telegram_bot()
+        await plugin.receive_companion_message(foreign)
+        await asyncio.gather(*tuple(directory._pending))
+        self.assertEqual(directory.stored_group_names()[keys[1]], "Club 33-Topic 33")
+        self.platform.client.send_message.assert_not_awaited()
+
     async def test_topic_directory_tracks_group_topic_and_member_renames(self):
         directory = self.controller.session_topology
         for number, (title, topic, member) in enumerate((("读书群", "小说", "阿青"), ("阅读群", "故事", "青")), 40):
@@ -956,6 +987,31 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
                     forum_topic_created=ForumTopicCreated("Science-Fiction", 0), message_id=46)
                 await directory.observe(event)
                 self.assertEqual(directory.stored_group_names()[key], "Library-Science-Fiction")
+
+    async def test_legacy_topic_label_wins_over_the_cached_creation_name(self):
+        directory = self.controller.session_topology
+        for peer, label in (("-100400", "Book-Club"), ("-100400#23", "Book-Club-Stories")):
+            origin = "tg-main:GroupMessage:" + peer
+            directory._store_observation(digest(["tg-main", "tg-main", origin]), {
+                "unified_msg_origin": origin, "account_id": "tg-main", "group_name": label,
+            })
+        event = await group_event(self.platform, -100400, "supergroup", 23, title="Book-Club", message_id=44)
+        event.message_obj._telegram_topic_name = "Creation"
+        await directory.observe(event)
+        await directory.observe(await group_event(self.platform, -100400, "supergroup", text=None,
+            title="Book", new_chat_title="Book", message_id=45))
+        names = directory.stored_group_names()
+        self.assertEqual(names[("tg-main", "tg-main", "-100400#23")], "Book-Stories")
+        self.assertEqual(names[("tg-main", "tg-main", "-100400")], "Book")
+
+    async def test_legacy_parent_title_is_not_split_into_a_topic(self):
+        directory = self.controller.session_topology
+        origin = "tg-main:GroupMessage:-100400"
+        directory._store_observation(digest(["tg-main", "tg-main", origin]), {
+            "unified_msg_origin": origin, "account_id": "tg-main", "group_name": "Book-Club",
+        })
+        await directory.observe(await group_event(self.platform, -100400, "supergroup", title="Book", message_id=44))
+        self.assertEqual(directory.stored_group_names()[("tg-main", "tg-main", "-100400")], "Book")
 
     async def test_chat_rename_updates_legacy_topics_on_the_same_account(self):
         directory = self.controller.session_topology
