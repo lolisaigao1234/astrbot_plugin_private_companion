@@ -83,6 +83,21 @@ class RelayPendingEventTests(unittest.IsolatedAsyncioTestCase):
             for seen in (127, message_id):
                 self.assertEqual(claim_telegram_receipt(self.runtime, account, "peer", seen, reply_to=seen - 2, permission_answer=True), ([], []))
 
+    def test_addressed_answer_cannot_be_claimed_by_a_legacy_question(self):
+        from astrbot_host.relay_pending import _read
+
+        account = ["telegram", "main"]
+        ids = []
+        for topic in ("-400#22", "-400#23"):
+            ids.append(add_task(self.runtime, {
+                "kind": "private_receipt", "state": "waiting_reply", "source_kind": "group",
+                "source_id": topic, "target_user_id": "peer", "telegram_account": account,
+                "confirm_before_report": False, "expires_at": time.time() + 60,
+            }))
+        self.assertEqual(claim_telegram_receipt(self.runtime, account, "peer", 99, reply_to=75), ([], []))
+        tasks = _read(self.runtime)["tasks"]
+        self.assertEqual([tasks[key]["state"] for key in ids], ["waiting_reply", "waiting_reply"])
+
     def test_telegram_receipt_keeps_legacy_replay_boundary(self):
         account = ["telegram", "main"]
         key = "conversation.relay.private_seen:" + json.dumps([*account, "peer"], separators=(",", ":"))
