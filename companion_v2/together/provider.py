@@ -869,14 +869,18 @@ class NativeTogetherProvider:
                     self.store.update(scope, operation["id"], state="dispatching", effect="unknown")
                     result = await self._close_latest(scope, user_id)
                     operation = self.store.update(scope, operation["id"], state="succeeded", effect="committed", result=result)
-        except asyncio.CancelledError:
-            operation = self.store.update(scope, operation["id"], state="unknown", effect="unknown", error="execution_interrupted")
-            raise
-        except Exception as exc:
-            code = exc.code if isinstance(exc, NativeTogetherError) else "together_room_result_unconfirmed"
-            dispatched = self.store.get(scope, operation["id"])["state"] == "dispatching"
-            operation = self.store.update(scope, operation["id"], state="unknown" if dispatched else "failed",
-                                          effect="unknown" if dispatched else "not_committed", error=code)
+        except (Exception, asyncio.CancelledError) as exc:
+            operation = self.store.get(scope, operation["id"])
+            # A group notice runs after ticket revocation and its terminal receipt.
+            if operation["state"] in ("prepared", "dispatching"):
+                cancelled = isinstance(exc, asyncio.CancelledError)
+                uncertain = cancelled or operation["state"] == "dispatching"
+                code = exc.code if isinstance(exc, NativeTogetherError) else "together_room_result_unconfirmed"
+                operation = self.store.update(scope, operation["id"], state="unknown" if uncertain else "failed",
+                                              effect="unknown" if uncertain else "not_committed",
+                                              error="execution_interrupted" if cancelled else code)
+            if isinstance(exc, asyncio.CancelledError):
+                raise
         return self._response(value, operation)
 
     async def _create_room(self, value, scope, operation, *, user_id, before_dispatch=None):
