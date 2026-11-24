@@ -61,47 +61,49 @@ def sticker_marker(event):
     return sticker_label(sticker)
 
 
-def remaining_file_budget(telegram, images, audios, videos, quotes):
-    if telegram is None:
-        return None
-    from companion_v2.conversation.media.models import MAX_TURN_BYTES
-    quoted_images = (image for quote in quotes for image in quote.images)
-    used = sum(item.descriptor.retained_bytes for item in (*images, *audios, *videos, *quoted_images))
-    return max(0, MAX_TURN_BYTES - used)
+class TelegramReadBudget:
+    def __init__(self):
+        from companion_v2.conversation.media.models import MAX_TURN_BYTES
+        self.remaining = MAX_TURN_BYTES
+
+    def debit(self, size):
+        self.remaining = max(0, self.remaining - size)
 
 
-async def capture_turn_media(bridge, references, images, audios, videos, text_parts, partial_media):
+async def capture_turn_media(bridge, references, images, audios, videos, text_parts, partial_media, budget):
     """Give direct attachments first claim, then admit verified quote photos."""
     from companion_v2.conversation.media import models as visual
     from companion_v2.conversation.media.audio import models as voice
     from companion_v2.conversation.media.video import models as movie
 
-    remaining = visual.MAX_TURN_BYTES
     descriptors = {"image": [], "audio": [], "video": []}
 
     async def capture(kind, locators, loader, expected, count, ceiling, *, quoted=False):
-        nonlocal remaining
         accepted = []
         retained = descriptors[kind]
         for locator in locators:
             try:
-                if remaining <= 0 or len(retained) >= count:
+                if budget.remaining <= 0 or len(retained) >= count:
                     raise TaskError(f"host_{kind}_limit", "turn attachment capacity exhausted")
-                item = await loader(locator, maximum_bytes=min(remaining, ceiling))
+                item = await loader(locator, maximum_bytes=min(budget.remaining, ceiling))
                 if type(item) is not expected or item.descriptor.position != locator.position:
                     raise TaskError(f"host_{kind}_invalid", "loader changed the original component position")
                 retained.append(item.descriptor)
-                if item.descriptor.retained_bytes > remaining or not movie.fits_video_budget(
+                if item.descriptor.retained_bytes > budget.remaining or not movie.fits_video_budget(
                         descriptors["video"], descriptors["image"], descriptors["audio"]):
                     retained.pop()
+                    budget.debit(len(item.content))
                     raise TaskError(f"host_{kind}_limit", "decoded attachment exceeds the turn budget")
-                remaining -= item.descriptor.retained_bytes
+                budget.debit(item.descriptor.retained_bytes)
                 accepted.append(item)
             except TaskError as error:
-                if error.code != f"host_{kind}_limit" or not (partial_media or quoted and any(descriptors.values())):
+                consumed = getattr(error, "bytes_read", 0)
+                budget.debit(consumed)
+                limited = error.code == f"host_{kind}_limit"
+                if not (limited or consumed) or not (partial_media or quoted and any(descriptors.values())):
                     raise
                 if not quoted:
-                    text_parts[locator.position] = "[附件超过读取上限，本轮未读取]"
+                    text_parts[locator.position] = "[附件超过读取上限，本轮未读取]" if limited else "[附件不可用]"
         return tuple(accepted)
 
     async def photos(locators, *, quoted=False):
