@@ -88,13 +88,14 @@ async def prepare_file_text(locators, loader, preferences, *, client, scope, pay
                     maximum_bytes=limit,
                     maximum_chars=remaining, formats=preferences["file_understanding_allowed_suffixes"]),
                     timeout=max(0.01, deadline - asyncio.get_running_loop().time()))
-                if (type(value) is not FileText or value.position != locator.position
-                        or value.name != locator.name or len(value.text) > remaining):
+                if type(value) is not FileText:
+                    raise FileExtractionError("host_file_invalid", limit)
+                if byte_budget is not None:
+                    byte_budget = max(0, byte_budget - value.byte_count)
+                if value.position != locator.position or value.name != locator.name or len(value.text) > remaining:
                     raise TaskError("host_file_invalid", "document loader changed the frozen attachment")
                 if value.byte_count > limit:
                     raise TaskError("host_file_limit", "document exceeds its remaining byte budget")
-                if byte_budget is not None:
-                    byte_budget -= value.byte_count
                 entry.update(sha256=value.content_hash, byte_count=value.byte_count, text=value.text,
                              coverage="部分正文" if value.truncated else "已提取正文")
                 remaining -= len(value.text)

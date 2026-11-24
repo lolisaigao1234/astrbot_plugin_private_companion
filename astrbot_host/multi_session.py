@@ -294,6 +294,7 @@ class MultiPrivateBridge(NativePrivateBridge):
                 try:
                     chain[index] = await load_photo(locator)
                 except TaskError as exc:
+                    remaining = max(0, remaining - getattr(exc, "bytes_read", 0))
                     chain[index] = Plain(limited if exc.code.endswith("_limit") else "[附件不可用]")
             reply.chain = chain
         notes = list(dict.fromkeys(part.text for part in replacements.values() if isinstance(part, Plain)))
