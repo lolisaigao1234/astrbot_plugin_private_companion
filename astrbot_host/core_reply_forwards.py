@@ -127,7 +127,7 @@ def telegram_private_forward(event):
     return getattr(getattr(raw, "chat", None), "type", "") == "private"
 
 
-def private_debounce_input(event: Any) -> tuple[str, bool] | None:
+def private_debounce_input(event: Any, *, collecting=None, target_key=None) -> tuple[str, bool] | None:
     """Extract ``(plain_text, has_forward)`` for private-debounce-eligible messages.
 
     Accepts private messages made solely of ``Plain``, top-level
@@ -146,8 +146,26 @@ def private_debounce_input(event: Any) -> tuple[str, bool] | None:
         return "", True
     if getattr(getattr(event, "platform_meta", None), "name", None) == "telegram":
         raw = getattr(getattr(message_obj, "raw_message", None), "message", None)
-        if any(getattr(raw, field, None) for field in ("reply_to_message", "external_reply", "quote")):
+        if getattr(raw, "external_reply", None):
             return None
+        original = getattr(raw, "reply_to_message", None)
+        if original is not None or getattr(raw, "quote", None):
+            if (not original or not collecting or not target_key or not raw.text
+                    or original.chat.id != raw.chat.id):
+                return None
+
+            def quoted_forward(candidate):
+                forward = telegram_forward_message(candidate)
+                return (forward is not None and candidate.client is event.client
+                        and forward.chat.id == raw.chat.id and forward.message_id == original.message_id)
+
+            if not collecting(target_key, quoted_forward):
+                return None
+            components = _message_components(event)
+            if any(component_kind(part) not in {"Plain", "Reply"} for part in components):
+                return None
+            text = "".join(part.text for part in components if component_kind(part) == "Plain")
+            return (text, False) if text.strip() else None
     parts = _message_components(event)
     if not parts:
         return None
