@@ -5,6 +5,7 @@ from dataclasses import replace
 from astrbot.core.message.components import Plain
 
 from companion_v2.conversation.private_debounce import MAX_MERGED_CHARS
+from companion_v2.conversation.quotes.models import prompt_label
 
 from .binding import BURST_SENDER_TEXT_EXTRA
 from .core_reply_forwards import MAX_CORE_FORWARD_IMAGES, component_kind, quoted_telegram_forward
@@ -23,10 +24,6 @@ def sender_section(original, prompt, text):
     return prompt, "[发起人的留言]\n" + _quoted_lines(text)
 
 
-def _origin_label(name):
-    return " ".join(name.splitlines()).replace("[", "［").replace("]", "］")
-
-
 def _bounded_sections(originals, budget=MAX_MERGED_CHARS, replies=None):
     replies = replies or {}
     forward_ids = {item.event_id for item in originals if item.forward_origin}
@@ -36,7 +33,7 @@ def _bounded_sections(originals, budget=MAX_MERGED_CHARS, replies=None):
         body = item.text
         if item.forward_origin:
             body = body.removeprefix(f"[转发消息，来源：{item.forward_origin}]\n")
-            header = f"[转发消息，来源：{_origin_label(item.forward_origin)}]\n"
+            header = f"[转发消息，来源：{prompt_label(item.forward_origin)}]\n"
         else:
             quote = next(iter(getattr(item, "quotes", ())), None)
             target = replies.get(item.event_id, quote.message_id) if quote else None
@@ -56,7 +53,7 @@ def _bounded_sections(originals, budget=MAX_MERGED_CHARS, replies=None):
     if sum(len(header) + min(32, len(body)) + 2 for header, body in zip(headers, bodies)) > budget:
         label_limit = max(1, fair_share - len("[转发消息，来源：]\n") - 34)
         for i, item in enumerate(originals):
-            name = _origin_label(item.forward_origin)
+            name = prompt_label(item.forward_origin)
             if len(name) > label_limit:
                 tail = label_limit // 2
                 suffix = name[-tail:] if tail else ""
