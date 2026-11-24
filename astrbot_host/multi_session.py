@@ -17,7 +17,7 @@ from companion_v2.adapters.astrbot.native import (
     platform_client_matches,
     supported_platform_name,
 )
-from companion_v2.adapters.astrbot.group_mentions import telegram_plain_text
+from companion_v2.adapters.astrbot.telegram_reply import telegram_plain_text
 from companion_v2.adapters.astrbot.group import NativeGroupBridge, _is_sticker_segment
 from companion_v2.adapters.astrbot.onebot import OneBotPrivateSender
 from companion_v2.adapters.astrbot.onebot_group import OneBotGroupSender

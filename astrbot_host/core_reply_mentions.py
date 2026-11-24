@@ -4,7 +4,7 @@ from collections.abc import Mapping
 import logging
 import re
 
-from companion_v2.adapters.astrbot.group_mentions import telegram_has_reply_prefix
+from companion_v2.adapters.astrbot.telegram_reply import telegram_has_reply_prefix
 from companion_v2.conversation.group_timing import SELF_MENTION
 
 
