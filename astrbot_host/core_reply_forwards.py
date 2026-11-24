@@ -150,7 +150,7 @@ def private_debounce_input(event: Any, *, collecting=None, target_key=None) -> t
             return None
         original = getattr(raw, "reply_to_message", None)
         if original is not None or getattr(raw, "quote", None):
-            if (not original or not collecting or not target_key or not raw.text
+            if (not original or not collecting or not target_key or not (raw.text or raw.caption)
                     or original.chat.id != raw.chat.id):
                 return None
 
@@ -162,12 +162,16 @@ def private_debounce_input(event: Any, *, collecting=None, target_key=None) -> t
             if not collecting(target_key, quoted_forward):
                 return None
             components = _message_components(event)
-            if any(component_kind(part) not in {"Plain", "Reply", "At"} for part in components):
+            allowed = {"Plain", "Reply", "At"}
+            if raw.caption:
+                allowed.update(("Image", "Record", "Video", "File"))
+            if any(component_kind(part) not in allowed for part in components):
                 return None
             if any(component_kind(part) == "At" for part in components):
                 from companion_v2.adapters.astrbot.telegram_references import private_text_parts
                 components = private_text_parts(message_obj, components)
             text = "".join(part.text for part in components if component_kind(part) == "Plain")
+            text = text or raw.caption or ""
             return (text, False) if text.strip() else None
     parts = _message_components(event)
     if not parts:
