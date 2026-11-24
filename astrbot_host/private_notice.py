@@ -142,7 +142,7 @@ async def send_private_notice(controller, event, *, text, route, transport=None)
             lease = connections.acquire(lease.account_key)
             platform = lease.platform
         session = MessageSession(route.platform_id, MessageType.FRIEND_MESSAGE, peer)
-        with redact_telegram_token(lease.client if platform_name == "telegram" else None):
+        with redact_telegram_token(platform.get_client() if platform_name == "telegram" else None):
             await platform.send_by_session(session, MessageChain([Plain(str(text))]))
     except Exception:  # noqa: BLE001 - send outcome is unknown, never replayed here
         return {"state": "failed", "reason": "platform_call_failed"}
