@@ -75,10 +75,12 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
         from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA
 
         plugin = self.started_plugin()
-        events = [await self.event(number=80 + i, text=body,
-            forward_origin={"type": "hidden_user", "sender_user_name": author, "date": 1700000000})
-            for i, (author, body) in enumerate((("Ada", "first-paper"), ("Bo", "second-paper"),
-                                                ("Chen", "third-paper")))]
+        events = []
+        for i, (author, body) in enumerate((("Ada", "first-paper"), ("Bo", "second-paper"),
+                                             ("Chen", "third-paper"))):
+            fields = {"reply_to_message": self.message(16, text="original reply context")} if i == 1 else {}
+            events.append(await self.event(number=80+i, text=body, **fields,
+                forward_origin={"type": "hidden_user", "sender_user_name": author, "date": 1700000000}))
         events.append(await self.event(number=83, text="my-comment"))
         earlier = await self.event(number=79, text="previous turn")
         active = plugin._private_reply_followups().start(
@@ -109,8 +111,10 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
         rows = self.controller.runtime.read_all(
             "SELECT event_id, json_extract(source_json, '$.owner') AS owner "
             "FROM conversation_native_observations WHERE event_id IN ('80','81','82','83') ORDER BY event_id", ())
-        self.assertEqual([row["owner"] for row in rows],
-                         ["conversation.native_reference"] * 3 + ["conversation.native_input"])
+        reference = "conversation.native_reference"
+        self.assertEqual([(row["event_id"], row["owner"]) for row in rows],
+                         [("80", reference), ("81", reference), ("81", reference),
+                          ("82", reference), ("83", "conversation.native_input")])
 
     async def test_forwarded_command_stays_reference_text(self):
         from astrbot_host.binding import message_text
