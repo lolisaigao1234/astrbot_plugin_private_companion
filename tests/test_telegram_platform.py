@@ -1479,6 +1479,7 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
 
     async def test_early_consent_waits_for_the_native_prompt_receipt(self):
         from astrbot_host.relay_pending import _read
+        from astrbot_host.relay_pending_events import process_private_receipts
         target = self.controller.settings.target("tg-owner")
         task = self.private_relay_task("waiting_reply", True, question_id=70)
         receive = self.controller.process_private_relay_receipts
@@ -1494,12 +1495,17 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
         self.platform.client.send_message.side_effect = send
         answer = asyncio.create_task(receive(self.reply_to_prompt(71, 70, "my reply"), target))
         try:
-            await asyncio.wait_for(dispatched.wait(), 10)
-            consent = asyncio.create_task(receive(self.reply_to_prompt(81, 80), target))
-            await asyncio.wait({consent}, timeout=0.2)
+            await asyncio.wait_for(dispatched.wait(), 60)
+            with patch("astrbot_host.relay_pending_events.process_private_receipts",
+                       wraps=process_private_receipts) as handler:
+                consent = asyncio.create_task(receive(self.reply_to_prompt(81, 80), target))
+                await asyncio.sleep(0)
+                handled_before_ack = handler.await_count
+                acknowledge.set()
+                await asyncio.gather(answer, consent)
         finally:
             acknowledge.set()
-        await asyncio.gather(answer, consent)
+        self.assertEqual(handled_before_ack, 0)
         self.assertEqual(_read(self.controller.runtime)["tasks"][task]["state"], "reported")
         self.assertEqual(self.platform.client.send_message.await_count, 2)
 
