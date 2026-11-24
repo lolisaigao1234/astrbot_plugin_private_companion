@@ -4,6 +4,7 @@ from collections.abc import Mapping
 
 from companion_v2.conversation.private_debounce import MAX_MERGED_CHARS, Policy
 
+from .binding import telegram_forward_message
 from .private_debounce import PrivateDebounce
 
 
@@ -16,6 +17,8 @@ def group_plain_text(event):
     message = getattr(event, "message_obj", None)
     kind = getattr(getattr(message, "type", None), "value", getattr(message, "type", None))
     if kind != "GroupMessage" or getattr(event, "is_at_or_wake_command", False) is True:
+        return None
+    if telegram_forward_message(event) is not None:
         return None
     raw = getattr(message, "raw_message", None)
     original = raw.get("message") if isinstance(raw, Mapping) else None

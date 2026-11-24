@@ -120,7 +120,7 @@ async def fetch_attachment(value, *, maximum_bytes):
                                 raise AttachmentReadError("host_image_limit", "attachment exceeds the intake byte budget",
                                                           len(content) + len(chunk))
                             content.extend(chunk)
-                    except (aiohttp.ClientError, OSError) as exc:
+                    except (aiohttp.ClientError, OSError, RuntimeError) as exc:
                         if content:
                             raise AttachmentReadError("host_image_fetch_failed", "attachment download interrupted",
                                                       len(content)) from exc

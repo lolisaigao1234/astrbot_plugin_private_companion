@@ -829,6 +829,19 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
         await observe(23, 25, text=None, forum_topic_edited=ForumTopicEdited(name="Fiction"))
         self.assertEqual(directory.stored_group_names()[("tg-main", "tg-main", "-100400#23")], "Club-Stories")
 
+    async def test_forward_and_comment_preserve_separate_group_speakers(self):
+        from astrbot_host.group_debounce import group_plain_text
+        from telegram import MessageOriginHiddenUser
+
+        comment = await group_event(self.platform, text="my view")
+        forwarded = await group_event(self.platform, text="their view",
+            forward_origin=MessageOriginHiddenUser(datetime.now(timezone.utc), "Original"))
+        self.assertEqual(group_plain_text(comment), "my view")
+        self.assertIsNone(group_plain_text(forwarded))
+        captured = require(await self.controller.session.bridge.groups.capture_text_only(forwarded))
+        self.assertEqual(captured.forward_origin, "Original")
+        self.assertIn("their view", captured.text)
+
     async def test_group_quote_keeps_the_other_members_identity(self):
         quote = Message(17, date=datetime.now(timezone.utc), chat=Chat(-400, "group"),
                         from_user=User(321, "Quoted", False), text="成员原文")
