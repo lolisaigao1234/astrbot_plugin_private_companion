@@ -603,6 +603,11 @@ class NativePrivateBridge:
         return platform
 
     def bot_sender_id(self, scope):
+        # QQ and other adapters already bind the bot sender to the account ID.
+        # An admitted batch can still need that identity after polling stops.
+        family = self.platform_name(scope)
+        if family and family != "telegram":
+            return scope.account_id
         lease = self.connections.acquire((scope.platform, scope.account_id))
         if lease.platform.meta().name == "telegram":
             return lease.client.id

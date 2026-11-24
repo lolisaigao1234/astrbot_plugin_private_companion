@@ -194,6 +194,9 @@ class OfficialAdapterTests(OfficialFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured.route.scope.account_id, ACCOUNT)
         self.assertEqual(captured.route.scope.native_scope_id, OFFICIAL_OPENID)
         self.assertEqual(captured.text, "捏")
+        self.native.platform.client.is_shutting_down = True
+        self.assertFalse(self.bridge.account_connected(self.account))
+        self.assertEqual(self.bridge.bot_sender_id(captured.route.scope), ACCOUNT)
 
     async def test_official_group_route_and_bot_mention_are_normalized(self):
         event = self.official_event(group=True, text="大家好吗")
