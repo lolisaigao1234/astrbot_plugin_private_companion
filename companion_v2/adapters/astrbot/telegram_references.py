@@ -7,6 +7,7 @@ from companion_v2.conversation.quotes.models import TelegramQuote
 from companion_v2.execution.models import TaskError, digest
 
 from .quotes import image_locator
+from .telegram_reply import reply_original
 from .telegram_media import freeze_attachment, safe_text
 
 
@@ -70,7 +71,7 @@ def message_references(event):
                                     forward_user_id=str(origin.sender_user.id) if origin and origin.type == "user" else None)
     reply = next(((index, part) for index, part in enumerate(message.message)
                   if getattr(part.type, "value", part.type) == "Reply"), None)
-    original = raw.reply_to_message
+    original = reply_original(raw)
     if not (original or reply or raw.external_reply or raw.quote):
         return references
     bot_id = str(getattr(event.client, "id", None))

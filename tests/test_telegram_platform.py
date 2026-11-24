@@ -182,6 +182,16 @@ class TelegramGroupTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(group_trigger_facts(event, "tg-main")["quoted_bot"], not topic_root)
                 self.assertEqual(group_message_text(event, "tg-main"), "/ 原文")
 
+    async def test_only_genuine_same_topic_reply_captures_a_quote(self):
+        from companion_v2.adapters.astrbot.telegram_references import message_references
+
+        platform = TelegramPlatform()
+        root = message_references(await forum_reply_event(platform, topic_root=True))
+        self.assertIsNone(root.quote)
+        self.assertFalse(root.unavailable)
+        reply = message_references(await forum_reply_event(platform, topic_root=False))
+        self.assertEqual((reply.quote.message_id, reply.quote.text), ("11", "之前"))
+
     async def test_reply_to_member_whose_id_matches_the_instance_is_unaddressed(self):
         platform = TelegramPlatform()
         platform.config["id"] = str(OWNER)
