@@ -552,6 +552,7 @@ class SessionTopology:
                 row["group_name"] = group_name
             if meta.name == "telegram":
                 original = message.raw_message.message
+                row["telegram_message_id"] = original.message_id
                 row["telegram_topic_rename"] = platform_label(getattr(original.forum_topic_edited, "name", None))
                 row["telegram_chat_id"] = str(original.chat.id)
                 row["telegram_chat_title"] = platform_label(original.new_chat_title or original.chat.title)
@@ -580,8 +581,16 @@ class SessionTopology:
             title = row["telegram_chat_title"] or previous.get("telegram_chat_title", "")
             # The adapter can cache a historical creation name from a reply.
             # Use its hint for discovery, and explicit edits for later renames.
-            row["telegram_topic_name"] = (row.pop("telegram_topic_rename") or previous.get("telegram_topic_name")
-                                          or row["telegram_topic_name"])
+            rename = row.pop("telegram_topic_rename")
+            message_id = row.pop("telegram_message_id")
+            last_rename = previous.get("telegram_topic_rename_id", 0)
+            if rename and message_id > last_rename:
+                row["telegram_topic_name"] = rename
+                last_rename = message_id
+            else:
+                row["telegram_topic_name"] = previous.get("telegram_topic_name") or row["telegram_topic_name"]
+            if last_rename:
+                row["telegram_topic_rename_id"] = last_rename
             if title:
                 platform_prefix = row["unified_msg_origin"].partition(":")[0] + ":"
                 # The parent title applies to every observed topic on this account.

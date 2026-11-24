@@ -795,9 +795,9 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
 
     async def test_topic_directory_tracks_group_topic_and_member_renames(self):
         directory = self.controller.session_topology
-        for title, topic, member in (("读书群", "小说", "阿青"), ("阅读群", "故事", "青")):
+        for number, (title, topic, member) in enumerate((("读书群", "小说", "阿青"), ("阅读群", "故事", "青")), 40):
             event = await group_event(self.platform, -100400, "supergroup", 23, text=None,
-                                      title=title, forum_topic_edited=ForumTopicEdited(name=topic),
+                                      title=title, message_id=number, forum_topic_edited=ForumTopicEdited(name=topic),
                                       from_user=User(OWNER, member, False))
             await directory.observe(event)
             self.assertEqual(directory.stored_group_names()[("tg-main", "tg-main", "-100400#23")],
@@ -825,6 +825,9 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
             names = directory.stored_group_names()
             self.assertEqual(names[("tg-main", "tg-main", "-100400#23")], f"Club-{name}")
             self.assertEqual(names[("tg-main", "tg-main", "-100400#24")], "Club-Music")
+
+        await observe(23, 25, text=None, forum_topic_edited=ForumTopicEdited(name="Fiction"))
+        self.assertEqual(directory.stored_group_names()[("tg-main", "tg-main", "-100400#23")], "Club-Stories")
 
     async def test_group_quote_keeps_the_other_members_identity(self):
         quote = Message(17, date=datetime.now(timezone.utc), chat=Chat(-400, "group"),
