@@ -223,6 +223,10 @@ class MultiPrivateBridge(NativePrivateBridge):
                 from companion_v2.adapters.astrbot.telegram_references import private_references, private_text_parts
                 telegram = private_references(event)
                 parts = private_text_parts(message, message.message)
+                if message.raw_message.message.voice and len(parts) > len(message.message):
+                    caption = parts[-1].text
+                    if caption not in event.message_str:
+                        event.message_str = (event.message_str + "\n" + caption).strip()
             connection_lease = self.connections.acquire(account)
             event_id = native_id(message.message_id)
             at = datetime.fromtimestamp(event.created_at, timezone.utc)

@@ -377,6 +377,57 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(frozen_image_locators(quoted)[0].images), 1)
         require(await self.controller.session.receive(quoted, target))
 
+    async def test_voice_reply_preserves_caption_and_quote_through_provider_and_replay(self):
+        from pathlib import Path
+        from telegram import Voice
+        from astrbot.core.astr_main_agent import _process_quote_message, collect_initial_request
+        from astrbot.core.message.components import Record
+        from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
+        from astrbot_host.audio.loader import load_native_audio
+        from tests.audio_support import audio_bytes
+
+        self.bridge.audio_type, self.bridge.audio_loader = Record, load_native_audio
+        session = self.controller.session
+        target = self.controller.settings.target("tg-owner")
+        caption = "这是语音说明"
+        quote_text = "先前的答复"
+        original = self.message(9, 424242, text=quote_text)
+        voice = {"file_id": "voice", "file_unique_id": "v1", "duration": 1}
+
+        async def download(url, *, path):
+            Path(path).write_bytes(audio_bytes())
+
+        Path(get_astrbot_temp_path()).mkdir(parents=True, exist_ok=True)
+        with patch.object(Voice, "get_file", AsyncMock(return_value=NS(file_path="https://example.org/voice"))), \
+                patch("astrbot.core.platform.sources.telegram.tg_adapter.download_file", download), \
+                patch.object(session.application, "worker_limit", 0):
+            converted = await self.event(90, text="继续", reply_to_message=original)
+            reply = next(part for part in converted.message_obj.message if isinstance(part, Reply))
+            for number, with_component in ((100, False), (110, True)):
+                event = await self.event(number, voice=voice, caption=caption, reply_to_message=original)
+                components = event.message_obj.message
+                components[:] = [part for part in components if not isinstance(part, Reply)]
+                if with_component:
+                    components.insert(0, reply)
+                full = require(await self.bridge.capture(event))
+                self.assertTrue(full.text.startswith("\n[引用消息]\n"))
+                self.assertEqual(full.text.count(caption), 1)
+                require(await session.receive(event, target))
+                replay = await self.event(number + 1, text="继续", reply_to_message=self.message(number, voice=voice, caption=caption))
+                require(await session.receive(replay, target))
+                core = require(await self.bridge.capture_core_reply(event))
+                self.assertEqual(core.text.count(caption), 1)
+                with patch("astrbot.core.astr_main_agent._get_session_conv", AsyncMock(return_value=NS(history="[]"))):
+                    request, _ = await collect_initial_request(event, NS(), NS(provider_wake_prefix="", provider_settings={}))
+                    await _process_quote_message(event, request, "", NS())
+                from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA, inject_core_reply_prompt
+                event.set_extra(CORE_REPLY_CONTEXT_EXTRA, {"prepared": {"native_input": core}})
+                inject_core_reply_prompt(event, request)
+                inject_core_reply_prompt(event, request)
+                payload = json.dumps(await request.assemble_context(), ensure_ascii=False)
+                self.assertEqual(payload.count(caption), 1)
+                self.assertEqual(payload.count(quote_text), 1)
+
     async def test_admitted_attachment_quotes_match_sdk_originals(self):
         from contextlib import ExitStack
         from pathlib import Path
