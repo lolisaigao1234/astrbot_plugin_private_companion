@@ -1093,9 +1093,6 @@ class NativePrivateBridge:
             budget = TelegramReadBudget() if telegram is not None else None
 
             async def prepare():
-                if telegram is not None:
-                    return await capture_turn_media(self, telegram, frozen_images, frozen_audios, frozen_videos,
-                                                    text_parts, partial_media, budget)
                 images = await self._capture_images(frozen_images)
                 audios = []
                 for locator in frozen_audios:
@@ -1149,7 +1146,12 @@ class NativePrivateBridge:
             images, quotes, forwards, audios, videos = (), (), (), (), ()
             if frozen_images or frozen_quotes or frozen_forwards or frozen_audios or frozen_videos or (telegram and telegram.quote):
                 try:
-                    images, quotes, forwards, audios, videos = await asyncio.wait_for(prepare(), MEDIA_PREPARE_TIMEOUT)
+                    if telegram is not None:
+                        captured = await capture_turn_media(self, telegram, frozen_images, frozen_audios, frozen_videos,
+                                                            text_parts, partial_media, budget, timeout=MEDIA_PREPARE_TIMEOUT)
+                    else:
+                        captured = await asyncio.wait_for(prepare(), MEDIA_PREPARE_TIMEOUT)
+                    images, quotes, forwards, audios, videos = captured
                 except TaskError as error:
                     if not partial_media or error.code not in {
                         "host_audio_limit", "host_video_limit", "host_image_limit", "image_manifest_invalid"

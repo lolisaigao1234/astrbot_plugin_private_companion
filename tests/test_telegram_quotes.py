@@ -24,7 +24,7 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
         for attachment in (File(name="note.txt", file="note.txt"), Record(file="voice.wav"), Video(file="clip.mp4")):
             with self.subTest(kind=type(attachment).__name__):
                 event = NS(message_obj=NS(message=[reply, attachment]))
-                self.assertTrue(self.controller.session.bridge.has_attachment_and_quoted_photo(event))
+                self.assertTrue(self.controller.session.bridge.needs_telegram_media_budget(event))
 
     async def test_provider_photo_budget(self):
         from tests.telegram_provider_photo_support import check_provider_photo_budget
@@ -183,7 +183,10 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
     async def test_captioned_photo_comment_quoting_collected_forward_joins_burst(self):
         await self.check_reply_to_forward(in_burst=True, photo=True)
 
-    async def check_reply_to_forward(self, *, in_burst, partial=False, mention=False, photo=False):
+    async def test_quoted_comment_reaching_intake_before_forward_stays_with_burst(self):
+        await self.check_reply_to_forward(in_burst=True, mention=True, comment_first=True)
+
+    async def check_reply_to_forward(self, *, in_burst, partial=False, mention=False, photo=False, comment_first=False):
         from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA
 
         plugin = self.started_plugin()
@@ -218,9 +221,22 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
             return reservation
         with patch.object(manager, "reserve", side_effect=record), patch.object(
                 self.controller, "prepare_core_reply", wraps=self.controller.prepare_core_reply) as prepare:
-            running = asyncio.gather(plugin.receive_companion_message(first), plugin.receive_companion_message(second))
-            await asyncio.wait_for(ready.wait(), timeout=60)
-            await asyncio.gather(running, plugin.receive_companion_message(comment))
+            if comment_first:
+                listening = asyncio.Event()
+                wait = manager.wait_for_event
+
+                async def waiting(*args):
+                    listening.set()
+                    return await wait(*args)
+
+                with patch.object(manager, "wait_for_event", side_effect=waiting):
+                    reply = asyncio.create_task(plugin.receive_companion_message(comment))
+                    await asyncio.wait_for(listening.wait(), 15)
+                    await asyncio.gather(reply, *(plugin.receive_companion_message(item) for item in (first, second)))
+            else:
+                running = asyncio.gather(plugin.receive_companion_message(first), plugin.receive_companion_message(second))
+                await asyncio.wait_for(ready.wait(), timeout=60)
+                await asyncio.gather(running, plugin.receive_companion_message(comment))
         winners = [event for event in (first, second, comment) if event.get_extra(CORE_REPLY_CONTEXT_EXTRA)]
         self.assertEqual(prepare.await_count, 1 if in_burst else 2)
         bursts = [event for event in winners if event.get_extra(CORE_REPLY_CONTEXT_EXTRA)["prepared"]["native_input"].telegram_burst]
@@ -364,6 +380,7 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
         result = await merge_forward_burst(last, target, plan, [(e, "", None) for e in (first, forwarded, last)], verify)
         self.assertEqual([item.text for item in result.captured.telegram_burst], ["first thought", "second thought"])
         self.assertNotIn("unverified body", last.message_str)
+        self.assertIn("1 条消息未通过核验", last.message_str)
 
     async def test_forward_burst_ending_in_photo_keeps_media_and_comment(self):
         from astrbot_host.telegram_forward_burst import merge_forward_burst
