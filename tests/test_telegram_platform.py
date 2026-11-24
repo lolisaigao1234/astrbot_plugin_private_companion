@@ -203,6 +203,19 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
         self.assertNotIn(token, " ".join(logs.output))
         self.assertIn("[redacted]", " ".join(logs.output))
 
+    async def test_relay_receipt_uses_the_telegram_client_without_an_event_lease(self):
+        from astrbot_host.relay_pending_events import _send_private
+
+        event = telegram_event(self.platform)
+        token = self.platform.client.token
+        self.platform.client.send_chat_action.side_effect = InvalidToken(token)
+        with self.assertLogs("astrbot", level="WARNING") as logs:
+            receipt = await _send_private(self.controller, event, platform_id="tg-main",
+                                          login="tg-main", peer=str(OWNER), text="送达回执")
+        self.assertEqual(receipt["state"], "delivered")
+        self.platform.client.send_message.assert_awaited_once()
+        self.assertNotIn(token, " ".join(logs.output))
+
     async def test_unavailable_refusal_classifier_keeps_dispatch_unknown(self):
         self.platform.client.send_message.side_effect = NetworkError("connection lost")
         with patch("companion_v2.adapters.astrbot.platform_sender._telegram_refusal", side_effect=ImportError):
