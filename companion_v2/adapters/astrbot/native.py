@@ -1112,9 +1112,13 @@ class NativePrivateBridge:
                         continue
                     if type(audio) is not CapturedAudio or audio.descriptor.position != locator.position:
                         raise TaskError("host_audio_invalid", "audio loader changed the original component position")
-                    audios.append(audio)
-                    if not fits_audio_budget(tuple(a.descriptor for a in audios), tuple(i.descriptor for i in images)):
+                    if not fits_audio_budget(tuple(a.descriptor for a in (*audios, audio)),
+                                             tuple(i.descriptor for i in images)):
+                        if telegram_caption:
+                            text_parts[locator.position] = "[附件超过读取上限，本轮未读取]"
+                            continue
                         raise TaskError("host_audio_limit", "voice and images exceed the shared intake budget")
+                    audios.append(audio)
                 quotes = []
                 if telegram and telegram.quote:
                     quote = telegram.quote
@@ -1160,10 +1164,13 @@ class NativePrivateBridge:
                         continue
                     if type(video) is not CapturedVideo or video.descriptor.position != locator.position:
                         raise TaskError("host_video_invalid", "video loader changed the original component position")
-                    direct_videos.append(video)
-                    if not fits_video_budget((*video_descriptors, *(v.descriptor for v in direct_videos)),
+                    if not fits_video_budget((*video_descriptors, *(v.descriptor for v in direct_videos), video.descriptor),
                                              tuple(i.descriptor for i in all_images), audio_descriptors):
+                        if telegram_caption:
+                            text_parts[locator.position] = "[附件超过读取上限，本轮未读取]"
+                            continue
                         raise TaskError("host_video_limit", "video and other attachments exceed the shared intake budget")
+                    direct_videos.append(video)
                 return images, tuple(quotes), forwards, tuple(audios), tuple(direct_videos)
             images, quotes, forwards, audios, videos = (), (), (), (), ()
             if frozen_images or frozen_quotes or frozen_forwards or frozen_audios or frozen_videos or (telegram and telegram.quote):
