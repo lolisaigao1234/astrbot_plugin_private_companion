@@ -1537,8 +1537,9 @@ class AstrBotMultiController:
         # The account registry exists before a session starts and between sessions.
         # A queued update can still carry a bot from an earlier polling generation.
         try:
-            if not self._connections_for().recognizes_telegram_client((meta.id, meta.id), event.client):
-                return False
+            state = self._connections_for().telegram_client_state((meta.id, meta.id), event.client)
+            if state != "current":
+                return state == "retired"
         except (ValueError, AttributeError, TypeError, RuntimeError):
             return False
         try:
