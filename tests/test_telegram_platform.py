@@ -886,6 +886,108 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
         self.platform.client.send_message.assert_not_awaited()
 
 
+class TelegramGroupRoomToolTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_topic_tool_creates_room_and_replays_private_receipt(self):
+        from astrbot.core.agent.message import Message as AgentMessage, ToolCall
+        from astrbot_host.core_reply import prepare_core_reply_event
+        from astrbot_host.core_reply_tools import close_core_reply_tools, inject_core_reply_tools, native_tool_name
+        from astrbot_host.native_extensions.together.rooms_methods import TogetherRoomsMethods
+        from companion_v2.capabilities import CapabilityAuthorizationState, CapabilityRepository
+        from companion_v2.product import PRODUCT_VERSION
+        from companion_v2.together.models import RoomTicketStore
+        from companion_v2.together.provider import NativeTogetherProvider
+        from tests.native_internal_support import internal_lease
+        from tests.test_together_room_creation import FakePlugin
+
+        class Plugin(FakePlugin, TogetherRoomsMethods):
+            issue_room_ticket = TogetherRoomsMethods.issue_room_ticket
+
+        plugin = Plugin()
+        plugin.ticket_store = RoomTicketStore()
+        provider = NativeTogetherProvider(plugin, self.root, version=PRODUCT_VERSION)
+        lease = internal_lease(provider)
+        config = self.controller.config
+        config["multi_host"]["group_targets"] = [dict(target_id="topic", platform_id="tg-main",
+            account_id="tg-main", bot_id="bot-tg", group_id="-100400#23")]
+        self.window_personas["tg-main:GroupMessage:-100400#23"] = "original"
+        self.controller = plugin.controller = self.make_controller(config)
+        with patch("astrbot_host.multi_controller.create_bundled_extensions", return_value=((lease,), ())):
+            app = await self.start_host()
+        self.addAsyncCleanup(close_core_reply_tools, app)
+        self.platform.client.send_chat_action = AsyncMock()
+        self.platform.client.send_message = AsyncMock()
+        event = await group_event(self.platform, -100400, "supergroup", 23, text="@synthetic_bot 开房",
+                                  from_user=User(OWNER + 1, "Member", False), entities=[MessageEntity("mention", 0, 14)])
+        event.created_at = self.clock.now().timestamp()
+        admission = require(await self.controller.group_reply_candidate(event))
+        prepared = require(await self.controller.prepare_core_reply(event, group_admission=admission))
+        context = prepared["context"]
+        repo = CapabilityRepository(app.runtime)
+        create = "together.room.create"
+        package = lease.manifest.package
+        require(repo.acquire(extension_id="together", package_id=package.package_id,
+            package_version=package.package_version, expected_revision=0, observed_at=self.clock.now()))
+        require(repo.set_role_enabled(extension_id="together", role=context.role_binding.role,
+            bot_id=context.scope.bot_id, enabled=True, expected_revision=0, observed_at=self.clock.now()))
+        self.assertNotIn(create, {tool.action for tool in app.tools.catalog_for(context)})
+        for capability in package.capabilities:
+            require(repo.set_authorization(extension_id="together", capability_id=capability,
+                subject=context.actor.subject, scope=context.scope, state=CapabilityAuthorizationState.ACTIVE,
+                expected_revision=0, observed_at=self.clock.now()))
+        self.assertEqual({tool.action for tool in app.tools.catalog_for(context)
+                          if tool.action.startswith("together.")}, {create})
+
+        groups = self.controller.session.bridge.groups
+        with patch.dict(groups.platforms, {"tg-main": (self.native.platforms["qq-main"], None)}):
+            self.assertNotIn(create, {tool.action for tool in app.tools.catalog_for(context)})
+
+        async def authorize(state):
+            return await self.controller.authorize_core_reply(event, state)
+
+        prepare_core_reply_event(event, prepared, authorize=authorize)
+        request = NS(func_tool=None, system_prompt="")
+        inject_core_reply_tools(event, request, application=app)
+        name = native_tool_name(create)
+        tool = request.func_tool.get_tool(name)
+        self.assertIsNotNone(tool)
+        async def invoke(identifier):
+            call = ToolCall(id=identifier, function=ToolCall.FunctionBody(name=name, arguments='{"mode":"call"}'))
+            wrapper = NS(context=NS(event=event), messages=[AgentMessage(role="assistant", tool_calls=[call])])
+            return json.loads(await tool.call(wrapper, mode="call"))
+
+        for _ in range(2):
+            result = await invoke("room-call")
+            self.assertEqual(result["state"], "succeeded", result)
+            material = json.loads(result["payload"])["native"]["result"]
+            self.assertTrue(material["delivered_privately"])
+            self.assertNotIn("room", material)
+        self.platform.client.send_message.assert_awaited_once()
+        sent = self.platform.client.send_message.await_args.kwargs
+        self.assertEqual(str(sent["chat_id"]), str(OWNER + 1))
+        token = sent["text"].replace(chr(92), "").split("/join/")[1].split("?")[0]
+        self.assertNotIn(token, json.dumps(result))
+        ticket = plugin.ticket_store.get(token)
+        self.assertEqual(ticket.user_id, str(OWNER + 1))
+        binding = ticket.native_v2
+        self.assertEqual((binding.persona_id, binding.session_id, binding.scope_kind),
+                         ("original", "-100400#23", "group"))
+        self.assertTrue(binding.model_provider_id)
+
+        self.platform.client.send_message.reset_mock()
+        self.platform.client.send_message.side_effect = [Forbidden("private chat unavailable"), None]
+        for _ in range(2):
+            result = await invoke("refused-room-call")
+            self.assertEqual(result["state"], "failed", result)
+        private, notice = self.platform.client.send_message.await_args_list
+        self.assertEqual(str(private.kwargs["chat_id"]), str(OWNER + 1))
+        refused = private.kwargs["text"].replace(chr(92), "").split("/join/")[1].split("?")[0]
+        self.assertIsNone(plugin.ticket_store.get(refused))
+        self.assertEqual(str(notice.kwargs["chat_id"]), "-100400")
+        self.assertEqual(str(notice.kwargs["message_thread_id"]), "23")
+        self.assertIn("私聊启动", notice.kwargs["text"])
+        self.assertNotIn(refused, notice.kwargs["text"] + json.dumps(result))
+
+
 class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         await self.start_host()

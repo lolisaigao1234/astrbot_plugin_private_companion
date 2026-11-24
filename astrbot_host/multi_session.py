@@ -383,6 +383,20 @@ class MultiGroupBridge(NativeGroupBridge):
         """让运行中的桥接看到刚确认的群目标，而不必重载插件。"""
         self.settings = settings
 
+    def room_available(self, context):
+        scope = context.scope
+        if scope.kind is not ScopeKind.GROUP or self.platform_name(scope) != "telegram":
+            return False
+        target = self.settings.group_target(scope.platform, scope.account_id, scope.native_scope_id)
+        if target is None or target.bot_id != scope.bot_id or scope.session_id != scope.native_scope_id:
+            return False
+        sender = context.actor.principal.native_account_id
+        if not sender.isascii() or not sender.isdigit() or int(sender) <= 0:
+            return False
+        current = self.authority.actor(target, sender)
+        return (current.principal, current.subject, current.binding_id, current.binding_revision) == (
+            context.actor.principal, context.actor.subject, context.actor.binding_id, context.actor.binding_revision)
+
     def target_for_route(self, platform_id, account_id, group_id):
         return (super().target_for_route(platform_id, account_id, group_id)
                 or self.settings.group_target(platform_id, account_id, group_id))
@@ -643,7 +657,7 @@ class MultiHostSession:
             default_provider_resolver=conversation_provider_resolver(native_context),
             provider_lookup=self._load_model_provider,
             sender=LocalSender(self.sender_binding, self.send, supports_images=True, supports_poke=True), policy=common.policy, limits=common.limits, now=now,
-            tool_port=tool_port, segmentation=common.segmentation,
+            tool_port=tool_port, group_room_available=self.bridge.groups.room_available, segmentation=common.segmentation,
             # 记忆归属读的是别家插件自己公开的声明；跨插件读取只在这一个适配函数里，
             # 核心不反向导入宿主包。写入端口复用同一条发现路径：日记、梦境与主动
             # 消息完成后推给当前对外表达记忆的一方，失败不影响已完成的领域动作。
