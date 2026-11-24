@@ -133,14 +133,17 @@ class SessionTopology:
                             continue
         return None
 
-    def schedule_observe(self, event):
+    def schedule_observe(self, event, *, parent_rename=False):
         """Keep optional directory IO outside native reply hooks."""
         if self._closed or self.controller._terminated:
             return None
 
         async def record():
             try:
-                await self.observe(event)
+                if parent_rename:
+                    await self.observe(event, parent_rename=True)
+                else:
+                    await self.observe(event)
             except Exception as error:
                 detail = str(error)
                 if "unsupported native event platform" in detail:
@@ -493,7 +496,7 @@ class SessionTopology:
             return True
         return services.get("session_enabled", True)
 
-    async def observe(self, event):
+    async def observe(self, event, *, parent_rename=False):
         controller = self.controller
         if controller._terminated or not isinstance(event, controller.native_types.event):
             return
@@ -535,6 +538,23 @@ class SessionTopology:
               or session.session_id != event_session_id(event) or session.platform_id != platform_id
               or session.platform_name != platform_id or meta.id != platform_id):
             return
+        if parent_rename:
+            if meta.name != "telegram" or kind != "group" or not controller._accepting:
+                return
+            original = message.raw_message.message
+            title = platform_label(original.new_chat_title)
+            if not title or str(original.chat.id) != peer:
+                return
+            topics = {f"{platform_id}:GroupMessage:{target.group_id}" for target in controller.settings.group_targets
+                      if target.platform_id == platform_id and target.account_id == login
+                      and target.group_id.startswith(peer + "#")}
+            if topics:
+                row = {"unified_msg_origin": event.unified_msg_origin, "account_id": login,
+                       "telegram_chat_id": peer, "telegram_chat_title": title,
+                       "telegram_message_id": original.message_id}
+                async with self._write_lock:
+                    await asyncio.to_thread(self._store_observation, None, row, topics=topics)
+            return
         manager = controller.context.conversation_manager
         cid = await bounded_native_lookup(manager.get_curr_conversation_id(event.unified_msg_origin),
                                           operation="conversation_id")
@@ -566,7 +586,7 @@ class SessionTopology:
         async with self._write_lock:
             await asyncio.to_thread(self._store_observation, key, row)
 
-    def _store_observation(self, key, row):
+    def _store_observation(self, key, row, *, topics=None):
         rows = self._observed()
         route = self.route(row.get("unified_msg_origin"))
         if route:
@@ -580,14 +600,14 @@ class SessionTopology:
             previous = rows.get(key, {})
             # The adapter can cache a historical creation name from a reply.
             # Use its hint for discovery, and explicit edits for later renames.
-            rename = row.pop("telegram_topic_rename")
+            rename = row.pop("telegram_topic_rename", None)
             message_id = row.pop("telegram_message_id")
             last_rename = previous.get("telegram_topic_rename_id", 0)
             if rename and message_id > last_rename:
                 row["telegram_topic_name"] = rename
                 last_rename = message_id
             else:
-                row["telegram_topic_name"] = previous.get("telegram_topic_name") or row["telegram_topic_name"]
+                row["telegram_topic_name"] = previous.get("telegram_topic_name") or row.get("telegram_topic_name")
             if last_rename:
                 row["telegram_topic_rename_id"] = last_rename
             platform_prefix = row["unified_msg_origin"].partition(":")[0] + ":"
@@ -605,6 +625,10 @@ class SessionTopology:
             previous_title = latest.get("telegram_chat_title") or next((
                 item.get("group_name") for item in siblings if item.get("unified_msg_origin") == chat_origin
                 and item.get("group_name")), "")
+            if topics is not None:
+                siblings = [item for item in siblings if item["unified_msg_origin"] in topics]
+                if not siblings:
+                    return
             for item in siblings:
                 if "telegram_chat_id" not in item:
                     item["telegram_chat_id"] = chat_id
@@ -621,7 +645,8 @@ class SessionTopology:
                     sibling["telegram_chat_title"] = title
                     sibling["telegram_chat_title_id"] = title_id
                     sibling["group_name"] = "-".join(filter(None, (title, sibling.get("telegram_topic_name"))))
-        rows[key] = row
+        if key is not None:
+            rows[key] = row
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(".json.tmp")
         temporary.write_text(json.dumps(rows, ensure_ascii=False, sort_keys=True) + "\n",
