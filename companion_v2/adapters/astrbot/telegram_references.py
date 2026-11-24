@@ -19,17 +19,19 @@ class TelegramReferences:
     quote: TelegramQuote | None = None
     images: tuple = ()
     unavailable: bool = False
-    forward_origin: str = ""
-    forwarded_at: int | None = None
-    forward_user_id: str | None = None
+    origin: TelegramForwardOrigin | None = None
+
+    @property
+    def forward_origin(self):
+        return self.origin.label if self.origin else ""
 
     @property
     def forward_marker(self):
         return f"[转发消息，来源：{self.forward_origin}]"
 
     def capture_forward(self, event_id, text, images, audios, videos):
-        resource = digest(["telegram-forward", event_id, self.forward_origin, self.forwarded_at])
-        node = CapturedForwardNode((0,), resource, self.forward_user_id, self.forward_origin[:256], self.forwarded_at,
+        resource = self.origin.resource_hash(event_id)
+        node = CapturedForwardNode((0,), resource, self.origin.user_id, self.origin.label[:256], self.origin.sent_at,
                                    text, images, audios, videos)
         position = 1 if self.quote and self.quote.position == 0 else 0
         return CapturedForward(position, resource, (node,))
@@ -59,17 +61,24 @@ def _origin(event, origin):
                                  str(origin.sender_user.id) if origin.type == "user" else None)
 
 
+def voice_caption_parts(raw, parts):
+    # AstrBot converts a voice note to Record without its Telegram caption.
+    kinds = [getattr(part.type, "value", part.type) for part in parts]
+    if not raw.voice or not raw.caption or kinds not in (["Record"], ["Reply", "Record"]):
+        return parts
+    caption = raw.caption.encode("utf-16-le")
+    for entity in reversed(raw.caption_entities or ()):
+        if entity.type == "text_link" and entity.url:
+            end = 2 * (entity.offset + entity.length)
+            caption = caption[:end] + f" ({entity.url})".encode("utf-16-le") + caption[end:]
+    return (*parts, SimpleNamespace(type="Plain", text=caption.decode("utf-16-le")))
+
+
 def private_text_parts(message, parts):
     """Recover Telegram text only for matching converted component shapes."""
     raw = message.raw_message.message
-    # The SDK emits only Record for voice, even when Telegram supplied a caption.
-    if raw.voice and raw.caption and len(parts) == 1 and getattr(parts[0].type, "value", parts[0].type) == "Record":
-        caption = raw.caption.encode("utf-16-le")
-        for entity in reversed(raw.caption_entities or ()):
-            if entity.type == "text_link" and entity.url:
-                end = 2 * (entity.offset + entity.length)
-                caption = caption[:end] + f" ({entity.url})".encode("utf-16-le") + caption[end:]
-        return (*parts, SimpleNamespace(type="Plain", text=caption.decode("utf-16-le")))
+    if raw.voice:
+        return voice_caption_parts(raw, parts)
     if not raw.text or not any(entity.type == "mention" for entity in raw.entities):
         return parts
     # Text messages have optional Reply, ordered At components, then optional Plain.
@@ -125,9 +134,7 @@ def private_references(event):
     if (raw is None or str(raw.chat.id) != peer or raw.chat.type != "private"
             or str(getattr(raw.from_user, "id", None)) != peer or str(raw.message_id) != str(message.message_id)):
         raise TaskError("host_route_mismatch", "Telegram update does not match the private message")
-    origin = _origin(event, raw.forward_origin)
-    references = TelegramReferences(forward_origin=origin.label, forwarded_at=origin.sent_at,
-                                    forward_user_id=origin.user_id) if origin else TelegramReferences()
+    references = TelegramReferences(origin=_origin(event, raw.forward_origin))
     reply = next(((index, part) for index, part in enumerate(message.message)
                   if getattr(part.type, "value", part.type) == "Reply"), None)
     original = raw.reply_to_message

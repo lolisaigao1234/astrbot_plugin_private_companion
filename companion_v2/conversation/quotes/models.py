@@ -7,7 +7,7 @@ from companion_v2.conversation.media.models import (
     CapturedImage, ImageConversationEvent, ImageDescriptor, check_manifest, fits_budget,
 )
 from companion_v2.conversation.media.codec import image_descriptor
-from companion_v2.execution.models import TaskError
+from companion_v2.execution.models import TaskError, digest
 
 
 OWNER = "conversation.quote"
@@ -78,6 +78,13 @@ class TelegramForwardOrigin:
     label: str
     sent_at: int
     user_id: str | None
+
+    def resource_hash(self, message_id):
+        fields = ["telegram-forward", message_id, self.label, self.sent_at]
+        # Existing user-origin nodes separately prove the original Telegram user ID.
+        if self.user_id is None:
+            fields.append(self.kind)
+        return digest(fields)
 
     def attribution(self, sender):
         return f"转发者 {sender}，转发来源 {self.kind}：{self.label}，来源时间 {self.sent_at}"
