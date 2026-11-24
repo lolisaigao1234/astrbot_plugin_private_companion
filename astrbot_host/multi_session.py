@@ -192,14 +192,18 @@ class MultiPrivateBridge(NativePrivateBridge):
         return safe_text(event, "".join(pieces))
 
     async def prepare_telegram_album(self, event):
-        """Give AstrBot the same bounded direct photos that Companion admits."""
-        from astrbot.core.message.components import Image, Plain
+        """Keep album components within the shared budget before AstrBot builds its request."""
+        import base64
+        from astrbot.core.message.components import Image, Plain, Video
         from companion_v2.conversation.media.models import MAX_INPUT_IMAGES
+        from companion_v2.conversation.media.video.models import MAX_TURN_BYTES, MAX_VIDEO_BYTES
         from .core_reply_media import direct_image_locators, frozen_image_locators
+        from .core_reply_video_sources import video_positions
+        from .video.loader import fetch_native_video_bytes
 
         images = direct_image_locators(frozen_image_locators(event))
-        if not images:
-            return
+        message = event.message_obj
+        videos = {v.position: v for v in video_positions(event, video_type=Video)}
         limited = "[附件超过读取上限，本轮未读取]"
         replacements = {item.position: Plain(limited) for item in images[MAX_INPUT_IMAGES:]}
 
@@ -211,9 +215,23 @@ class MultiPrivateBridge(NativePrivateBridge):
                 return None
 
         admitted = await self._capture_images(images[:MAX_INPUT_IMAGES], load_optional=load_photo)
-        notes = list(dict.fromkeys(part.text for part in replacements.values()))
+        remaining = MAX_TURN_BYTES - sum(photo.descriptor.retained_bytes for photo in admitted)
         replacements.update((photo.descriptor.position, Image.fromBytes(photo.content)) for photo in admitted)
-        message = event.message_obj
+        for position, part in enumerate(message.message):
+            if type(part) is not Video:
+                continue
+            locator = videos.get(position)
+            if locator is None or remaining <= 0:
+                replacements[position] = Plain(limited)
+                continue
+            try:
+                content = await fetch_native_video_bytes(locator, maximum_bytes=min(remaining, MAX_VIDEO_BYTES))
+            except TaskError as exc:
+                replacements[position] = Plain(limited if exc.code == "host_video_limit" else "[附件不可用]")
+                continue
+            remaining -= len(content)
+            replacements[position] = Video(file="base64://" + base64.b64encode(content).decode("ascii"))
+        notes = list(dict.fromkeys(part.text for part in replacements.values() if isinstance(part, Plain)))
         message.message = [replacements.get(position, part) for position, part in enumerate(message.message)]
         if notes:
             event.message_str = "\n".join([event.message_str, *notes]).strip()

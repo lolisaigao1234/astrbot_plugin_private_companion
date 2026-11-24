@@ -112,6 +112,25 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual([row["owner"] for row in rows],
                          ["conversation.native_reference"] * 3 + ["conversation.native_input"])
 
+    async def test_long_forward_burst_keeps_each_source_and_owner_comment(self):
+        from astrbot_host.telegram_forward_burst import merge_forward_burst
+        from companion_v2.conversation.private_debounce import MAX_MERGED_CHARS
+
+        events = [await self.event(number=100+i, text=letter * 4096,
+            forward_origin={"type": "hidden_user", "sender_user_name": name, "date": 1700000000})
+            for i, (letter, name) in enumerate(zip("ABC", ("Ada", "Bo", "Chen")))]
+        comment = await self.event(number=103, text="compare their last points")
+        events.append(comment)
+        prepare = self.controller.prepare_core_reply_context
+        target = self.controller.settings.target("tg-owner")
+        plan = (await prepare(comment, target)).unwrap()
+        merged = await merge_forward_burst(comment, target, plan, [(e, "", None) for e in events], prepare)
+        self.assertLessEqual(len(merged.captured.text), MAX_MERGED_CHARS)
+        for letter, name in zip("ABC", ("Ada", "Bo", "Chen")):
+            self.assertIn(f"[转发消息，来源：{name}]\n{letter * 5}", comment.message_str)
+        self.assertTrue(comment.message_str.endswith("[发起人的留言]\ncompare their last points"))
+        self.assertEqual(len(merged.captured.telegram_burst), 4)
+
     async def test_forward_burst_ending_in_photo_keeps_media_and_comment(self):
         from astrbot_host.telegram_forward_burst import merge_forward_burst
         from tests.test_conversation_images import image_bytes
