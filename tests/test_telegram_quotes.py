@@ -177,7 +177,10 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
     async def test_partial_quote_in_a_forward_burst_keeps_the_selected_passage(self):
         await self.check_reply_to_forward(in_burst=True, partial=True)
 
-    async def check_reply_to_forward(self, *, in_burst, partial=False):
+    async def test_mentioned_comment_quoting_collected_forward_joins_burst(self):
+        await self.check_reply_to_forward(in_burst=True, mention=True)
+
+    async def check_reply_to_forward(self, *, in_burst, partial=False, mention=False):
         from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA
 
         plugin = self.started_plugin()
@@ -187,7 +190,9 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
         first = await make_forward(80, "first-body")
         second = await make_forward(81, "second-body")
         original = first if in_burst else await make_forward(67, "older-body")
-        comment = await self.event(number=82, text="my reply", reply_to_message=
+        comment_text = "my reply @reader" if mention else "my reply"
+        entities = {"entities": [{"type": "mention", "offset": 9, "length": 7}]} if mention else {}
+        comment = await self.event(number=82, text=comment_text, **entities, reply_to_message=
                                    original.message_obj.raw_message.message.to_dict(),
                                    **({"quote": {"text": "body", "position": 6}} if partial else {}))
         manager = plugin._private_debounce_manager()
@@ -219,7 +224,7 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
             payload = json.dumps(await request.assemble_context(), ensure_ascii=False)
             if partial:
                 self.assertIn("所选片段：body", burst.message_str)
-            for body in ("first-body", "second-body", "my reply"):
+            for body in ("first-body", "second-body", comment_text):
                 self.assertEqual(payload.count(body), 1)
         else:
             self.assertIn(comment, winners)
