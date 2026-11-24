@@ -168,7 +168,7 @@ window.CompanionStatePage = (() => {
     return overviewMarkup(feature,content.label,content.value,content.detail,rows,gauge);
   }
   function overviewMarkup(feature,label,value,detail,rows=[],extra="") {
-    return `<section class="state-workspace-overview${rows.length?"":" state-workspace-overview-readonly"}" aria-label="${e(featureInfo[feature]?.[0]||"状态")}当前情况"><div class="state-workspace-current"><span>${e(label)}</span><strong>${e(value)}</strong><small>${e(detail)}</small>${extra}</div>${rows.length?`<dl>${rows.map(([key,text])=>`<div><dt>${e(key)}</dt><dd>${e(text)}</dd></div>`).join("")}</dl>`:""}</section>`;
+    return `<section class="state-workspace-overview${rows.length?"":" state-workspace-overview-readonly"}" aria-label="${e(feature==="presentation"&&telegramTarget()?"正在输入提示":featureInfo[feature]?.[0]||"状态")}当前情况"><div class="state-workspace-current"><span>${e(label)}</span><strong>${e(value)}</strong><small>${e(detail)}</small>${extra}</div>${rows.length?`<dl>${rows.map(([key,text])=>`<div><dt>${e(key)}</dt><dd>${e(text)}</dd></div>`).join("")}</dl>`:""}</section>`;
   }
   function relatedSettings(cards) {
     return `<nav class="state-config-related" aria-label="相关设置"><h4>相关设置</h4>${cards.map(([title,description,icon,attribute])=>`<button type="button" class="state-config-link" ${attribute}><i data-lucide="${icon}" aria-hidden="true"></i><span><strong>${title}</strong><small>${description}</small></span><i data-lucide="chevron-right" aria-hidden="true"></i></button>`).join("")}</nav>`;
@@ -273,7 +273,7 @@ window.CompanionStatePage = (() => {
   };
   function openFeatureEditor(feature) {
     const kind=featureEditors[feature];
-    if(kind && !(feature==="presentation" && telegramTarget()))editor?.open(kind);
+    if(kind && !(feature==="presentation" && telegramTarget() && !data.windowSelected))editor?.open(kind);
   }
   function dashboardItem(feature,label,value,icon,detail="",tone="") {
     const energy=feature==="energy"&&typeof value==="number";
@@ -350,19 +350,21 @@ window.CompanionStatePage = (() => {
     const local=options=>{try{return new Intl.DateTimeFormat("zh-CN",{timeZone:zone,...options}).format(new Date());}catch{return "时区待核对";}};
     const location=window.CompanionStateMaintenance?.weatherLocationParts(settings.planning_weather_location)?.name;
     const cards=[
-      {name:"presentation",label:"QQ 状态",icon:"radio-tower",value:`${[settings.typing_enabled,settings.presence_enabled,settings.online_status_enabled].filter(Boolean).length} 项已开启`,help:"正在输入提示 · 在线状态 · 自定义短状态"},
+      telegramTarget()
+        ? {name:"presentation",label:"正在输入提示",icon:"radio-tower",value:data.windowSelected?(settings.typing_enabled?"已开启":"已关闭"):"未选择私聊窗口",help:"当前私聊窗口 · 输入提示刷新间隔"}
+        : {name:"presentation",label:"QQ 状态",icon:"radio-tower",value:`${[settings.typing_enabled,settings.presence_enabled,settings.online_status_enabled].filter(Boolean).length} 项已开启`,help:"正在输入提示 · 在线状态 · 自定义短状态"},
       {name:"planning",label:"日程配置",icon:"calendar-days",value:settings.calendar_enabled?(settings.schedule_simulation_mode==="continuous"?"连续日程":"日程编排"):"日程已关闭",help:"规划方式 · 安排与公开文案"},
       {name:"weather",label:"天气",icon:"cloud-sun",value:settings.planning_weather_enabled?(location||"地点待配置"):"天气感知已关闭",help:"角色所在地 · 实况信息时效"},
       {name:"datetime",label:"时间与日期",icon:"calendar-clock",value:local({hour:"2-digit",minute:"2-digit",hourCycle:"h23"})+" · "+local({month:"long",day:"numeric",weekday:"long"}),help:zone+" · 日期背景"},
     ];
-    return `<nav class="state-extra-nav" aria-label="日程与环境状态设置">${cards.filter(card=>card.name!=="presentation"||!telegramTarget()).map(({name,label,icon,value,help,action})=>
+    return `<nav class="state-extra-nav" aria-label="日程与环境状态设置">${cards.map(({name,label,icon,value,help,action})=>
       `<button type="button" id="state-extra-${name}" class="state-extra-card" ${action||`data-state-feature="${name}" aria-expanded="${activeFeature===name}" aria-controls="state-feature-detail"`}><i data-lucide="${icon}" aria-hidden="true"></i><span class="state-extra-copy"><strong>${label}</strong><span>${e(value)}</span><small>${e(help)}</small></span><i class="state-extra-arrow" data-lucide="chevron-right" aria-hidden="true"></i></button>`).join("")}</nav>`;
   }
   function featurePanelMarkup(status,feature=activeFeature) {
     if(!feature||!featureInfo[feature])return "";
-    if(feature==="presentation" && telegramTarget())
-      return '<section class="panel state-config-note"><h3>Telegram 展示设置</h3><p>在线状态和自定义短状态仅适用于 QQ。</p><button type="button" data-state-feature-close>返回状态看板</button></section>';
-    const [title,icon]=featureInfo[feature],values=status.state?.values||{},settings=status.settings||{};
+    const telegramTyping=feature==="presentation"&&telegramTarget();
+    const [title,icon]=telegramTyping?["Telegram 正在输入提示","radio-tower"]:featureInfo[feature];
+    const values=status.state?.values||{},settings=status.settings||{};
     let body="";
     if(feature==="energy")body=workspaceOverview(status,feature)+(editor?.markup({feature,related:relatedSettings([["生理期 · 周期精力偏移","六阶段的精力偏移在「生理期」子页面里单独设置。","calendar-heart",'data-state-open-feature="cycle"']])})||"");
     else if(feature==="sleep") {
@@ -394,6 +396,11 @@ window.CompanionStatePage = (() => {
       const local=options=>{try{return new Intl.DateTimeFormat("zh-CN",{timeZone:zone,...options}).format(new Date());}catch{return "时区待核对";}};
       body=overviewMarkup(feature,"当地时间与日期",local({hour:"2-digit",minute:"2-digit",hourCycle:"h23"})+" · "+local({year:"numeric",month:"long",day:"numeric",weekday:"long"}),"按角色时区计算；对话日期背景在感知设置中维护。",[["小屋与日程时区",zone],["日期来源","当前系统时间按时区换算"]])
         +(editor?.markup({feature,related:relatedSettings([["日期与历法背景","设置对话日期时区、日期开关、节假日、农历与节气。","calendar-days","data-state-date-settings"]])})||"");
+    } else if(telegramTyping) {
+      if(data.windowSelected){
+        body=overviewMarkup(feature,"正在输入提示",settings.typing_enabled?"已开启":"已关闭","设置仅对当前 Telegram 私聊窗口生效。",
+          [["输入提示刷新间隔",`${settings.typing_refresh_seconds??"未提供"} 秒`]])+(editor?.markup({feature})||"");
+      }else body='<p class="state-config-note">请选择当前角色的私聊窗口查看和设置。</p>';
     } else if(feature==="presentation") {
       const diag=status.presentation_diagnostics,enabled=[settings.typing_enabled,settings.presence_enabled].filter(Boolean).length;
       const channel=(name,value)=>{
@@ -406,8 +413,8 @@ window.CompanionStatePage = (() => {
       };
       body=overviewMarkup(feature,"展示通道",`${enabled} 项开关已开启`,"受理确认只说明请求被平台接受，不代表客户端当前展示状态。",[["正在输入",channel("typing_enabled",diag?.typing)],["自定义短状态",channel("presence_enabled",diag?.custom_status)],["输入提示刷新间隔",data.windowSelected?`${settings.typing_refresh_seconds??"未提供"} 秒（取值 1–10）`:"未选择私聊窗口"],["诊断时间",diag?.observed_at?when(diag.observed_at):"尚无诊断记录"]])+(editor?.markup({feature,details:presentationMarkup(status,{receiptsOnly:true})})||"");
     } else body=workspaceOverview(status,feature)+(editor?.markup({feature})||"");
-    const scopePill=featureScopes[feature]||"当前角色";
-    const subtitle=featureSubtitles[feature]||"";
+    const scopePill=telegramTyping?"当前私聊窗口":featureScopes[feature]||"当前角色";
+    const subtitle=telegramTyping?"配置当前窗口的正在输入提示与刷新间隔。":featureSubtitles[feature]||"";
     return `<section id="state-feature-detail" class="state-feature-detail state-config-page" data-state-config-feature="${feature}" aria-labelledby="state-feature-title">
       <header><button type="button" class="state-feature-back" data-state-feature-close aria-label="收起${title}" title="返回状态看板" ${editor?.busy?"disabled":""}><i data-lucide="arrow-left" aria-hidden="true"></i></button><div class="state-feature-head-main">
           <span class="state-eyebrow">状态 · ${title}</span>
@@ -487,7 +494,7 @@ window.CompanionStatePage = (() => {
       return true;
     }
     pendingEditor=null;
-    if(targetKind==="settings" && telegramTarget())return false;
+    if(targetKind==="settings" && telegramTarget() && (!data.windowSelected || (field && !["typing_enabled","typing_refresh_seconds"].includes(field))))return false;
     if(editor&&!editor.discardIfPristine())return false;
     if(targetKind==="home"){
       if(!settingsOpen){settingsReturnFeature=activeFeature;settingsReturnFocus=document.activeElement;}
@@ -593,7 +600,7 @@ window.CompanionStatePage = (() => {
   function render() {
     if (!root?.isConnected || !data) return;
     const status=data.status,roleTarget=target(),contactView=section==="contact",weatherView=section==="weather",patrolView=section==="patrol";
-    if(role()?.state_api&&data.catalog)editor?.setScope({installation_id:data.catalog.installation_id,operator_id:data.catalog.operator_id,path:endpoint(),window_selected:data.windowSelected});
+    if(role()?.state_api&&data.catalog)editor?.setScope({installation_id:data.catalog.installation_id,operator_id:data.catalog.operator_id,path:endpoint(),telegram:telegramTarget(),window_selected:data.windowSelected});
     else editor?.invalidate();
     editor?.setStatus(status,data.loading);
     if(!contactView&&editor?.requiredFeature) {
