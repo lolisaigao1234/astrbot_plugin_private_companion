@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import defaultdict
 from collections.abc import Mapping
 from time import monotonic
 
@@ -29,6 +30,10 @@ def platform_label(value, native_id=""):
     return "" if text == str(native_id) or not native_id and _identifier(text) else text
 
 
+def telegram_placeholder(value):
+    return _name(value).casefold() == "unknown"
+
+
 def event_person_names(event):
     """Read names for the authenticated sender, never quoted or mentioned users."""
     message = event.message_obj
@@ -45,7 +50,7 @@ def event_person_names(event):
 
         def part(field):
             value = _name(getattr(author, field, None))
-            return "" if value.casefold() == "unknown" else value
+            return "" if telegram_placeholder(value) else value
 
         full_name = " ".join(filter(None, (part("first_name"), part("last_name"))))
         return _name(full_name) or part("username"), ""
@@ -69,8 +74,16 @@ def event_person_names(event):
 def configured_platform_families(context):
     """Adapter types keyed by instance ID, available before adapters connect."""
     try:
-        return {row["id"]: row["type"] for row in context.get_config().get("platform", ())
-                if isinstance(row, Mapping) and row.get("id") and row.get("type")}
+        matches = defaultdict(list)
+        for row in context.get_config().get("platform", ()):
+            if isinstance(row, Mapping) and row.get("id"):
+                matches[row["id"]].append(row)
+        families = {}
+        for instance, rows in matches.items():
+            candidates = rows if len(rows) == 1 else [row for row in rows if row.get("enable") is True]
+            if candidates and candidates[-1].get("type"):
+                families[instance] = candidates[-1]["type"]
+        return families
     except (AttributeError, TypeError, ValueError):
         return {}
 
@@ -190,6 +203,8 @@ class PlatformDisplayNames:
             fallback = ((platform_label(row.get("group_name"), native_id)
                          or platform_label(row.get("display_name"), native_id))
                         if kind == "group" else _name(row.get("display_name")))
+            if kind == "private" and row.get("platform_name") == "telegram" and telegram_placeholder(fallback):
+                fallback = ""
             resolved = (_name(row.get("remark")) if kind == "group" else "") or platform_label(name, native_id) or fallback
             row.update(display_name=resolved,
                        account_name=account_name or row.get("account_name") or "")
@@ -208,6 +223,9 @@ class PlatformDisplayNames:
                                      row.get("native_account_id"), cached_only=cached_only)
             if name:
                 row.update(display_name=name, name_basis="platform")
+            elif (row.get("platform_name") == "telegram" and row.get("name_basis") == "platform"
+                  and telegram_placeholder(row.get("display_name"))):
+                row.update(display_name=None, name_basis=None)
             return row
         rows = self.with_platform_family(persons, "platform", cached_only=cached_only)
         return list(await asyncio.gather(*(enrich(row) for row in rows)))

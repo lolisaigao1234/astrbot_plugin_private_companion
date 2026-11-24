@@ -546,6 +546,19 @@ class TelegramPrivateAdmissionTests(TelegramHostFixture, unittest.IsolatedAsynci
             rows = json.loads(directory.path.read_text(encoding="utf-8"))
             self.assertEqual([row.get("display_name", "") for row in rows.values()], [expected])
 
+    async def test_directory_reads_old_telegram_observations_without_the_placeholder(self):
+        event = telegram_event(self.platform)
+        directory = self.controller.session_topology
+        await directory.observe(event)
+        rows = json.loads(directory.path.read_text(encoding="utf-8"))
+        stored = next(iter(rows.values()))
+        for name, expected in (("Unknown", ""), ("Unknown Artist", "Unknown Artist")):
+            stored["display_name"] = name
+            directory.path.write_text(json.dumps(rows), encoding="utf-8")
+            windows = await directory.inventory()
+            self.assertEqual([row.get("display_name", "") for row in windows
+                              if row.get("unified_msg_origin") == event.unified_msg_origin], [expected])
+
     async def test_private_text_is_admitted_with_the_bot_astrbot_rebuilt(self):
         await self.start_host()
         # AstrBot replaces the bot object after repeated polling errors (same token).
