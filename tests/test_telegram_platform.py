@@ -124,9 +124,9 @@ class TelegramPlatformTests(unittest.TestCase):
         self.assertEqual(refused.exception.code, "host_route_mismatch")
 
 
-async def group_event(platform, chat_id=-400, kind="group", topic=None, text="你好", number=22, **fields):
+async def group_event(platform, chat_id=-400, kind="group", topic=None, text="你好", message_id=22, **fields):
     chat = Chat(chat_id, kind, title=fields.pop("title", None), is_forum=True if topic else None)
-    message = Message(number, date=datetime.now(timezone.utc), chat=chat, text=text,
+    message = Message(message_id, date=datetime.now(timezone.utc), chat=chat, text=text,
                       from_user=fields.pop("from_user", User(OWNER, "Synthetic", False)),
                       message_thread_id=topic, is_topic_message=bool(topic), **fields)
     native = await platform.convert_message(Update(12, message=message), NS(bot=platform.client))
@@ -578,7 +578,7 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
 
         async def observe(topic, message_id, **fields):
             event = await group_event(self.platform, -100400, "supergroup", topic, title="Club",
-                                      number=message_id, **fields)
+                                      message_id=message_id, **fields)
             await directory.observe(event)
             return event.message_obj.raw_message.message
 
@@ -830,7 +830,7 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
         )
 
         async def event(number, text):
-            value = await group_event(self.platform, -100400, "supergroup", 23, text=text, number=number)
+            value = await group_event(self.platform, -100400, "supergroup", 23, text=text, message_id=number)
             value.created_at = self.clock.now().timestamp()
             return value
 
