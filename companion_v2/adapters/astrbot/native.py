@@ -993,6 +993,8 @@ class NativePrivateBridge:
             telegram_caption = meta.name == "telegram" and any(
                 getattr(part, "text", "").strip() for part in parts
                 if getattr(part.type, "value", part.type) == "Plain" and isinstance(part.text, str))
+            partial_media = telegram_caption or (
+                meta.name == "telegram" and bool(message.raw_message.message.media_group_id))
             if telegram and telegram.quote and not any(getattr(part.type, "value", part.type) == "Reply" for part in parts):
                 # The SDK replaces some reply chains with Record. Reserve position zero for the verified quote.
                 if len(parts) >= 128:
@@ -1044,11 +1046,11 @@ class NativePrivateBridge:
                     text_parts.append("[表情]")
                 else:
                     raise TaskError("host_media_unsupported", "this component needs its own governed source adapter")
-            if not telegram_caption and len(locators) > MAX_INPUT_IMAGES:
+            if not partial_media and len(locators) > MAX_INPUT_IMAGES:
                 raise TaskError("host_image_limit", "too many images in one input")
-            if not telegram_caption and len(video_locators) > MAX_VIDEOS:
+            if not partial_media and len(video_locators) > MAX_VIDEOS:
                 raise TaskError("host_video_limit", "too many video attachments in one input")
-            if not telegram_caption and len(audio_locators) > MAX_INPUT_AUDIOS:
+            if not partial_media and len(audio_locators) > MAX_INPUT_AUDIOS:
                 raise TaskError("host_audio_limit", "too many voice attachments in one input")
             if len(quote_locators) > 1:
                 raise TaskError("host_quote_unsupported", "one original reply component is supported per input")
@@ -1084,7 +1086,7 @@ class NativePrivateBridge:
                 if telegram is not None:
                     from .telegram_media import capture_turn_media
                     return await capture_turn_media(self, telegram, frozen_images, frozen_audios, frozen_videos,
-                                                    text_parts, telegram_caption)
+                                                    text_parts, partial_media)
                 images = await self._capture_images(frozen_images)
                 audios = []
                 for locator in frozen_audios:
@@ -1140,7 +1142,7 @@ class NativePrivateBridge:
                 try:
                     images, quotes, forwards, audios, videos = await asyncio.wait_for(prepare(), MEDIA_PREPARE_TIMEOUT)
                 except TaskError as error:
-                    if not telegram_caption or error.code not in {
+                    if not partial_media or error.code not in {
                         "host_audio_limit", "host_video_limit", "host_image_limit", "image_manifest_invalid"
                     }:
                         raise
@@ -1151,7 +1153,7 @@ class NativePrivateBridge:
                     text = "".join(text_parts)
                 except asyncio.TimeoutError:
                     raise TaskError("host_media_timeout", "attachment preparation exceeded its bounded intake time") from None
-            if telegram_caption:
+            if partial_media:
                 text = "".join(text_parts)
             if frozen_files:
                 file_text = await prepare_file_text(frozen_files, self.file_loader, file_preferences,
