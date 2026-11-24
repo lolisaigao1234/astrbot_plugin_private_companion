@@ -349,3 +349,76 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(quote.images), 1)
         self.assertEqual(len(frozen_image_locators(quoted)[0].images), 1)
         require(await self.controller.session.receive(quoted, target))
+
+    async def test_admitted_attachment_quotes_match_sdk_originals(self):
+        from contextlib import ExitStack
+        from pathlib import Path
+        from telegram import Document, Voice
+        from astrbot.core.message.components import File, Record
+        from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
+        from astrbot_host.audio.loader import load_native_audio
+        from tests.audio_support import audio_bytes
+        from tests.test_conversation_images import image_bytes
+
+        self.bridge.audio_type, self.bridge.audio_loader = Record, load_native_audio
+        self.bridge.file_type = File
+        session = self.controller.session
+        target = self.controller.settings.target("tg-owner")
+        bot = self.platform.client
+        bot.base_file_url = f"https://api.telegram.org/file/bot{bot.token}"
+        url = bot.base_file_url + "/synthetic/test.wav"
+        thumb = dict(file_id="thumb", file_unique_id="t", width=2, height=2)
+        sticker = dict(file_id="stk", file_unique_id="s", width=2, height=2, type="regular", emoji="🍀")
+        caption = "😀一个片段"
+        cases = [(dict(sticker=dict(sticker, is_video=video, is_animated=not video, thumbnail=preview)),
+                  ("\n[图片 1]\n" if preview else "") + "[贴纸 🍀]")
+                 for video in (True, False) for preview in (thumb, None)]
+        cases += [(dict(voice=dict(file_id="v", file_unique_id="v1", duration=1), caption=caption),
+                   "[语音消息]\n" + caption),
+                  (dict(document=dict(file_id="d", file_unique_id="d1", file_name="notes.txt"), caption=caption),
+                   "[文件 notes.txt]\n" + caption)]
+
+        async def download(url, *, path):
+            Path(path).write_bytes(audio_bytes())
+
+        Path(get_astrbot_temp_path()).mkdir(parents=True, exist_ok=True)
+        with ExitStack() as stack:
+            # Exercise admission and durable reads without scheduling unrelated reply generation.
+            stack.enter_context(patch.object(session.application, "worker_limit", 0))
+            for cls in (Voice, Document, PhotoSize):
+                stack.enter_context(patch.object(cls, "get_file", AsyncMock(return_value=NS(file_path=url))))
+            stack.enter_context(patch("astrbot.core.platform.sources.telegram.tg_adapter.download_file", download))
+            stack.enter_context(patch("astrbot_host.media.fetch_image", AsyncMock(return_value=image_bytes())))
+            for index, (fields, expected) in enumerate(cases):
+                with self.subTest(index=index):
+                    number = 300 + index * 10
+                    require(await session.receive(await self.event(number, **fields), target))
+                    original = self.message(number, **fields)
+                    event = await self.event(number + 1, text="继续", reply_to_message=original)
+                    require(await session.receive(event, target))
+                    core = require(await self.bridge.capture_core_reply(event))
+                    self.assertEqual(core.text, "继续")
+                    quote, = core.quotes
+                    self.assertEqual((quote.text, quote.sender_id, quote.sent_at), (expected, str(OWNER), 1700000000))
+                    self.assertEqual(self.observe(core)[0], "继续")
+                    quoted_text = self.quoted_evidence(core)
+                    self.assertIn(expected, quoted_text)
+                    self.assertIn(str(OWNER), quoted_text)
+                    self.assertIn("1700000000", quoted_text)
+                    if "caption" in fields:
+                        selection = await self.event(number + 2, text="选段", reply_to_message=original,
+                                                     quote={"text": "片段", "position": 4})
+                        require(await session.receive(selection, target))
+                        self.assertEqual(require(await self.bridge.capture_core_reply(selection)).quotes[0].text, "片段")
+                        changed = dict(original, caption="其他")
+                        altered = await self.event(number + 4, text="选段", reply_to_message=dict(original, caption=caption + "改"),
+                                                   quote={"text": "片段", "position": 4})
+                        self.assertEqual((await session.receive(altered, target)).failure.code, "quote_original_changed")
+                    else:
+                        changed = dict(original, sticker=dict(fields["sticker"], emoji="😀"))
+                    changed_event = await self.event(number + 3, text="?", reply_to_message=changed)
+                    self.assertEqual((await session.receive(changed_event, target)).failure.code, "quote_original_changed")
+        with self.controller.runtime.read_only_snapshot() as db:
+            rows = "\n".join(db.iterdump())
+        self.assertNotIn(bot.token, rows)
+        self.assertNotIn("/synthetic/test.wav", rows)
