@@ -1052,14 +1052,13 @@ class NativePrivateBridge:
                 else:
                     raise TaskError("host_media_unsupported", "this component needs its own governed source adapter")
             if telegram_caption:
-                for media, limit in ((locators, MAX_INPUT_IMAGES), (audio_locators, MAX_INPUT_AUDIOS),
-                                     (video_locators, MAX_VIDEOS)):
+                for media, limit in ((locators, MAX_INPUT_IMAGES), (audio_locators, MAX_INPUT_AUDIOS)):
                     for extra in media[limit:]:
                         text_parts[extra.position] = "[附件超过读取上限]"
                     del media[limit:]
             if len(locators) > MAX_INPUT_IMAGES:
                 raise TaskError("host_image_limit", "too many images in one input")
-            if len(video_locators) > MAX_VIDEOS:
+            if not telegram_caption and len(video_locators) > MAX_VIDEOS:
                 raise TaskError("host_video_limit", "too many video attachments in one input")
             if len(audio_locators) > MAX_INPUT_AUDIOS:
                 raise TaskError("host_audio_limit", "too many voice attachments in one input")
@@ -1122,7 +1121,11 @@ class NativePrivateBridge:
                 if telegram and telegram.quote:
                     quote = telegram.quote
                     try:
-                        quote = replace(quote, images=await self._capture_images(telegram.images))
+                        quoted_images = await self._capture_images(telegram.images)
+                        if not telegram_caption or fits_audio_budget(
+                                tuple(a.descriptor for a in audios),
+                                tuple(i.descriptor for i in (*images, *quoted_images))):
+                            quote = replace(quote, images=quoted_images)
                     except TaskError as error:
                         if not telegram_caption or error.code != "host_image_limit":
                             raise
@@ -1158,6 +1161,9 @@ class NativePrivateBridge:
                     raise TaskError("host_audio_limit", "voice and visual attachments exceed the shared intake budget")
                 direct_videos = []
                 for locator in frozen_videos:
+                    if telegram_caption and len(direct_videos) >= MAX_VIDEOS:
+                        text_parts[locator.position] = "[附件超过读取上限，本轮未读取]"
+                        continue
                     video = await load_optional(self.video_loader, locator)
                     if video is None and telegram_caption:
                         continue

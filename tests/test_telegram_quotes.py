@@ -441,6 +441,54 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
             payload = session.application.messages._read_source(saved.source, context, "text", self.clock.now()).payload
             self.assertEqual(json.loads(payload)["image_sources"][0]["original_sender"], str(sender))
 
+    async def test_shared_photo_budget(self):
+        from tests.test_conversation_images import image_bytes
+        photo = dict(file_id="quoted", file_unique_id="x", width=2, height=2)
+        direct, quoted = image_bytes("red"), image_bytes("blue")
+        async def get_file(size, *args, **kwargs):
+            data = direct if size.file_id == "direct" else quoted
+            return NS(file_path="base64://" + base64.b64encode(data).decode())
+        with patch.object(PhotoSize, "get_file", get_file):
+            event = await self.event(photo=[dict(photo, file_id="direct")], caption="current",
+                reply_to_message=self.message(10, 424242, photo=[photo], caption="original"))
+        with patch("companion_v2.conversation.media.models.MAX_TURN_BYTES", max(len(direct), len(quoted))):
+            captured = require(await self.bridge.capture(event))
+        self.assertEqual([image.content for image in captured.images], [direct])
+        self.assertIn("current", captured.text)
+        quote, = captured.quotes
+        self.assertEqual((quote.message_id, quote.sender_id, quote.sent_at, quote.images),
+                         ("10", "424242", 1700000000, ()))
+        self.assertIn("original", quote.text)
+
+    async def test_forward_provider_budget(self):
+        from astrbot.core.astr_main_agent import collect_initial_request
+        from tests.test_conversation_images import image_bytes
+        photos = [image_bytes("red"), image_bytes("blue")]
+        events = []
+        for index, content in enumerate(photos):
+            with patch.object(PhotoSize, "get_file", AsyncMock(return_value=NS(
+                    file_path="base64://" + base64.b64encode(content).decode()))):
+                events.append(await self.event(number=80+index, caption=f"caption-{index}",
+                    photo=[dict(file_id="x", file_unique_id="x", width=2, height=2)],
+                    forward_origin=dict(type="hidden_user", sender_user_name=f"source-{index}", date=1700000000)))
+        comment = await self.event(number=82, text="compare these")
+        from astrbot_host.telegram_forward_burst import merge_forward_burst
+        target = self.controller.settings.target("tg-owner")
+        prepare = self.controller.prepare_core_reply_context
+        plan = require(await prepare(comment, target))
+        entries = [(event, "", None) for event in (*events, comment)]
+        plan = await merge_forward_burst(comment, target, plan, entries, prepare)
+        self.assertEqual([item.event_id for item in plan.captured.telegram_burst], ["80", "81", "82"])
+        with patch("companion_v2.conversation.media.models.MAX_TURN_BYTES", max(map(len, photos))):
+            require(await self.controller.prepare_core_reply(comment, target, plan=plan))
+        with patch("astrbot.core.astr_main_agent._get_session_conv", AsyncMock(return_value=NS(history="[]"))):
+            request, _ = await collect_initial_request(comment, NS(), NS(provider_wake_prefix="", provider_settings={}))
+        payload = await request.assemble_context()
+        self.assertEqual([base64.b64decode(p["image_url"]["url"].split(",")[1])
+                          for p in payload["content"] if p["type"] == "image_url"], photos[:1])
+        for text in ("source-0", "source-1", "caption-0", "caption-1", "compare these", "附件超过读取上限"):
+            self.assertIn(text, json.dumps(payload, ensure_ascii=False))
+
     async def test_oversized_quoted_photo_keeps_original_attribution_and_caption(self):
         from astrbot_host.media import load_native_image
         from tests.test_conversation_images import image_bytes
