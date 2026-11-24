@@ -80,9 +80,13 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
             for i, (author, body) in enumerate((("Ada", "first-paper"), ("Bo", "second-paper"),
                                                 ("Chen", "third-paper")))]
         events.append(await self.event(number=83, text="my-comment"))
+        earlier = await self.event(number=79, text="previous turn")
+        active = plugin._private_reply_followups().start(
+            "tg-owner", earlier, "79", ((earlier, "previous turn", earlier.created_at),))
         with patch.object(self.controller, "prepare_core_reply",
                           wraps=self.controller.prepare_core_reply) as prepare:
             await asyncio.gather(*(plugin.receive_companion_message(item) for item in events))
+        self.assertEqual([entry[1] for entry in active.entries], ["previous turn"])
         self.assertEqual(prepare.await_count, 1)
         winner, = [item for item in events if item.get_extra(CORE_REPLY_CONTEXT_EXTRA)]
         original = winner.get_extra(CORE_REPLY_CONTEXT_EXTRA)["prepared"]["native_input"]

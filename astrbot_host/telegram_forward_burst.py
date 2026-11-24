@@ -10,7 +10,7 @@ from .core_reply_forwards import MAX_CORE_FORWARD_IMAGES, component_kind
 
 
 async def merge_forward_burst(event, target, plan, entries, prepare_context):
-    originals, parts, sections = [], [], []
+    verified, parts, sections = [], [], []
     remaining_text = MAX_MERGED_CHARS
     remaining_media = MAX_CORE_FORWARD_IMAGES
     for source_event, _, _ in entries:
@@ -25,7 +25,13 @@ async def merge_forward_burst(event, target, plan, entries, prepare_context):
                 or item.principal != plan.captured.principal or item.route != plan.captured.route
                 or item.role != plan.captured.role or item.recipients != plan.captured.recipients):
             continue
-        originals.append(item)
+        verified.append((item, source_event))
+    if len(verified) < 2 or not any(item.forward_origin for item, _ in verified):
+        return plan
+    # Intake awaits can complete out of order. Telegram orders messages in this chat by ID.
+    verified.sort(key=lambda pair: int(pair[0].event_id))
+    originals = tuple(item for item, _ in verified)
+    for item, source_event in verified:
         header = f"[转发消息，来源：{item.forward_origin}]\n" if item.forward_origin else "[发起人的留言]\n"
         body = item.text.removeprefix(header) if item.forward_origin else item.text
         prefix = ("\n\n" if sections else "") + header
@@ -40,10 +46,8 @@ async def merge_forward_burst(event, target, plan, entries, prepare_context):
             if remaining_media and component_kind(part) in {"Image", "Record", "Video", "File"}:
                 parts.append(part)
                 remaining_media -= 1
-    if len(originals) < 2 or not any(item.forward_origin for item in originals):
-        return plan
     text = "".join(sections)
     event.message_obj.message = parts
     event.message_str = event.message_obj.message_str = text
     return replace(plan, captured=replace(plan.captured, text=text, forward_origin="",
-                   merged_event_ids=tuple(item.event_id for item in originals), telegram_burst=tuple(originals)))
+                   merged_event_ids=tuple(item.event_id for item in originals), telegram_burst=originals))
