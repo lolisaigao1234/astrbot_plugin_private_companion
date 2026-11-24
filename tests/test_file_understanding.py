@@ -109,6 +109,32 @@ class FileUnderstandingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(entry["status"], "文件理解未启用，未读取正文")
         self.assertEqual(entry["component_position"], 2)
 
+    async def test_telegram_documents_share_capacity_with_direct_and_quoted_media(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from companion_v2.adapters.astrbot.telegram_media import remaining_file_budget
+
+        def media(size):
+            return SimpleNamespace(descriptor=SimpleNamespace(retained_bytes=size))
+        with patch("companion_v2.conversation.media.models.MAX_TURN_BYTES", 23):
+            budget = remaining_file_budget(True, [media(8)], [media(1)], [media(2)],
+                                           [SimpleNamespace(images=[media(5)])])
+        self.assertEqual(budget, 7)
+        limits = []
+        async def load(locator, *, maximum_bytes, **kwargs):
+            limits.append(maximum_bytes)
+            return extract_document(b"four" if locator.position == 0 else b"abc",
+                                    locator.position, locator.name, maximum_chars=32)
+        files = [NativeFileLocator(pos, f"file{pos}.txt", f"source{pos}") for pos in range(3)]
+        for scope in (ScopeKind.PRIVATE, ScopeKind.GROUP):
+            with self.subTest(scope=scope):
+                limits.clear()
+                rendered = await prepare_file_text(files, load, settings({**DEFAULTS,
+                    "file_understanding_enabled": True, f"file_understanding_{scope.value}_enabled": True}),
+                    client=None, scope=scope, byte_budget=budget)
+                self.assertEqual(limits, [7, 3])
+                self.assertIn("上限", rendered[2])
+
     async def test_disallowed_scope_does_not_call_the_attachment_loader(self):
         async def forbidden(*_args, **_kwargs):
             raise AssertionError("a disallowed scope must not read attachment bytes")

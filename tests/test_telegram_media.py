@@ -239,6 +239,19 @@ class TelegramCaptureTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase
     async def test_mixed_album_keeps_later_videos_after_oversized_first(self):
         await self.check_mixed_album(oversized_first=True)
 
+    async def test_uncaptioned_album_keeps_unavailable_quote_marker(self):
+        from astrbot_host.media import load_native_image
+        from tests.test_conversation_images import image_bytes
+
+        self.bridge.image_type, self.bridge.image_loader = Image, load_native_image
+        await self.convert(photo=[dict(file_id="photo", file_unique_id="p1", width=3, height=2)],
+                           media_group_id="album", external_reply={"origin": {
+                               "type": "hidden_user", "sender_user_name": "X", "date": 1700000000}})
+        with patch("astrbot_host.media.fetch_image", AsyncMock(return_value=image_bytes("red"))):
+            captured = (await self.bridge.capture(self.event)).unwrap()
+        self.assertEqual(len(captured.images), 1)
+        self.assertEqual(captured.text.count("引用消息不可用"), 1)
+
     async def test_uncaptioned_mixed_album_keeps_accepted_media(self):
         await self.check_mixed_album(oversized_first=False, caption=None)
 
