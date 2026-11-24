@@ -83,6 +83,16 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
             self.assertEqual(facts["quoted_bot_message"], author == self.platform.client.id)
             self.assertEqual(facts["bot_account_id"], str(self.platform.client.id))
 
+            from companion_v2.conversation.generation import LocalReplyGenerator
+            generator = self.controller.session.application.generator
+            self.assertEqual(generator.resolve_bot_sender(native.route.scope), self.platform.client.id)
+            request = NS(context=NS(materials=()), images=(), audios=(),
+                         event=NS(scope=NS(kind=native.route.scope.kind, account_id=str(OWNER)),
+                                  principal=native.principal, quotes=native.quotes))
+            local = LocalReplyGenerator._laya_facts(request, lambda scope: generator.resolve_bot_sender(native.route.scope))
+            self.assertFalse(local.get("is_bot_message", False))
+            self.assertEqual(local.get("quoted_bot_message", False), author == self.platform.client.id)
+
     async def test_private_quotes_preserve_original_source_and_selected_text(self):
         from astrbot.core.utils.quoted_message.chain_parser import ReplyChainParser
 
