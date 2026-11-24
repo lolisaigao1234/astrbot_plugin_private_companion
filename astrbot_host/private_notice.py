@@ -107,7 +107,11 @@ async def send_group_notice(controller, route, *, text, mention_id="", transport
             # use an explicit text-link entity on the one outgoing message.
             from telegram import MessageEntity
             chat, _, topic = peer.partition("#")
-            label = "@" + mention
+            from companion_v2.adapters.astrbot.telegram_wire import member_usernames
+            username = (await member_usernames(route.client, peer, [mention])).get(mention)
+            if lease is not None:
+                controller.session.bridge.connections.assert_current(lease)
+            label = f"@{username}" if username else "成员"
             entity = MessageEntity("text_link", 0, len(label), url="tg://user?id=" + mention)
             chat_id, topic_id = chat, int(topic) if topic else None
             with redact_telegram_token(route.client):

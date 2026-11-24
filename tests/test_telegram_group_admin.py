@@ -22,9 +22,10 @@ class TelegramAdministrationTests(unittest.IsolatedAsyncioTestCase):
         async with httpx.AsyncClient(transport=transport) as http:
             async def lookup(*, chat_id, user_id):
                 await http.post(f"https://telegram.invalid/bot{bot.token}/getChatMember")
-                return NS(user=NS(id=user_id), status="member")
+                return NS(user=NS(id=user_id, username="reader"), status="member")
 
             async def send(**kwargs):
+                self.assertEqual(kwargs["text"], "@reader Hello")
                 await http.post(f"https://telegram.invalid/bot{bot.token}/sendMessage")
 
             bot.get_chat_member = lookup
@@ -35,7 +36,8 @@ class TelegramAdministrationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(standing["role"], "member")
         self.assertEqual(receipt["state"], "delivered")
-        lookup_record, send_record = logs.records
+        lookup_record, mention_lookup, send_record = logs.records
+        self.assertIn("/bot[redacted]/getChatMember", mention_lookup.getMessage())
         self.assertIn("/bot[redacted]/getChatMember", lookup_record.getMessage())
         self.assertIn("/bot[redacted]/sendMessage", send_record.getMessage())
         for record in logs.records:
