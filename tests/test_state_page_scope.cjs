@@ -10,7 +10,7 @@ function harness(windowKind="none",section="state") {
   const requests=[],scopes=[],statuses=[];
   const targets=[
     {target_id:"representative",bot_id:"bot-1",scope_kind:"private"},
-    {target_id:"selected",platform_id:"default",platform_name:windowKind==="telegram"?"telegram":"aiocqhttp",bot_id:windowKind==="other_bot"?"bot-2":"bot-1",scope_kind:windowKind==="group"?"group":"private"},
+    {target_id:"selected",platform_id:"default",platform_name:["telegram","unknown"].includes(windowKind)?windowKind:"aiocqhttp",bot_id:windowKind==="other_bot"?"bot-2":"bot-1",scope_kind:windowKind==="group"?"group":"private"},
   ].map(target=>({...target,roles:[{role_id:"role-1",state_api:`/astrbot_plugin_private_companion/state/${target.target_id}`}]}));
   const status={state:{values:{energy:70}},settings:{enabled:true,presence_enabled:true,online_status_enabled:false,
     typing_enabled:true,typing_refresh_seconds:7},sleep_schedule:{},role_edit_token:"role-edit",edit_token:"window-edit",
@@ -73,5 +73,14 @@ test("a Telegram presentation link displays window typing and hides QQ channels"
   assert.doesNotMatch(h.root.innerHTML,/QQ 状态|在线状态|自定义短状态/);
   assert.equal(h.page.openEditor("settings","typing_refresh_seconds"),true);
   assert.equal(h.page.openEditor("settings","online_status_enabled"),false);
+  h.page.unmount();
+});
+
+test("an unavailable adapter exposes no platform-specific presentation controls", async()=>{
+  const h=harness("unknown");await h.ready;
+  assert.doesNotMatch(h.root.innerHTML,/QQ 状态|Telegram 正在输入|在线状态|自定义短状态/);
+  assert.equal(h.page.openFeature("presentation"),false);
+  assert.equal(h.page.openEditor("settings","online_status_enabled"),false);
+  assert.equal(h.scopes.at(-1).unknownPlatform,true);
   h.page.unmount();
 });
