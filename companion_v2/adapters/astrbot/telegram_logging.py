@@ -63,3 +63,8 @@ def redact_telegram_token(client):
             if not _active_sends:
                 for logger in _loggers:
                     logger.removeFilter(_redact)
+
+
+def redact_event_token(event):
+    telegram = getattr(getattr(event, "platform_meta", None), "name", None) == "telegram"
+    return redact_telegram_token(getattr(event, "client", None) if telegram else None)

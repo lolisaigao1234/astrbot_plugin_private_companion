@@ -28,6 +28,7 @@ from companion_v2.adapters.astrbot.native import event_native_client, native_cli
 from companion_v2.adapters.astrbot.platform_sender import AstrBotPlatformSender
 from companion_v2.delivery.models import DeliveryEnvelope
 from companion_v2.execution.models import ProviderBinding, TaskError, digest, require
+from companion_v2.foundation.outcome import Outcome
 from companion_v2.foundation.refs import ScopeKind
 from tests.multi_host_support import MultiFixture, multi_config
 from tests.test_main_no_reply import ENTRY
@@ -525,6 +526,30 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
         for record, method in zip(logs.records, methods):
             self.assertIn(f"/bot[redacted]/{method}", record.getMessage())
             self.assertNotIn(token, repr(record.args))
+
+    async def test_httpx_logs_redact_managed_replies_and_tool_sends(self):
+        from astrbot.core.message.message_event_result import MessageChain
+        from astrbot_host.core_reply import prepare_core_reply_event
+        from astrbot_host.core_reply_native_send import _CurrentReplyContext
+
+        token = self.platform.client.token
+
+        async def message(*args, **kwargs):
+            async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200))) as http:
+                await http.post(f"https://telegram.invalid/bot{token}/sendMessage")
+
+        self.platform.client.send_chat_action = AsyncMock()
+        self.platform.client.send_message.side_effect = message
+        event = telegram_event(self.platform)
+        event = self.platform.create_event(event.message_obj)
+        prepare_core_reply_event(event, {}, authorize=AsyncMock(return_value=Outcome.success({})))
+        reply = _CurrentReplyContext(None, NS(_event=event), {})
+        reply._send_message = lambda _, chain: self.platform.client.send_message(text=chain.get_plain_text())
+        with self.assertLogs("httpx", "INFO") as logs:
+            await event.send(MessageChain().message("回复"))
+            await reply.send_message(event.unified_msg_origin, MessageChain().message("工具回复"))
+        self.assertEqual(len(logs.records), 2)
+        self.assertNotIn(token, " ".join(logs.output))
 
     async def test_unavailable_refusal_classifier_keeps_dispatch_unknown(self):
         self.platform.client.send_message.side_effect = NetworkError("connection lost")

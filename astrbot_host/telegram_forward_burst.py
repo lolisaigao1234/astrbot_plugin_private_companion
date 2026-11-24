@@ -6,6 +6,7 @@ from astrbot.core.message.components import Plain
 
 from companion_v2.conversation.private_debounce import MAX_MERGED_CHARS
 
+from .binding import BURST_SENDER_TEXT_EXTRA
 from .core_reply_forwards import MAX_CORE_FORWARD_IMAGES, component_kind, quoted_telegram_forward
 
 
@@ -13,6 +14,13 @@ def _quoted_lines(text):
     # Keep user-written section markers visibly inside the body that supplied them.
     return "\n".join("│ " + line if line.lstrip().startswith("[") else line
                      for line in text.splitlines())
+
+
+def sender_section(original, prompt, text):
+    """Keep a comment folded into a forward's pending turn apart from the forwarded words."""
+    if getattr(original, "forward_origin", "") and isinstance(prompt, str):
+        prompt = _quoted_lines(prompt)
+    return prompt, "[发起人的留言]\n" + _quoted_lines(text)
 
 
 def _origin_label(name):
@@ -129,7 +137,7 @@ async def bounded_file_component(event, locator, remaining, preferences, scope, 
     except TimeoutError:
         # A cancelled prefetch can have consumed at most the offered document allowance.
         return Plain(f"[文件 {locator.name}：文件读取超时，本轮未读取]"), maximum_bytes
-    except (aiohttp.ClientError, OSError):
+    except (aiohttp.ClientError, OSError, RuntimeError):
         raise TaskError("host_file_unavailable", "document could not be retrieved") from None
     directory = Path(get_astrbot_temp_path())
     directory.mkdir(parents=True, exist_ok=True)
@@ -187,7 +195,11 @@ async def merge_forward_burst(event, target, plan, entries, prepare_context):
         parts.append(Plain(text=note))
         sections.append(note)
     text = "".join(sections)
+    event.set_extra(BURST_SENDER_TEXT_EXTRA, "\n".join(
+        str(source_event.message_str or "") for item, source_event in verified if not item.forward_origin))
     event.message_obj.message = parts
     event.message_str = event.message_obj.message_str = text
-    return replace(plan, captured=replace(plan.captured, text=text, forward_origin="",
+    # The sections above already show which collected forward a comment replies to.
+    quotes = () if plan.captured.event_id in replies else plan.captured.quotes
+    return replace(plan, captured=replace(plan.captured, text=text, forward_origin="", quotes=quotes,
                    merged_event_ids=tuple(item.event_id for item in originals), telegram_burst=originals))

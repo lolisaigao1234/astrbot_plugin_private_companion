@@ -9,6 +9,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace as NS
 import unittest
+import wave
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from telegram import Update
@@ -183,6 +184,39 @@ class TelegramCaptureTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase
         self.assertIn("my video caption", payload)
         self.assertIn("附件超过读取上限", payload)
         self.assertFalse(any(isinstance(part, Video) for part in self.event.message_obj.message))
+
+    async def test_standalone_oversized_photo_and_music_keep_their_caption(self):
+        from astrbot.core.astr_main_agent import collect_initial_request
+        from astrbot_host.media import load_native_image
+        from companion_v2.conversation.media.audio.models import MAX_AUDIO_BYTES
+        from companion_v2.conversation.media.models import MAX_IMAGE_BYTES
+
+        self.bridge.image_type, self.bridge.image_loader = Image, load_native_image
+        target = self.controller.settings.target("tg-owner")
+
+        async def oversized_download(_, path):
+            with wave.open(str(path), "wb") as stream:
+                stream.setparams((2, 2, 48000, 0, "NONE", ""))
+                stream.writeframes(bytes(4 * MAX_AUDIO_BYTES))
+
+        fetch = AsyncMock(return_value=b"x" * (MAX_IMAGE_BYTES + 1))
+        for number, fields in enumerate((dict(photo=[dict(file_id="p", file_unique_id="p", width=3, height=2)]),
+                                         dict(audio=dict(file_id="a", file_unique_id="a", duration=1)))):
+            with patch("astrbot.core.platform.sources.telegram.tg_adapter.download_file", oversized_download):
+                await self.convert(**fields, caption="my caption", message_id=700 + number)
+            event = self.platform.create_event(self.event.message_obj)
+            event.created_at = self.clock.now().timestamp()
+            with patch("astrbot_host.media.fetch_image", fetch), patch(
+                    "astrbot.core.astr_main_agent._get_session_conv", AsyncMock(return_value=NS(history="[]"))):
+                (await self.controller.session.prepare_core_reply(event, target)).unwrap()
+                request, _ = await collect_initial_request(event, NS(), NS(provider_wake_prefix="", provider_settings={}))
+                payload = json.dumps(await request.assemble_context(), ensure_ascii=False)
+            self.assertIn("my caption", payload)
+            self.assertIn("附件", payload)
+            self.assertFalse(any(isinstance(part, (Image, Record)) for part in event.message_obj.message))
+            self.assertFalse(request.image_urls or request.audio_urls)
+            self.assertNotIn(self.platform.client.token, payload)
+        fetch.assert_awaited_once()
 
     async def test_album_keeps_two_original_photos_and_caption(self):
         from astrbot_host.media import load_native_image
