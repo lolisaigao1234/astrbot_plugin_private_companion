@@ -468,6 +468,11 @@ class PrivateDeliveryDedup:
         self._clock = clock
         self._seen: dict[tuple[str, str], float] = {}
 
+    def seen(self, key: tuple[str, str]) -> bool:
+        """Check a previous delivery without extending its lifetime."""
+        previous = self._seen.get(key)
+        return previous is not None and self._clock() - previous < self.ttl_seconds
+
     def duplicate(self, key: tuple[str, str]) -> bool:
         """Record one delivery and report whether it is already in the window."""
         now = self._clock()

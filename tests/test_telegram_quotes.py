@@ -170,6 +170,22 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
     async def test_quoted_comment_reaching_intake_before_forward_stays_with_burst(self):
         await self.check_reply_to_forward(in_burst=True, mention=True, comment_first=True)
 
+    async def test_reply_to_finished_forward_skips_collection_wait(self):
+        from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA
+
+        plugin = self.started_plugin()
+        original = await self.event(number=80, text="forward", forward_origin={
+            "type": "hidden_user", "sender_user_name": "Ada", "date": 1700000000})
+        await plugin.receive_companion_message(original)
+        comment = await self.event(number=81, text="later comment",
+                                   reply_to_message=original.message_obj.raw_message.message.to_dict())
+        with patch.object(plugin._private_debounce_manager(), "wait_for_event", new_callable=AsyncMock) as wait:
+            await plugin.receive_companion_message(comment)
+        wait.assert_not_awaited()
+        native = comment.get_extra(CORE_REPLY_CONTEXT_EXTRA)["prepared"]["native_input"]
+        self.assertFalse(native.telegram_burst)
+        self.assertEqual([quote.message_id for quote in native.quotes], ["80"])
+
     async def check_reply_to_forward(self, *, in_burst, partial=False, mention=False, photo=False, comment_first=False):
         from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA
 
