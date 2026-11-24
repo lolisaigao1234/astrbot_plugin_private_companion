@@ -1509,6 +1509,22 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
         self.assertEqual(_read(self.controller.runtime)["tasks"][task]["state"], "reported")
         self.assertEqual(self.platform.client.send_message.await_count, 2)
 
+    async def test_attachment_without_caption_leaves_relay_question_waiting(self):
+        from astrbot_host.relay_pending import _read
+        target = self.controller.settings.target("tg-owner")
+        task = self.private_relay_task("waiting_reply", False, question_id=91)
+        event = telegram_event(self.platform, 92, "")
+        event.message_str = "[图片]"
+        await self.controller.process_private_relay_receipts(event, target)
+        self.assertEqual(_read(self.controller.runtime)["tasks"][task]["state"], "waiting_reply")
+        self.platform.client.send_message.assert_not_awaited()
+        caption = telegram_event(self.platform, 93, "")
+        with caption.message_obj.raw_message.message._unfrozen():
+            caption.message_obj.raw_message.message.caption = "my own caption"
+        await self.controller.process_private_relay_receipts(caption, target)
+        self.platform.client.send_message.assert_awaited_once()
+        self.assertIn("my own caption", self.platform.client.send_message.await_args.kwargs["text"])
+
     async def test_telegram_question_accepts_only_subsequent_ordinary_messages(self):
         from astrbot_host.relay_pending import _read
 

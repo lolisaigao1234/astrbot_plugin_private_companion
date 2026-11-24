@@ -176,6 +176,9 @@ async def process_private_receipts(controller, event, target):
         raw = getattr(getattr(event.message_obj, "raw_message", None), "message", None)
         if getattr(raw, "external_reply", None) is not None or getattr(raw, "reply_to_story", None) is not None:
             return
+        text = _text(getattr(raw, "text", None) or getattr(raw, "caption", None))
+        if not text:
+            return
         answer = _text(getattr(raw, "text", ""), 800).rstrip("。！!.").strip()
         confirmed, rejected = answer in approvals, answer in (*refusals, "不同意", "不好")
         original = getattr(raw, "reply_to_message", None)
