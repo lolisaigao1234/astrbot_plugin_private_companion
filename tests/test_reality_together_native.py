@@ -334,6 +334,26 @@ class NativeRealityTogetherTests(unittest.IsolatedAsyncioTestCase):
         plugin.send_telegram_group_invite.assert_awaited_once()
         self.assertEqual(plugin.issued, 1)
 
+    async def test_close_revokes_group_ticket_after_uncertain_delivery(self):
+        identity = context()
+        identity["audience"]["scope"].update(platform="tg-main", kind="group", session_id="-100#23")
+        plugin = FakeTogether()
+        plugin.telegram_group_invite_route = Mock(return_value=object())
+        plugin.send_telegram_group_invite = AsyncMock(return_value={"state": "unknown"})
+        provider = TOGETHER.NativeTogetherProvider(plugin, self.root, version=PRODUCT_VERSION)
+        create = request(provider, "together.room.create", invocation="maybe-delivered", identity=identity,
+                         arguments={"mode": "call"})
+        first = await provider.execute(create, before_dispatch=lambda: True)
+        self.assertEqual(first["state"], "unknown")
+        token, = plugin.ticket_store.tickets
+        close = request(provider, "together.room.close", invocation="close-uncertain", identity=identity)
+        receipt = await provider.execute(close, before_dispatch=lambda: True)
+        self.assertIsNone(plugin.ticket_store.get(token))
+        self.assertTrue(receipt["result"]["ticket_revoked"])
+        self.assertNotIn(token, json.dumps(receipt))
+        self.assertEqual(await provider.execute(create, before_dispatch=lambda: True), first)
+        plugin.send_telegram_group_invite.assert_awaited_once()
+
     async def test_refused_group_invite_survives_notice_error_and_replay(self):
         identity = context()
         identity["audience"]["scope"].update(platform="tg-main", kind="group", session_id="-100#23")

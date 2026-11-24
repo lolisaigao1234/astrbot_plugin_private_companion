@@ -578,7 +578,7 @@ class NativeTogetherProvider:
                            request["action"], operation.get("id"), state, operation.get("error"))
         return response
 
-    def _open_tokens(self, scope: str) -> set[str]:
+    def _open_tokens(self, scope: str, *, for_close=False) -> set[str]:
         closed = {
             item["result"]["closed_ticket_token"]
             for item in self.store.latest(scope, "together.room.close")
@@ -588,8 +588,8 @@ class NativeTogetherProvider:
         return {
             item["result"]["room"]["ticket_token"]
             for item in self.store.latest(scope, "together.room.create")
-            if item.get("state") == "succeeded" and isinstance(item.get("result"), dict)
-            and isinstance(item["result"].get("room"), dict)
+            if (item.get("state") == "succeeded" or (for_close and item.get("state") in {"unknown", "dispatching"}))
+            and isinstance(item.get("result"), dict) and isinstance(item["result"].get("room"), dict)
             and item["result"]["room"].get("ticket_token") not in closed
         }
 
@@ -898,6 +898,7 @@ class NativeTogetherProvider:
                 code = exc.code if isinstance(exc, NativeTogetherError) else "together_room_result_unconfirmed"
                 operation = self.store.update(scope, operation["id"], state="unknown" if uncertain else "failed",
                                               effect="unknown" if uncertain else "not_committed",
+                                              result=operation.get("result"),
                                               error="execution_interrupted" if cancelled else code)
             if isinstance(exc, asyncio.CancelledError):
                 raise
@@ -1012,15 +1013,19 @@ class NativeTogetherProvider:
                        "scope_kind": native_scope["kind"]})
         url = self.plugin._ticket_url(ticket)
         if private_route is not None:
+            # A dispatched DM can arrive even if its acknowledgement is lost.
+            # Keep the ticket revocable without exposing its token in the group receipt.
+            issued = {"room": {"ticket_token": ticket.token, "user_id": user_id}}
+            self.store.update(scope, operation["id"], state="dispatching", effect="unknown", result=issued)
             delivery = await self.plugin.send_telegram_group_invite(private_route, url)
             if delivery["state"] == "unknown":
                 # The requester may already have the ticket. Leave it usable up to expiry.
                 return self.store.update(scope, operation["id"], state="unknown", effect="unknown",
-                                         error="together_room_result_unconfirmed")
+                                         error="together_room_result_unconfirmed", result=issued)
             if delivery["state"] != "delivered":
                 if not self.plugin._revoke_unused_ticket(ticket):
                     return self.store.update(scope, operation["id"], state="unknown", effect="unknown",
-                                             error="together_room_result_unconfirmed")
+                                             error="together_room_result_unconfirmed", result=issued)
                 needs_notice = delivery.get("reason") in {"telegram_bot_blocked", "telegram_chat_not_found",
                                                          "telegram_forbidden"}
                 failed = self.store.update(scope, operation["id"], state="failed", effect="not_committed",
@@ -1055,9 +1060,10 @@ class NativeTogetherProvider:
             await self.plugin.close_room(room)
             return {"closed": True, "room_id": str(room.room_id), "ticket_revoked": True,
                     "closed_ticket_token": str(room.ticket_token)}
+        tokens = self._open_tokens(scope, for_close=True)
         creates = [item for item in self.store.latest(scope, "together.room.create")
-                   if item.get("state") == "succeeded" and isinstance(item.get("result"), dict)
-                   and (item["result"].get("room") or {}).get("ticket_token") in self._open_tokens(scope)]
+                   if isinstance(room := (item.get("result") or {}).get("room"), dict)
+                   and room.get("user_id") == user_id and room.get("ticket_token") in tokens]
         if not creates:
             return {"closed": False, "reason": "no_provider_room"}
         room_data = creates[0]["result"].get("room") or {}
