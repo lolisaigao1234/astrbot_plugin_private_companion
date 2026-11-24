@@ -178,6 +178,14 @@ class TelegramGroupTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((facts["mentioned"], facts["quoted_bot"]), (mentioned, replied))
                 self.assertEqual(group_message_text(event, "tg-main"), expected)
 
+    async def test_self_mention_does_not_restore_a_replaced_host_message(self):
+        platform = TelegramPlatform()
+        event = await group_event(platform, text="@Synthetic_bot old", entities=[MessageEntity("mention", 0, 14)])
+        for part in event.message_obj.message:
+            if isinstance(part, Plain):
+                part.text = "经过宿主处理的新正文"
+        self.assertEqual(group_message_text(event, "tg-main"), "经过宿主处理的新正文")
+
     async def test_bot_created_topic_only_addresses_bot_for_genuine_replies(self):
         platform = TelegramPlatform()
         for topic_root in (True, False):
