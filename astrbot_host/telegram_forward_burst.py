@@ -9,9 +9,41 @@ from companion_v2.conversation.private_debounce import MAX_MERGED_CHARS
 from .core_reply_forwards import MAX_CORE_FORWARD_IMAGES, component_kind
 
 
+def _bounded_sections(originals):
+    headers = [f"[转发消息，来源：{item.forward_origin}]\n" if item.forward_origin else "[发起人的留言]\n"
+               for item in originals]
+    bodies = [item.text.removeprefix(header) if item.forward_origin else item.text
+              for item, header in zip(originals, headers)]
+    # Reserve labels and a sample of every body before spending the rest on text.
+    # If even those cannot fit, keep the owner's comments and then the latest forwards.
+    remaining = MAX_MERGED_CHARS
+    sizes = {}
+    priority = sorted(reversed(range(len(originals))), key=lambda i: bool(originals[i].forward_origin))
+    for i in priority:
+        sample = min(32, len(bodies[i]))
+        cost = len(headers[i]) + sample + (2 if sizes else 0)
+        if cost <= remaining:
+            sizes[i] = sample
+            remaining -= cost
+
+    for forwarded in (False, True):
+        indices = sorted((i for i in sizes if bool(originals[i].forward_origin) == forwarded),
+                         key=lambda i: len(bodies[i]))
+        for count, i in enumerate(indices):
+            extra = min(len(bodies[i]) - sizes[i], remaining // (len(indices) - count))
+            sizes[i] += extra
+            remaining -= extra
+
+    for i in sorted(sizes):
+        size = sizes[i]
+        body = bodies[i]
+        if size < len(body):
+            body = body[:size-1] + "…" if originals[i].forward_origin else "…" + body[-(size-1):]
+        yield i, headers[i] + body
+
+
 async def merge_forward_burst(event, target, plan, entries, prepare_context):
     verified, parts, sections = [], [], []
-    remaining_text = MAX_MERGED_CHARS
     remaining_media = MAX_CORE_FORWARD_IMAGES
     for source_event, _, _ in entries:
         source = plan
@@ -31,15 +63,10 @@ async def merge_forward_burst(event, target, plan, entries, prepare_context):
     # Intake awaits can complete out of order. Telegram orders messages in this chat by ID.
     verified.sort(key=lambda pair: int(pair[0].event_id))
     originals = tuple(item for item, _ in verified)
-    for item, source_event in verified:
-        header = f"[转发消息，来源：{item.forward_origin}]\n" if item.forward_origin else "[发起人的留言]\n"
-        body = item.text.removeprefix(header) if item.forward_origin else item.text
-        prefix = ("\n\n" if sections else "") + header
-        # Only include media alongside a complete source label.
-        if remaining_text <= len(prefix):
-            continue
-        section = prefix + body[:remaining_text - len(prefix)]
-        remaining_text -= len(section)
+    for i, section in _bounded_sections(originals):
+        source_event = verified[i][1]
+        if sections:
+            section = "\n\n" + section
         sections.append(section)
         parts.append(Plain(text=section))
         for part in source_event.message_obj.message:
