@@ -110,14 +110,26 @@ def _bounded_sections(originals, budget=MAX_MERGED_CHARS, replies=None):
         yield i, prefix + headers[i] + body
 
 
+def temporary_file_component(event, name, data, suffix):
+    from pathlib import Path
+    from tempfile import NamedTemporaryFile
+    from astrbot.core.message.components import File
+    from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
+
+    directory = Path(get_astrbot_temp_path())
+    directory.mkdir(parents=True, exist_ok=True)
+    with NamedTemporaryFile(dir=directory, suffix=suffix, delete=False) as stream:
+        event.track_temporary_local_file(stream.name)
+        stream.write(data)
+    return File(name=name, file=stream.name)
+
+
 async def bounded_file_component(event, locator, remaining, preferences, scope, deadline):
     import aiohttp
     import asyncio
     from pathlib import Path
-    from tempfile import NamedTemporaryFile
-    from astrbot.core.message.components import File, Plain
+    from astrbot.core.message.components import Plain
     from companion_v2.conversation.media.understanding import media_scope_enabled
-    from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
     from companion_v2.adapters.astrbot.telegram_media import fetch_location
     from companion_v2.execution.models import TaskError
     from .media import fetch_attachment
@@ -139,12 +151,7 @@ async def bounded_file_component(event, locator, remaining, preferences, scope, 
         return Plain(f"[文件 {locator.name}：文件读取超时，本轮未读取]"), maximum_bytes
     except (aiohttp.ClientError, OSError, RuntimeError):
         raise TaskError("host_file_unavailable", "document could not be retrieved") from None
-    directory = Path(get_astrbot_temp_path())
-    directory.mkdir(parents=True, exist_ok=True)
-    with NamedTemporaryFile(dir=directory, suffix=Path(locator.name).suffix[:20], delete=False) as stream:
-        event.track_temporary_local_file(stream.name)
-        stream.write(data)
-    return File(name=locator.name, file=stream.name), len(data)
+    return temporary_file_component(event, locator.name, data, Path(locator.name).suffix[:20]), len(data)
 
 
 async def merge_forward_burst(event, target, plan, entries, prepare_context):
