@@ -144,6 +144,38 @@ class RelayPendingEventTests(unittest.IsolatedAsyncioTestCase):
                 await process_private_receipts(self.controller, self.event, target)
         self.assertEqual(_read(self.runtime)["tasks"][task]["state"], "waiting_reply")
 
+    async def test_qq_explicit_refusal_never_reports_the_saved_answer(self):
+        from astrbot_host.relay_pending import _read
+
+        target = SimpleNamespace(participant_id="2002", platform_id="onebot", account_id="account")
+        for refusal in ("不同意", "我不同意转告", "不好"):
+            with self.subTest(refusal=refusal):
+                task = add_task(self.runtime, {
+                    "kind": "private_receipt", "state": "waiting_permission", "target_user_id": "2002",
+                    "source_id": "1001", "reply_text": "private answer", "expires_at": time.time() + 60,
+                })
+                self.event.message_str = refusal
+                await process_private_receipts(self.controller, self.event, target)
+                self.assertEqual(_read(self.runtime)["tasks"][task]["state"], "declined")
+                self.assertEqual(self.api.calls, [])
+
+    async def test_cancelled_qq_receipt_reports_keep_failed_state(self):
+        from asyncio import CancelledError
+        from unittest.mock import patch
+        from astrbot_host.relay_pending import _read
+
+        target = SimpleNamespace(participant_id="2002", platform_id="onebot", account_id="account")
+        for state in ("waiting_reply", "waiting_permission"):
+            with self.subTest(state=state):
+                task = add_task(self.runtime, {
+                    "kind": "private_receipt", "state": state, "target_user_id": "2002",
+                    "confirm_before_report": state == "waiting_permission", "expires_at": time.time() + 60,
+                })
+                with patch("astrbot_host.relay_pending_events._report_receipt", side_effect=CancelledError):
+                    with self.assertRaises(CancelledError):
+                        await process_private_receipts(self.controller, self.event, target)
+                self.assertEqual(_read(self.runtime)["tasks"][task]["state"], "failed")
+
     async def test_receipt_permission_is_requested_before_reporting(self):
         add_task(self.runtime, {
             "kind": "private_receipt", "state": "waiting_reply", "target_user_id": "2002",

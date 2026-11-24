@@ -188,6 +188,7 @@ async def process_private_receipts(controller, event, target):
         permission_tasks, reply_tasks = await asyncio.to_thread(
             claim_telegram_receipt, controller.runtime, account, target_user_id,
             getattr(raw, "message_id", None), reply_to=reply_to, permission_answer=confirmed or rejected)
+    interrupted_report_state = "unknown" if account is not None else "failed"
     settled_permission: set[str] = set()
     in_flight_permission: str | None = None
     in_flight_permission_state = "failed"
@@ -200,7 +201,7 @@ async def process_private_receipts(controller, event, target):
                 await asyncio.to_thread(finish, controller.runtime, task_id, "declined")
             elif confirmed:
                 in_flight_permission = task_id
-                in_flight_permission_state = "unknown"
+                in_flight_permission_state = interrupted_report_state
                 try:
                     in_flight_permission_state = await _report_receipt(
                         controller, event, target, task, _text(task.get("reply_text"), 800))
@@ -253,7 +254,7 @@ async def process_private_receipts(controller, event, target):
                     await asyncio.to_thread(requeue, controller.runtime, task_id, state="waiting_reply")
             else:
                 in_flight_report = task_id
-                in_flight_report_state = "unknown"
+                in_flight_report_state = interrupted_report_state
                 try:
                     in_flight_report_state = await _report_receipt(controller, event, target, task, text)
                 except Exception:
