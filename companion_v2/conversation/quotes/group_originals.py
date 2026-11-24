@@ -43,16 +43,19 @@ def original_sources(messages, context, event, quote, text, at):
         from companion_v2.conversation.messages import event_from_document
         saved = event_from_document(data, original)
         body = item["text"]
+        prefix = ""
+        if telegram:
+            from .originals import telegram_text
+            prefix, body = telegram_text(body, quote, bool(getattr(saved, "images", ())))
         if telegram and quote.selection_offset is not None:
-            if getattr(saved, "images", ()):
-                body = body.removeprefix("\n[图片 1]\n")
-            start = quote.selection_offset * 2
+            offset = quote.selection_offset
             selected = text.encode("utf-16-le")
-            if body.encode("utf-16-le")[start:start + len(selected)] != selected:
+            if (type(offset) is not int or offset < 0
+                    or body.encode("utf-16-le")[2 * offset:2 * offset + len(selected)] != selected):
                 raise TaskError("quote_original_changed", "quoted selection differs from the admitted original")
             evidence.append(source)
             continue
-        if (body != text or tuple(replace(i, position=0) for i in getattr(saved, "images", ()))
+        if (prefix + body != text or tuple(replace(i, position=0) for i in getattr(saved, "images", ()))
                 != tuple(replace(i, position=0) for i in quote.images)
                 or any(getattr(saved, name, ()) != getattr(quote, name, ()) for name in ("audios", "videos", "forwards"))):
             raise TaskError("quote_original_changed", "quote differs from the already admitted group original")

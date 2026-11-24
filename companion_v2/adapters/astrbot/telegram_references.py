@@ -103,13 +103,18 @@ def message_references(event):
     # AstrBot inserts these suffixes in the admitted Plain. Keep their UTF-16
     # locations and fingerprints so verified history can recover Telegram's text.
     link_suffixes = []
+    self_mentions = []
     for entity in original.entities or original.caption_entities or ():
         if entity.type == "text_link" and entity.url:
             suffix = f" ({entity.url})"
             link_suffixes.append((entity.offset + entity.length, len(suffix.encode("utf-16-le")) // 2,
                                   digest(suffix)))
+        elif raw.chat.type != "private" and entity.type == "mention":
+            spelling = original.parse_entity(entity) if original.text else original.parse_caption_entity(entity)
+            if spelling[1:].casefold() == message.self_id.casefold():
+                self_mentions.append((entity.offset, spelling))
     quote = TelegramQuote(position, str(original.message_id), sender, int(original.date.timestamp()),
                           safe_text(event, text) if text.strip() else "[附件]", companion_sender=sender == bot_id,
                           selection_offset=raw.quote.position if raw.quote else None, link_suffixes=tuple(link_suffixes),
-                          forward_origin=_origin(event, original.forward_origin))
+                          forward_origin=_origin(event, original.forward_origin), self_mentions=tuple(self_mentions))
     return replace(references, quote=quote, images=images)

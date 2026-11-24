@@ -12,7 +12,7 @@ import wave
 from unittest.mock import AsyncMock, Mock, patch
 
 from telegram.error import BadRequest, Forbidden, InvalidToken, NetworkError, RetryAfter, TimedOut
-from telegram import Chat, ForumTopicCreated, ForumTopicEdited, Message, MessageEntity, Update, User
+from telegram import Chat, ForumTopicCreated, ForumTopicEdited, Message, MessageEntity, TextQuote, Update, User
 from astrbot.core.message.components import Plain, Reply
 from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
 from astrbot.core.platform.message_type import MessageType
@@ -528,6 +528,41 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
             reference, = result.quotes
             self.assertEqual((reference.sender_id, reference.text, reference.companion_sender),
                              ("321", "成员原文", False))
+
+    async def test_group_quotes_verify_admitted_link_text(self):
+        session = self.controller.session
+        target = self.controller.settings.target("group-0")
+        url = "https://example.org/guide"
+        sender = User(321, "Quoted", False)
+
+        async def receive(event):
+            event.created_at = self.clock.now().timestamp()
+            return await session.receive(event, target)
+
+        for n, prefix, mentions in ((10, "😀 ", []), (20, "😀 @Synthetic_bot <提及自己> ", [MessageEntity("mention", 3, 14)])):
+            end = len(prefix.encode("utf-16-le")) // 2
+            link = MessageEntity("text_link", end, 5, url=url)
+            fields = dict(message_id=n, from_user=sender, text=prefix + "guide 片段", entities=[*mentions, link])
+            original = await group_event(self.platform, **fields)
+            require(await receive(original))
+            embedded = original.message_obj.raw_message.message
+            for number, extra in ((n + 1, {}), (n + 2, {"quote": TextQuote("片段", end + 6)})):
+                reply = await group_event(self.platform, message_id=number, reply_to_message=embedded, **extra)
+                captured = require(await session.bridge.groups.capture(reply))
+                self.assertEqual((captured.principal.native_account_id, captured.quotes[0].sender_id),
+                                 (str(OWNER), "321"))
+                require(await receive(reply))
+
+            for index, (changes, offset, expected) in enumerate((
+                ({}, end + 5, "quote_original_changed"),
+                ({"entities": [*mentions, MessageEntity("text_link", end, 5, url=url + "x")]},
+                 end + 6, "quote_original_changed"),
+                ({"from_user": User(322, "Other", False)}, end + 6, "quote_original_scope_mismatch"),
+            ), 3):
+                altered = await group_event(self.platform, **(fields | changes))
+                reply = await group_event(self.platform, message_id=n + index,
+                    reply_to_message=altered.message_obj.raw_message.message, quote=TextQuote("片段", offset))
+                self.assertEqual((await receive(reply)).failure.code, expected)
 
     async def test_group_delivery_and_collective_audience(self):
         from astrbot.core.message.message_event_result import MessageChain
