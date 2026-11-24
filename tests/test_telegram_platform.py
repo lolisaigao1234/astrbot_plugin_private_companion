@@ -359,14 +359,22 @@ class TelegramIntakeLifecycleTests(TelegramHostFixture, unittest.IsolatedAsyncio
         class Bot(NS):
             pass
 
+        config = self.controller.config
+        config["multi_host"]["group_targets"] = [
+            dict(target_id="topic", platform_id="tg-main", account_id="tg-main",
+                 bot_id="bot-tg", group_id="-400#23")]
+        self.controller = self.make_controller(config)
         self.platform.client = Bot(**vars(telegram_bot()))
         self.controller.startup_readiness()
         event = await group_event(self.platform, -400, "supergroup", 24)
+        configured = await group_event(self.platform, -400, "supergroup", 23)
         for _ in range(2):
             self.platform.client = Bot(**vars(telegram_bot()))
             self.controller._connections_for().refresh()
         await self.started_plugin().receive_companion_message(event)
         self.assertTrue(event.call_llm)
+        await self.started_plugin().receive_companion_message(configured)
+        self.assertTrue(configured.call_llm)
         event = await group_event(self.platform, -400, "supergroup", 24)
         event.client = telegram_bot()
         await self.started_plugin().receive_companion_message(event)

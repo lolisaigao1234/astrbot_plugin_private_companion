@@ -180,6 +180,27 @@ class TelegramOfflineDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncio
         self.assertIs(context.platform_manager.platform_insts[0], self.platform)
         self.assertIs(self.platform.client, self.bot)
 
+    async def test_subclass_context_can_delegate_native_send_without_implicit_typing(self):
+        from astrbot.core.star.context import Context
+        from companion_v2.adapters.astrbot.telegram_send import send_context_message
+
+        class WrappedContext(Context):
+            async def send_message(self, session, message):
+                self.calls += 1
+                delivered = await super().send_message(session, message)
+                return ("wrapped", delivered)
+
+        context = WrappedContext.__new__(WrappedContext)
+        context.calls = 0
+        context.platform_manager = NS(platform_insts=[self.platform])
+        context.astrbot_config_mgr = NS(get_conf=lambda _: {})
+        event = telegram_event(self.platform)
+        result = await send_context_message(context, event.unified_msg_origin, MessageChain([Plain("context")]))
+        self.assertEqual(result, ("wrapped", True))
+        self.assertEqual(context.calls, 1)
+        self.assertIs(context.platform_manager.platform_insts[0], self.platform)
+        self.assertEqual([method for method, _ in self.requests], ["sendMessage"])
+
     async def test_subclass_sends_keep_override_state_and_isolate_typing(self):
         from astrbot.core.platform.sources.telegram.tg_event import TelegramPlatformEvent
         from companion_v2.adapters.astrbot.telegram_send import send_private_session, suppress_private_event_typing

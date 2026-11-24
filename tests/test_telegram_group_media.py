@@ -114,6 +114,40 @@ class TelegramGroupMediaTests(TelegramHostFixture, unittest.IsolatedAsyncioTestC
                          ("10", str(OWNER), 1700000000, ()))
         self.assertIn("source caption", quote.text)
 
+    async def test_direct_record_and_video_consume_capacity_before_quote(self):
+        import base64
+        from companion_v2.execution.models import TaskError
+
+        photo = [dict(file_id="photo", file_unique_id="p", width=2, height=2)]
+        original = self.update(10, photo=photo, caption="original")
+        message = await self.platform.convert_message(self.update(
+            11, photo=photo, caption="current", reply_to_message=original.message.to_dict()), NS(bot=self.platform.client))
+        audio = audio_bytes()
+        message.message.extend([Record(file="base64://" + base64.b64encode(audio).decode()),
+                                Video(file="https://example.org/large"), Video(file="https://example.org/fit")])
+        direct = image_bytes()
+        clip = video_bytes()
+        audio_cost = inspect_audio(audio, 0).descriptor.retained_bytes
+        video_cost = inspect_video(clip, 0).descriptor.retained_bytes
+        budget = len(direct) + audio_cost + video_cost + 1
+        audio_loader = AsyncMock(wraps=load_native_audio)
+        photo_fetch = AsyncMock(side_effect=[direct, TaskError("host_image_limit", "too large")])
+        video_fetch = AsyncMock(side_effect=[TaskError("host_image_limit", "too large"), clip])
+        with (patch.object(self.bridge, "audio_loader", audio_loader),
+              patch("companion_v2.conversation.media.models.MAX_TURN_BYTES", budget),
+              patch("astrbot_host.media.fetch_image", photo_fetch),
+              patch("astrbot_host.video.loader.fetch_attachment", video_fetch),
+              patch("astrbot_host.audio.loader.decode_audio", AsyncMock(side_effect=inspect_audio)),
+              patch("astrbot_host.video.loader.decode_video", AsyncMock(side_effect=inspect_video))):
+            captured = await self.capture(message)
+        self.assertEqual([c.kwargs["maximum_bytes"] for c in photo_fetch.await_args_list], [budget, 1])
+        self.assertEqual(audio_loader.await_args.kwargs["maximum_bytes"], audio_cost + video_cost + 1)
+        self.assertEqual([c.kwargs["maximum_bytes"] for c in video_fetch.await_args_list], [video_cost + 1] * 2)
+        self.assertEqual([v.content for v in captured.videos], [clip])
+        self.assertEqual(captured.quotes[0].images, ())
+        self.assertIn("original", captured.quotes[0].text)
+        self.assertIn("current", captured.text)
+
     async def test_group_attachments_retain_the_speaking_member(self):
         async def download(url, *, path):
             Path(path).parent.mkdir(parents=True, exist_ok=True)
