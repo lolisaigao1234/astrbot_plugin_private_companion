@@ -23,7 +23,7 @@ class TelegramReferences:
 
     @property
     def forward_origin(self):
-        return self.origin.label if self.origin else ""
+        return redact_text(self.origin.label) if self.origin else ""
 
     @property
     def forward_marker(self):
