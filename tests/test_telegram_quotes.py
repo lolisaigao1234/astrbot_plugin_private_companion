@@ -250,13 +250,14 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
         from astrbot_host.telegram_forward_burst import _bounded_sections
         from companion_v2.conversation.private_debounce import MAX_MERGED_CHARS
 
-        originals = [NS(forward_origin=f"{i:03d}-" + "x" * 55, text="paper" * 800) for i in range(100)]
-        originals.append(NS(forward_origin="", text="my comment"))
+        originals = [NS(event_id=str(i+1), forward_origin=f"{i:03d}-" + "x" * 55, text="paper" * 800) for i in range(100)]
+        originals.append(NS(event_id="101", forward_origin="", text="my comment"))
         sections = list(_bounded_sections(originals))
         self.assertEqual([i for i, _ in sections], list(range(101)))
         self.assertLessEqual(len("\n\n".join(section for _, section in sections)), MAX_MERGED_CHARS)
         for i, section in sections[:-1]:
             self.assertIn(f"{i:03d}-", section)
+            self.assertIn("paper" * 4, section)
         self.assertIn("my comment", sections[-1][1])
 
     async def test_long_forward_burst_keeps_each_source_and_owner_comment(self):
@@ -278,6 +279,26 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
         self.assertTrue(comment.message_str.endswith("[发起人的留言]\ncompare their last points"))
         self.assertEqual(len(merged.captured.telegram_burst), 4)
 
+    async def test_rejected_forward_keeps_both_verified_comments(self):
+        from astrbot_host.telegram_forward_burst import merge_forward_burst
+
+        first = await self.event(number=80, text="first thought")
+        forwarded = await self.event(number=81, text="unverified body",
+            forward_origin={"type": "hidden_user", "sender_user_name": "Ada", "date": 1700000000})
+        last = await self.event(number=82, text="second thought")
+        target = self.controller.settings.target("tg-owner")
+        prepare = self.controller.prepare_core_reply_context
+        plan = (await prepare(last, target)).unwrap()
+
+        async def verify(source, target, **kwargs):
+            if source is forwarded:
+                return NS(failure=True)
+            return await prepare(source, target, **kwargs)
+
+        result = await merge_forward_burst(last, target, plan, [(e, "", None) for e in (first, forwarded, last)], verify)
+        self.assertEqual([item.text for item in result.captured.telegram_burst], ["first thought", "second thought"])
+        self.assertNotIn("unverified body", last.message_str)
+
     async def test_forward_burst_ending_in_photo_keeps_media_and_comment(self):
         from astrbot_host.telegram_forward_burst import merge_forward_burst
         from tests.test_conversation_images import image_bytes
@@ -297,6 +318,27 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sum(isinstance(part, Image) for part in forwarded.message_obj.message), 1)
         for word in ("look at this", "green picture", "来源：Ada"):
             self.assertEqual(forwarded.message_str.count(word), 1)
+
+    async def test_sender_photo_has_priority_when_burst_media_is_full(self):
+        from astrbot_host.telegram_forward_burst import merge_forward_burst
+        from astrbot_host.core_reply_forwards import MAX_CORE_FORWARD_IMAGES
+
+        forwarded = await self.event(number=90, text="reference",
+            forward_origin={"type": "hidden_user", "sender_user_name": "Ada", "date": 1700000000})
+        comment = await self.event(number=91, text="my comparison")
+        prepare = self.controller.prepare_core_reply_context
+        target = self.controller.settings.target("tg-owner")
+        source = await prepare(forwarded, target)
+        plan = (await prepare(comment, target)).unwrap()
+        personal_photo = Image.fromBytes(b"personal")
+        forwarded.message_obj.message.extend(Image.fromBytes(b"reference") for _ in range(MAX_CORE_FORWARD_IMAGES))
+        comment.message_obj.message.append(personal_photo)
+        await merge_forward_burst(comment, target, plan, [(forwarded, "", None), (comment, "", None)],
+                                  AsyncMock(return_value=source))
+        photos = [part for part in comment.message_obj.message if isinstance(part, Image)]
+        self.assertEqual(len(photos), MAX_CORE_FORWARD_IMAGES)
+        self.assertIs(photos[-1], personal_photo)
+        self.assertIn("1 个附件超过读取上限", comment.message_str)
 
     async def test_numeric_instance_id_is_not_the_author_of_a_quote(self):
         from astrbot_host.core_reply_decision import core_decision_facts

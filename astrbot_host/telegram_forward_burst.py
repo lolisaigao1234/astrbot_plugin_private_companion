@@ -9,7 +9,7 @@ from companion_v2.conversation.private_debounce import MAX_MERGED_CHARS
 from .core_reply_forwards import MAX_CORE_FORWARD_IMAGES, component_kind
 
 
-def _bounded_sections(originals):
+def _bounded_sections(originals, budget=MAX_MERGED_CHARS):
     forward_ids = {item.event_id for item in originals if item.forward_origin}
     replied_to = set()
     headers = []
@@ -25,9 +25,9 @@ def _bounded_sections(originals):
               for item, header in zip(originals, headers)]
     # Preserve attribution even for a hundred long messages. Shorten labels only
     # when keeping them in full would leave no space for their message bodies.
-    fair_share = MAX_MERGED_CHARS // len(headers)
-    if sum(len(header) + 3 for header in headers) > MAX_MERGED_CHARS:
-        label_limit = max(1, fair_share - len("[转发消息，来源：]\n") - 4)
+    fair_share = budget // len(headers)
+    if sum(len(header) + min(32, len(body)) + 2 for header, body in zip(headers, bodies)) > budget:
+        label_limit = max(1, fair_share - len("[转发消息，来源：]\n") - 34)
         for i, item in enumerate(originals):
             name = item.forward_origin
             if len(name) > label_limit:
@@ -39,7 +39,7 @@ def _bounded_sections(originals):
         if item.event_id in replied_to:
             headers[i] = f"[消息 {item.event_id}]" + headers[i]
 
-    remaining = MAX_MERGED_CHARS
+    remaining = budget
     sizes = {}
     priority = sorted(reversed(range(len(originals))), key=lambda i: bool(originals[i].forward_origin))
     overflow = sum(len(header) + 3 for header in headers) > remaining
@@ -99,21 +99,31 @@ async def merge_forward_burst(event, target, plan, entries, prepare_context):
                 or item.role != plan.captured.role or item.recipients != plan.captured.recipients):
             continue
         verified.append((item, source_event))
-    if len(verified) < 2 or not any(item.forward_origin for item, _ in verified):
+    if len(verified) < 2:
         return plan
     # Intake awaits can complete out of order. Telegram orders messages in this chat by ID.
     verified.sort(key=lambda pair: int(pair[0].event_id))
     originals = tuple(item for item, _ in verified)
-    for i, section in _bounded_sections(originals):
-        source_event = verified[i][1]
+    media = [[part for part in source_event.message_obj.message
+              if component_kind(part) in {"Image", "Record", "Video", "File"}] for _, source_event in verified]
+    direct_count = sum(len(parts) for item, parts in zip(originals, media) if not item.forward_origin)
+    forward_slots = max(0, remaining_media - direct_count)
+    omitted = max(0, sum(map(len, media)) - remaining_media)
+    note = f"\n[另有 {omitted} 个附件超过读取上限]" if omitted else ""
+    for i, section in _bounded_sections(originals, MAX_MERGED_CHARS - len(note)):
         if sections:
             section = "\n\n" + section
         sections.append(section)
         parts.append(Plain(text=section))
-        for part in source_event.message_obj.message:
-            if remaining_media and component_kind(part) in {"Image", "Record", "Video", "File"}:
-                parts.append(part)
-                remaining_media -= 1
+        slots = min(remaining_media, forward_slots) if originals[i].forward_origin else remaining_media
+        admitted = media[i][:slots]
+        parts.extend(admitted)
+        remaining_media -= len(admitted)
+        if originals[i].forward_origin:
+            forward_slots -= len(admitted)
+    if note:
+        parts.append(Plain(text=note))
+        sections.append(note)
     text = "".join(sections)
     event.message_obj.message = parts
     event.message_str = event.message_obj.message_str = text
