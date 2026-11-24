@@ -168,18 +168,19 @@ class LocalReplyGenerator:
         self.voice_policy = voice_policy
         self.send_stream_part = send_stream_part
         self.reviewer = GroundedDraftReviewer()
+        self.resolve_bot_sender = None
 
     @staticmethod
-    def _laya_facts(request):
+    def _laya_facts(request, resolve_bot_sender=None):
         event = request.event
         text = voice_input_text(request)
         kind = "text" if text else ("image" if request.images else "audio" if request.audios else "video")
         facts = {"message_kind": kind, "user_text": text[:12000],
                  "scope_kind": event.scope.kind.value}
-        scope_account = str(event.scope.account_id or "")
+        bot_sender = resolve_bot_sender(event.scope) if resolve_bot_sender else event.scope.account_id
 
         def sender_is_bot(sender):
-            return sender is not None and str(sender) == scope_account
+            return bool(bot_sender) and sender is not None and str(sender) == str(bot_sender)
 
         # The authenticated principal carries the native sender id.  This is
         # a host fact, so a bot-authored event can be ruled out without asking
@@ -239,7 +240,7 @@ class LocalReplyGenerator:
             service = resolver(run.task.spec.context)
             if service is None:
                 return None
-            facts = self._laya_facts(request)
+            facts = self._laya_facts(request, self.resolve_bot_sender)
             set_trace = getattr(service, "set_trace", None)
             if callable(set_trace):
                 set_trace(event_ref=run.task.spec.request_ref, source="conversation")
