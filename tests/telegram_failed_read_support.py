@@ -25,7 +25,7 @@ async def check_failed_reads(case, event, bridge, *, sdk=False):
             if position == 0:
                 attempts.append((name, limit))
             if position == len(body) and name in ("voice", "video"):
-                raise OSError("synthetic interrupted body")
+                raise (RuntimeError("Connection closed.") if name == "voice" else OSError("synthetic interrupted body"))
             chunk = body[position:position + limit]
             consumed.append(len(chunk))
             position += len(chunk)
