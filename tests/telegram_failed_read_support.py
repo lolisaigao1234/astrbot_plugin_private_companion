@@ -39,7 +39,8 @@ async def check_failed_reads(case, event, bridge, *, sdk=False):
             "astrbot_host.media.aiohttp.ClientSession") as session, patch("astrbot_host.media.aiohttp.TCPConnector"):
         session.return_value.__aenter__.return_value.get = get
         if sdk:
-            await bridge.prepare_telegram_album(event)
+            context, _ = await case.controller.session.synchronize(case.controller.settings.target("tg-owner"))
+            await bridge.prepare_telegram_album(event, context)
             parts = event.message_obj.message
             case.assertIn("caption", parts[0].text)
             case.assertEqual(parts[-1].name, "note.txt")

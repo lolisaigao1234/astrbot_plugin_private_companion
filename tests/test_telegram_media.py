@@ -292,6 +292,31 @@ class TelegramCaptureTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase
         self.assertIn("slow album caption", str(message))
         self.assertIn("附件读取超时", str(message))
 
+    async def test_managed_album_document_obeys_window_settings_before_fetch(self):
+        target = self.controller.settings.target("tg-owner")
+        for enabled, scope_allowed, name, expected in (
+                (False, True, "note.txt", None), (True, False, "note.txt", None),
+                (True, True, "note.exe", None), (True, True, "note.txt", 1024**2)):
+            with self.subTest(enabled=enabled, scope_allowed=scope_allowed, name=name):
+                event = await self.convert(document=dict(file_id="d", file_unique_id="d", file_name=name),
+                                           caption="keep caption", media_group_id="docs")
+                event = self.platform.create_event(event.message_obj)
+                event.created_at = self.clock.now().timestamp()
+                resolver = MagicMock(return_value={"file_understanding_enabled": enabled,
+                    "file_understanding_private_enabled": scope_allowed, "file_understanding_max_size_mb": 1})
+                with patch.object(self.bridge, "file_settings", resolver), patch(
+                        "astrbot_host.media.fetch_attachment", AsyncMock(return_value=b"text")) as fetch:
+                    prepared = (await self.controller.session.prepare_core_reply(event, target)).unwrap()
+                self.assertIn("keep caption", event.message_str)
+                context = prepared["context"]
+                resolver.assert_called_with(context.scope, context.role_binding.role)
+                if expected is None:
+                    fetch.assert_not_awaited()
+                    self.assertFalse(any(isinstance(part, File) for part in event.message_obj.message))
+                else:
+                    self.assertEqual(fetch.await_args.kwargs["maximum_bytes"], expected)
+                    self.assertTrue(any(isinstance(part, File) for part in event.message_obj.message))
+
     async def test_managed_records_and_files_share_the_read_budget(self):
         from companion_v2.execution.models import TaskError
 
@@ -309,7 +334,9 @@ class TelegramCaptureTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase
 
         with patch("companion_v2.conversation.media.models.MAX_TURN_BYTES", 5), patch(
                 "astrbot_host.media.fetch_attachment", fetch):
-            await self.bridge.prepare_telegram_album(self.event)
+            context, _ = await self.controller.session.synchronize(self.controller.settings.target("tg-owner"))
+            self.bridge.file_settings = lambda *_: {"file_understanding_enabled": True}
+            await self.bridge.prepare_telegram_album(self.event, context)
         self.assertEqual(limits, [("large", 2), ("small", 2)])
         caption, record, large, small, last = self.event.message_obj.message
         self.assertEqual((caption.text, record.file), ("caption", "base64://YWJj"))
