@@ -380,11 +380,15 @@ class NativeGroupBridge(NativePrivateBridge):
                              account.bot_id, route.account_id, cid, route.session_id)
             if event_client is not self.client(scope) or not self.account_connected(account, event_client):
                 raise TaskError("host_client_mismatch", "group event did not originate from the connected account client")
+            if references and references.unavailable:
+                event.message_obj.message = [part for part in event.message_obj.message
+                                             if getattr(part.type, "value", part.type) != "Reply"]
             speaker = SubjectRef(self.installation_id, SubjectKind.HUMAN,
                 native_user_subject_id(route.platform_name, route.sender_id))
             return Outcome.success(NativeConversationInput(route.event_id, principal,
                 ConversationRoute(scope, group_id=route.group_id), group_audience(scope, speaker), text, at, role,
                 instruction, group_message_text=message_text,
+                quote_unavailable=bool(references and references.unavailable),
                 quotes=(references.quote,) if references and references.quote else (),
                 forward_origin=references.forward_origin if references else ""))
         except TaskError as error:
@@ -512,7 +516,11 @@ class NativeGroupBridge(NativePrivateBridge):
             audio_locators, video_locators = [], []
             file_locators = []
             parts = group_message_parts(event, route.account_id, native_parts=parts)
-            for position, part in enumerate(parts):
+            if telegram and telegram.quote and not any(getattr(part.type, "value", part.type) == "Reply" for part in parts):
+                if len(parts) >= 128:
+                    raise TaskError("host_media_unsupported", "message components exceed the intake budget")
+                text_parts.append("\n[引用消息]\n")
+            for position, part in enumerate(parts, start=len(text_parts)):
                 kind = getattr(part.type, "value", part.type)
                 if kind == "Plain" and isinstance(part.text, str):
                     text_parts.append(part.text)

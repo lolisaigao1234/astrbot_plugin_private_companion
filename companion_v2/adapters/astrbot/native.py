@@ -463,6 +463,7 @@ class NativeConversationInput:
     merged_event_ids: tuple[str, ...] = ()
     group_message_text: str | None = None
     forward_origin: str = ""
+    quote_unavailable: bool = False
 
 
 NativePrivateInput = NativeConversationInput  # Preserve the private adapter's public snapshot name.
@@ -601,6 +602,12 @@ class NativePrivateBridge:
             except ValueError as error:
                 raise TaskError("host_route_changed", "native session does not match the original account and scope") from error
         return platform
+
+    def bot_sender_id(self, scope):
+        lease = self.connections.acquire((scope.platform, scope.account_id))
+        if lease.platform.meta().name == "telegram":
+            return lease.client.id
+        return scope.account_id
 
     def platform_name(self, scope_or_account):
         platform_id = getattr(scope_or_account, "platform_id", None) or getattr(scope_or_account, "platform", None)

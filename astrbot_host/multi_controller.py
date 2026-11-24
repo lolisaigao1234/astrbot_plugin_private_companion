@@ -1054,6 +1054,7 @@ class AstrBotMultiController:
                 runtime=self.session.application.runtime, origin_key=context.key,
                 scope=scope, client_factory=LayaDecisionClient)
 
+        self.session.application.generator.resolve_bot_sender = self.session.bridge.bot_sender_id
         self.session.application.attach_laya_decision(laya_for_context)
 
     def _idle(self):
