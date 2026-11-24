@@ -64,7 +64,7 @@ class TogetherRoomsMethods:
         if lease.platform.meta().name != "telegram":
             return None
         return NativeNoticeRoute(ScopeKind.PRIVATE, platform_id, target.bot_id, account,
-            sender, sender, sender, lease.client, platform=lease.platform, platform_name="telegram",
+            sender, sender, sender, lease.client, group_id=group, platform=lease.platform, platform_name="telegram",
             connection_lease=lease, connections=bridge.connections)
 
     async def send_telegram_group_invite(self, route, message):
@@ -72,6 +72,15 @@ class TogetherRoomsMethods:
 
         result = await send_private_notice(self.controller, None, route=route, text=message)
         return result["state"] == "delivered"
+
+    async def notify_telegram_invite_refused(self, private_route):
+        from dataclasses import replace
+        from astrbot_host.private_notice import send_group_notice
+        from companion_v2.foundation.refs import ScopeKind
+
+        group = replace(private_route, kind=ScopeKind.GROUP,
+                        peer=private_route.group_id, session_id=private_route.group_id)
+        await send_group_notice(self.controller, group, text="请先私聊启动 Bot，再申请房间。")
 
     async def _send_private_room_link(self, event: AstrMessageEvent, message: str) -> bool:
         sender_id = _single_line(event.get_sender_id(), 80)
@@ -114,10 +123,9 @@ class TogetherRoomsMethods:
         logger.warning('[TogetherCompanion] 群聊邀请链接私发失败: user=%s errors=%s', sender_id, ' | '.join(errors) or '当前适配器不支持私聊发送')
         return False
 
-    def _revoke_unused_ticket(self, ticket: RoomTicket) -> None:
+    def _revoke_unused_ticket(self, ticket: RoomTicket) -> bool:
         revoke = getattr(getattr(self, 'ticket_store', None), 'revoke', None)
-        if callable(revoke):
-            revoke(ticket.token)
+        return callable(revoke) and revoke(ticket.token) is True
 
     async def _open_room_from_llm_tool(self, mode: str, event: AstrMessageEvent) -> str:
         """Create a short-lived room for an explicit LLM tool request."""

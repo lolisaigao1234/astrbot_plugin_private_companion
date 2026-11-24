@@ -784,32 +784,53 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
 
     async def test_group_room_only_sends_ticket_to_requester(self):
         from astrbot_host.native_extensions.together.rooms_methods import TogetherRoomsMethods
+        from companion_v2.together.models import RoomTicketStore
+        from companion_v2.together.provider import OperationStore
         from tests.test_together_room_creation import FakePlugin, provider_with, request
 
         class Plugin(FakePlugin, TogetherRoomsMethods):
-            pass
+            def issue_room_ticket(self, *, mode, user_id, native_v2):
+                self.issued = self.ticket_store.issue(mode=mode, user_id=user_id)
+                return self.issued
 
         plugin = Plugin()
         plugin.controller = self.controller
-        plugin.ticket_store = NS(revoke=Mock())
+        plugin.ticket_store = RoomTicketStore()
         provider = provider_with(plugin)
         value = request(kind="group")
         value["context"]["audience"]["scope"].update(platform="tg-main", account_id="tg-main",
             bot_id="bot-tg", session_id="-100400#23", native_scope_id="-100400#23")
         value["host_persona"].update(account_id="tg-main", bot_id="bot-tg")
-        for refused in (False, True):
-            self.platform.client.send_message.side_effect = Forbidden("private chat unavailable") if refused else None
+        for refused, revoked, expected in (
+                (False, True, ("succeeded", "committed")),
+                (True, True, ("failed", "not_committed")),
+                (True, False, ("unknown", "unknown"))):
+            async def send(**kwargs):
+                if str(kwargs["chat_id"]) == str(OWNER):
+                    if not revoked:
+                        plugin.ticket_store.consume(plugin.issued.token)
+                    if refused:
+                        raise Forbidden("private chat unavailable")
+
+            self.platform.client.send_message.side_effect = send
             result = await provider._create_room(value, "scope", {"id": "op"}, user_id=str(OWNER))
             response = provider._response(dict(action="together.room.create", invocation_id="call", origin_key="test",
                 arguments_hash="hash", binding={}), result)
-            self.assertNotIn("tok-1", json.dumps(response))
-            self.assertEqual(result["result"]["delivered_privately"], not refused)
-            send = self.platform.client.send_message.await_args
-            self.assertEqual(send.kwargs["chat_id"], str(OWNER))
-            self.assertIn("/join/", send.kwargs["text"])
-            self.platform.client.send_message.assert_awaited_once()
+            self.assertEqual((response["state"], response["effect"]), expected)
+            self.assertNotIn(plugin.issued.token, json.dumps(response))
+            calls = self.platform.client.send_message.await_args_list
+            self.assertEqual(str(calls[0].kwargs["chat_id"]), str(OWNER))
+            self.assertIn("/join/", calls[0].kwargs["text"])
+            if refused and revoked:
+                self.assertIsNone(response["result"])
+                self.assertEqual(str(calls[1].kwargs["chat_id"]), "-100400")
+                self.assertEqual(str(calls[1].kwargs["message_thread_id"]), "23")
+                self.assertIn("私聊启动", calls[1].kwargs["text"])
+                self.assertNotIn("/join/", calls[1].kwargs["text"])
+                self.assertFalse(OperationStore._is_reclaimable_failure(result))
+            self.assertEqual(len(calls), 2 if refused and revoked else 1)
             self.platform.client.send_message.reset_mock()
-        plugin.ticket_store.revoke.assert_called_once_with("tok-1")
+            self.assertEqual(plugin.ticket_store.get(plugin.issued.token) is None, refused)
 
     async def test_group_event_invite_uses_requesters_private_chat(self):
         from astrbot_host.native_extensions.together.rooms_methods import TogetherRoomsMethods

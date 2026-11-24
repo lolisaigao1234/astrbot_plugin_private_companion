@@ -166,7 +166,8 @@ class OperationStore:
         """A confirmed non-committed failure has no side effects and may be retried."""
         return (isinstance(operation, dict)
                 and operation.get("state") == "failed"
-                and operation.get("effect") == "not_committed")
+                and operation.get("effect") == "not_committed"
+                and operation.get("error") != "together_private_invite_refused")
 
     def begin(self, scope: str, request: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         identity = _operation_identity(request)
@@ -947,9 +948,14 @@ class NativeTogetherProvider:
                 self.plugin._revoke_unused_ticket(ticket)
                 raise
             if not delivered:
-                self.plugin._revoke_unused_ticket(ticket)
-                return self.store.update(scope, operation["id"], state="succeeded", effect="committed",
-                    result={"delivered_privately": False, "message": "请先私聊启动 Bot，再申请房间。"})
+                if not self.plugin._revoke_unused_ticket(ticket):
+                    return self.store.update(scope, operation["id"], state="unknown", effect="unknown",
+                                             error="together_room_result_unconfirmed")
+                # A replay must not issue another ticket or repeat the group notice.
+                failed = self.store.update(scope, operation["id"], state="failed", effect="not_committed",
+                                           error="together_private_invite_refused")
+                await self.plugin.notify_telegram_invite_refused(private_route)
+                return failed
         result = {"room": {"mode": ticket.mode, "ticket_token": ticket.token,
                            "url": url, "created_at": ticket.created_at,
                            "expires_at": ticket.expires_at, "user_id": user_id,
