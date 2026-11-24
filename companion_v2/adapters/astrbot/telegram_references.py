@@ -64,14 +64,18 @@ def _origin(event, origin):
 def voice_caption_parts(raw, parts):
     # AstrBot converts a voice note to Record without its Telegram caption.
     kinds = [getattr(part.type, "value", part.type) for part in parts]
-    if not raw.voice or not raw.caption or kinds not in (["Record"], ["Reply", "Record"]):
+    body = kinds[1:] if kinds[:1] == ["Reply"] else kinds
+    if not raw.voice or not raw.caption or body not in (["Record"], ["Plain"]):
         return parts
     caption = raw.caption.encode("utf-16-le")
     for entity in reversed(raw.caption_entities or ()):
         if entity.type == "text_link" and entity.url:
             end = 2 * (entity.offset + entity.length)
             caption = caption[:end] + f" ({entity.url})".encode("utf-16-le") + caption[end:]
-    return (*parts, SimpleNamespace(type="Plain", text=caption.decode("utf-16-le")))
+    caption = caption.decode("utf-16-le")
+    if body == ["Plain"] and parts[-1].text == caption:
+        return parts
+    return (*parts, SimpleNamespace(type="Plain", text=caption))
 
 
 def private_text_parts(message, parts):
