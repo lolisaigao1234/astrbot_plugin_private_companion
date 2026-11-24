@@ -7,7 +7,7 @@ from companion_v2.sources.dependencies import link
 from companion_v2.sources.models import SourceRecord
 from companion_v2.conversation.forwards.service import prepare_forward
 
-from .models import CapturedQuote, QuoteDescriptor, QuoteImageEvent, TelegramQuote, TelegramQuoteDescriptor, OWNER
+from .models import CapturedQuote, QuoteDescriptor, QuoteImageEvent, TelegramQuote, TelegramQuoteDescriptor, TelegramLinkedQuoteDescriptor, OWNER
 from .forward_models import (ForwardQuoteDescriptor, ForwardQuoteMediaDescriptor, QuoteMediaDescriptor,
                              QuotedForwardEvent)
 from .originals import original_sources
@@ -40,6 +40,9 @@ def prepare_quote(sources, parent, audience, captured):
     if audios or videos:
         extra.update(audios=audios, videos=videos)
     if isinstance(captured, TelegramQuote):
+        if captured.link_suffixes:
+            return TelegramLinkedQuoteDescriptor(*values, selection_offset=captured.selection_offset,
+                                                 link_suffixes=captured.link_suffixes), record
         return TelegramQuoteDescriptor(*values, selection_offset=captured.selection_offset), record
     descriptor = kind(*values, **extra)
     return descriptor, record

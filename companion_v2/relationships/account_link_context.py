@@ -9,7 +9,7 @@ from companion_v2.execution.models import TaskContext, TaskError, require, stamp
 from companion_v2.foundation.refs import ScopeKind
 from companion_v2.memory.codec import source
 from companion_v2.sources.repositories import SourceRepository
-from companion_v2.conversation.native_observations import observations_available, validate_observation
+from companion_v2.conversation.native_observations import history_speaker, observations_available
 from .account_links import PrivateAccountLinks, member_for
 
 MAX_ROWS = 24
@@ -107,7 +107,7 @@ def linked_context(application, context, *, at, before=None):
                     continue
                 require(application.tasks.check_context_access(original, action="conversation.reply", observed_at=at))
                 reference = source(json.loads(row["source_json"]))
-                validate_observation(runtime, row, original, reference)
+                speaker = history_speaker(runtime, row, original, reference)
                 record = require(sources.read(reference, resolved=original.actor, capability="conversation.reply",
                     observed_at=at, authorizer=application.tasks.identity))
                 if record.content_hash != row["content_hash"]:
@@ -117,7 +117,7 @@ def linked_context(application, context, *, at, before=None):
             if not record.payload or chars + len(record.payload) > MAX_CHARS:
                 continue
             records.append({"platform": original.scope.platform, "account_id": original.scope.account_id,
-                "speaker": "user" if row["kind"] == "input" else "assistant",
+                "speaker": speaker,
                 "at": row["projected_at"], "text": record.payload})
             chars += len(record.payload)
             if len(records) >= MAX_ROWS:
