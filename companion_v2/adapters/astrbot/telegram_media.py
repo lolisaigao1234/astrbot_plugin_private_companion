@@ -61,7 +61,7 @@ def sticker_marker(event):
     return sticker_label(sticker)
 
 
-async def capture_turn_media(bridge, references, images, audios, videos, text_parts, captioned):
+async def capture_turn_media(bridge, references, images, audios, videos, text_parts, partial_media):
     """Give direct attachments first claim, then admit verified quote photos."""
     from companion_v2.conversation.media import models as visual
     from companion_v2.conversation.media.audio import models as voice
@@ -89,7 +89,7 @@ async def capture_turn_media(bridge, references, images, audios, videos, text_pa
                 remaining -= item.descriptor.retained_bytes
                 accepted.append(item)
             except TaskError as error:
-                if error.code != f"host_{kind}_limit" or not (captioned or quoted and any(descriptors.values())):
+                if error.code != f"host_{kind}_limit" or not (partial_media or quoted and any(descriptors.values())):
                     raise
                 if not quoted:
                     text_parts[locator.position] = "[附件超过读取上限，本轮未读取]"
