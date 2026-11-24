@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from types import SimpleNamespace
 
 from companion_v2.foundation.refs import ScopeKind
@@ -11,6 +12,17 @@ from .core_reply_forwards import telegram_private_forward
 from .private_notice import prepare_relay_transport, send_group_notice, send_private_notice
 from .relay_pending import (claim_expired, claim_group, claim_private_receipts, claim_telegram_receipt, finish,
                             mark_waiting_permission, requeue)
+
+
+# Match the complete QQ answer, including common courtesies around an affirmative
+# clause. An approval verb inside a question, quotation or refusal grants nothing.
+_QQ_ASSENT = r"(?:当然)?(?:可以|同意|好|行|没问题)(?:的|滴|呀|啊|哦|吧)?"
+_QQ_SHARE = r"(?:请|你|帮我|麻烦你)?(?:转告|转发|带回去)(?:一下|吧)?"
+_QQ_PERMISSION = re.compile(
+    r"(?:不好意思(?:刚看到)?|刚看到|嗯|没问题|没什么不好)?[，, ]*"
+    rf"(?:{_QQ_ASSENT}(?:[，, ]*{_QQ_SHARE})?|{_QQ_SHARE})"
+    r"(?:[，, ]*(?:谢谢你?|麻烦你了|没关系))?[。！!.~～]*"
+)
 
 
 def _text(value, limit=800):
@@ -169,12 +181,9 @@ async def process_private_receipts(controller, event, target):
     account = _telegram_account(event, target)
     if account is None:
         answer = str(getattr(event, "message_str", "") or "").strip().rstrip("。！!.").strip()
-        # QQ accepts a polite preface. The remaining answer must itself grant permission.
-        answer = answer.removeprefix("不好意思").lstrip("，, ").removeprefix("刚看到").lstrip("，, ")
-        confirmed = answer in (*approvals, "可以的", "可以转告", "同意转告", "可以转发",
-                               "请转告", "请转发", "没什么不好，可以")
-        rejected = not confirmed and (answer == "不好" or any(word in answer for word in (
-            *refusals, "不同意", "勿转", "不要转发", "不好转告")))
+        confirmed = _QQ_PERMISSION.fullmatch(answer) is not None
+        rejected = not confirmed and any(word in answer for word in (
+            *refusals, "不同意", "不好", "勿转", "禁止", "不许", "不想", "不转"))
         permission_tasks = await asyncio.to_thread(
             claim_private_receipts, controller.runtime, target_user_id, permission=True)
     else:
@@ -200,10 +209,12 @@ async def process_private_receipts(controller, event, target):
     try:
         for task in permission_tasks:
             task_id = task["id"]
-            if rejected:
+            if rejected or (account is None and not confirmed):
+                # QQ answers are unthreaded. After an unclear response, a later
+                # conversational "好的" cannot safely authorize this older report.
                 in_flight_permission = task_id
-                in_flight_permission_state = "declined"
-                await asyncio.to_thread(finish, controller.runtime, task_id, "declined")
+                in_flight_permission_state = "declined" if rejected else "unconfirmed"
+                await asyncio.to_thread(finish, controller.runtime, task_id, in_flight_permission_state)
             elif confirmed:
                 in_flight_permission = task_id
                 in_flight_permission_state = interrupted_report_state
@@ -231,6 +242,8 @@ async def process_private_receipts(controller, event, target):
                 pass
 
     if account is None:
+        if permission_tasks:
+            return  # The same answer cannot also be reported to another requester.
         reply_tasks = await asyncio.to_thread(claim_private_receipts, controller.runtime, target_user_id)
     settled_reply: set[str] = set()
     in_flight_report: str | None = None
