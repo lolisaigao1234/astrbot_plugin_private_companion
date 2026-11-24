@@ -861,6 +861,20 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
         self.assertEqual(directory.stored_group_names()[("tg-main", "tg-main", "-100400#23")],
                          "新群名-故事")
 
+    async def test_chat_rename_updates_legacy_topics_on_the_same_account(self):
+        directory = self.controller.session_topology
+        for peer, label in (("-100400", "旧-群名"), ("-100400#23", "旧-群名-故事"),
+                            ("-100400#24", "旧-群名"), ("-1004000#23", "其他群")):
+            directory._store_observation(peer, {
+                "unified_msg_origin": "tg-main:GroupMessage:" + peer,
+                "account_id": "tg-main", "group_name": label,
+            })
+        await directory.observe(await group_event(self.platform, -100400, "supergroup", title="新群名",
+                                                  new_chat_title="新群名", message_id=44))
+        names = directory.stored_group_names()
+        for peer, label in (("-100400#23", "新群名-故事"), ("-100400#24", "新群名"), ("-1004000#23", "其他群")):
+            self.assertEqual(names[("tg-main", "tg-main", peer)], label)
+
     async def test_topic_directory_retains_rename_after_reply_to_creation(self):
         directory = self.controller.session_topology
 
