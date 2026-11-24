@@ -135,6 +135,32 @@ class FileUnderstandingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(limits, [7, 3])
                 self.assertIn("上限", rendered[2])
 
+    async def test_failed_extraction_debits_the_bytes_downloaded(self):
+        from unittest.mock import patch
+
+        locators = [NativeFileLocator(i, f"doc{i}.txt", "https://example.org/doc") for i in range(3)]
+        limits = []
+        async def fetch(url, *, maximum_bytes):
+            limits.append(maximum_bytes)
+            return b"oops" if len(limits) == 1 else b"abc"
+
+        async def decode(content, locator, *, maximum_chars, formats):
+            if locator.position == 0:
+                raise TaskError("host_file_invalid", "cannot decode")
+            return extract_document(content, locator.position, locator.name, maximum_chars=maximum_chars)
+
+        for scope in (ScopeKind.PRIVATE, ScopeKind.GROUP):
+            with self.subTest(scope=scope):
+                limits.clear()
+                with patch("astrbot_host.files.loader.fetch_attachment", fetch), patch(
+                        "astrbot_host.files.loader.decode_document", decode):
+                    rendered = await prepare_file_text(locators, load_native_file, settings({**DEFAULTS,
+                        "file_understanding_enabled": True, f"file_understanding_{scope.value}_enabled": True}),
+                        client=None, scope=scope, byte_budget=7)
+                self.assertEqual(limits, [7, 3])
+                self.assertIn("abc", rendered[1])
+                self.assertIn("上限", rendered[2])
+
     async def test_disallowed_scope_does_not_call_the_attachment_loader(self):
         async def forbidden(*_args, **_kwargs):
             raise AssertionError("a disallowed scope must not read attachment bytes")
