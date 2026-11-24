@@ -9,7 +9,7 @@ from companion_v2.execution.models import TaskError
 
 from ..reality_camera import ACTION, explicit_camera_request
 from ..request_context import set_turn_context
-from .host_tools import RealityAudioCommandTool, RealityPrivateManagerTool, private_command, private_management_requested
+from .host_tools import RealityAudioCommandTool, RealityPrivateManagerTool, private_command, private_management_requested, sender_text
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +88,7 @@ class RealityHostEvents:
         user = self.runtime._user(user_id, create=False)
         if user is not None:
             self.schedule(self.runtime._maybe_handle_wakeup_feedback, event, user_id, user,
-                          str(getattr(event, "message_str", "") or ""))
+                          sender_text(event))
         command = private_command(event)
         if command is not None or private_management_requested(event):
             tools = list(getattr(getattr(req, "func_tool", None), "tools", ()) or ())
@@ -101,7 +101,7 @@ class RealityHostEvents:
                 "仅根据本轮明确请求操作；涉及设置或确认时先调用工具，依据实际结果用原人格自然回应。"
                 "本人音频授权须先阅读风险说明，再单独发送确认文字；不得替用户确认或虚构成功。"
                 "普通回复继续由当前 AstrBot 核心对话完成。")
-        if not explicit_camera_request(getattr(event, "message_str", "")):
+        if not explicit_camera_request(sender_text(event)):
             return
         tools = getattr(getattr(req, "func_tool", None), "tools", ()) or ()
         camera_tool = next((tool for tool in tools if getattr(tool, "_action", None) == ACTION), None)
