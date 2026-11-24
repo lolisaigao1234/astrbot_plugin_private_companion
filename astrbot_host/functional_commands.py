@@ -8,7 +8,7 @@ import json
 import logging
 import re
 
-from companion_v2.adapters.astrbot.group_mentions import telegram_plain_text
+from companion_v2.adapters.astrbot.telegram_reply import telegram_plain_text
 
 from .binding import message_text
 from .native_extensions.request_context import set_system_instruction
