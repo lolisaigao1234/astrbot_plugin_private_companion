@@ -1666,6 +1666,20 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
         tasks = _read(self.controller.runtime)["tasks"]
         self.assertEqual((tasks[first]["state"], tasks[second]["state"]), ("waiting_reply", "reported"))
 
+    async def test_unaddressed_reply_during_permission_cannot_answer_another_relay(self):
+        from astrbot_host.relay_pending import _read
+
+        target = self.controller.settings.target("tg-owner")
+        prompt = self.private_relay_task("waiting_permission", True, prompt_id=80)
+        question = self.private_relay_task("waiting_reply", False, question_id=81)
+        receive = self.controller.process_private_relay_receipts
+        await receive(telegram_event(self.platform, 82, "请勿转告"), target)
+        self.platform.client.send_message.assert_not_awaited()
+        tasks = _read(self.controller.runtime)["tasks"]
+        self.assertEqual((tasks[prompt]["state"], tasks[question]["state"]), ("waiting_permission", "waiting_reply"))
+        await receive(self.reply_to_prompt(83, 81, "answer to the question"), target)
+        self.platform.client.send_message.assert_awaited_once()
+
     async def test_private_receipt_consent_selects_the_replied_to_prompt(self):
         from astrbot_host.relay_pending import _read
 

@@ -205,7 +205,9 @@ def claim_telegram_receipt(runtime, account, user_id, message_id, *, reply_to=No
                 addressed = [task for task in waiting if task.get("question_message_id") == reply_to]
                 if len(addressed) == 1 and type(reply_to) is int and 0 < reply_to < message_id:
                     replies = _claim_receipt(addressed)
-            elif not (prompts and permission_answer):
+            elif not prompts:
+                # With a permission prompt and a question both open, only a native
+                # reply target identifies which requester should receive this text.
                 eligible = [task for task in waiting if task.get("question_message_id") is None
                             or task["question_message_id"] < message_id]
                 if len(eligible) == 1:
