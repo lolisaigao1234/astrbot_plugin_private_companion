@@ -87,7 +87,7 @@ class PlatformDisplayNameTests(unittest.IsolatedAsyncioTestCase):
         enabled = dict(id="shared", type="qq_official", enable=True)
         disabled = dict(id="shared", type="telegram", enable=False)
         for rows, expected in (([enabled, disabled], "qq_official"), ([disabled, enabled], "qq_official"),
-                               ([disabled], "telegram"), ([disabled, dict(enabled, enable=False)], None),
+                               ([disabled], "telegram"), ([disabled, dict(enabled, enable=False)], "unknown"), ([], "unknown"),
                                ([dict(disabled, enable=True), dict(enabled, enable=False)], "telegram")):
             with self.subTest(rows=rows):
                 self.context.get_config = lambda: {"platform": rows}
