@@ -8,7 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from companion_v2.adapters.astrbot.files import NativeFileLocator, FileText, TEXT_SUFFIXES, DOCUMENT_SUFFIXES
+from companion_v2.adapters.astrbot.files import NativeFileLocator, FileExtractionError, FileText, TEXT_SUFFIXES, DOCUMENT_SUFFIXES
 from companion_v2.adapters.astrbot.telegram_media import TelegramFile, fetch_location
 from companion_v2.execution.models import TaskError
 from companion_v2.foundation.refs import ScopeKind
@@ -77,4 +77,8 @@ async def load_native_file(locator, *, client, scope, maximum_bytes, maximum_cha
             raise
     if not 0 < len(content) <= maximum_bytes:
         raise TaskError("host_file_limit", "file exceeds its original byte budget")
-    return await decode_document(content, locator, maximum_chars=maximum_chars, formats=formats)
+    try:
+        return await decode_document(content, locator, maximum_chars=maximum_chars, formats=formats)
+    except Exception as exc:
+        code = exc.code if isinstance(exc, TaskError) else "host_file_invalid"
+        raise FileExtractionError(code, len(content)) from None
