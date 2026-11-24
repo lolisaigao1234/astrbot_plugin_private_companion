@@ -101,10 +101,11 @@ window.CompanionStateEditor = (() => {
     const say=(text,bad=false)=>{message=text;error=bad;};
     const emit=()=>{if(alive)changed();};
     const windowSelected=()=>scope?.window_selected===true;
-    const editableFields=kind=>configFields(kind).filter(name=>windowSelected()||!windowFields.has(name));
+    const editableFields=kind=>configFields(kind).filter(name=>
+      windowFields.has(name)?windowSelected():kind!=="settings"||!scope?.telegram);
     function setScope(value) {
       const key=JSON.stringify([value.installation_id,value.operator_id,value.path,value.window_selected===true]);
-      if(scope?.key===key)return;
+      if(scope?.key===key&&scope.telegram===value.telegram)return;
       scope={...value,key,storage:"companion-state-edit.v1:"+key};
       status=draft=null;pending=stored(scope.storage);busy=false;message="";error=false;
       pendingKind=storedOrigin(scope.storage,pending);
@@ -151,7 +152,7 @@ window.CompanionStateEditor = (() => {
         draft={kind,base,token:status.contact.edit_token,values:{...base},purposes:structuredClone(contact.purposes(status.contact)),stale:false};
       } else if(configKinds.has(kind)) {
         const token=kind==="settings"&&windowSelected()?status.edit_token:status.role_edit_token;
-        if(typeof token!=="string")return;
+        if(typeof token!=="string"||(kind==="settings"&&scope?.telegram&&!windowSelected()))return;
         if(kind!=="settings"&&!maintenance?.fields(kind).every(key=>maintenance.validField(key,status.settings?.[key])))return;
         const base=Object.fromEntries(editableFields(kind).map(key=>[key,status.settings[key]]));
         draft={kind,base,token,windowToken:status.edit_token,roleToken:status.role_edit_token,
@@ -355,14 +356,14 @@ window.CompanionStateEditor = (() => {
     function form({after="",grouped=false}={}) {
       if(!draft)return "";
       const disabled=busy||!!pending,settings=draft.kind==="settings";
-      const content=draft.kind==="contact"?contact.form(draft,e):maintenance?.titles[draft.kind]?maintenance.form(draft,e):settings?`<div class="state-edit-fields">${windowSelected()?`<label class="state-checkbox"><input type="checkbox" id="state-typing-enabled" data-state-field="typing_enabled" ${draft.values.typing_enabled?"checked":""}>启用当前私聊窗口的正在输入提示</label><p class="state-edit-note">身份校验通过后开始，持续到最后一段发送结束，包含模型等待与分段间隔。</p>
+      const content=draft.kind==="contact"?contact.form(draft,e):maintenance?.titles[draft.kind]&&!(settings&&scope.telegram)?maintenance.form(draft,e):settings?`<div class="state-edit-fields">${windowSelected()?`<label class="state-checkbox"><input type="checkbox" id="state-typing-enabled" data-state-field="typing_enabled" ${draft.values.typing_enabled?"checked":""}>启用当前私聊窗口的正在输入提示</label><p class="state-edit-note">身份校验通过后开始，持续到最后一段发送结束，包含模型等待与分段间隔。</p>
         <label for="state-typing-seconds">输入提示刷新间隔（秒）<input id="state-typing-seconds" type="number" min="1" max="10" step="1" required data-state-field="typing_refresh_seconds" value="${e(draft.values.typing_refresh_seconds)}"></label>`:'<p class="state-edit-note">未选择私聊窗口；正在输入提示需选择窗口后设置。</p>'}
-        <label class="state-checkbox"><input type="checkbox" id="state-presence-enabled" data-state-field="presence_enabled" ${draft.values.presence_enabled?"checked":""}>启用角色 QQ 自定义短状态</label>
+        ${scope.telegram?"</div>":`<label class="state-checkbox"><input type="checkbox" id="state-presence-enabled" data-state-field="presence_enabled" ${draft.values.presence_enabled?"checked":""}>启用角色 QQ 自定义短状态</label>
         <label class="state-checkbox"><input type="checkbox" id="state-online-status-enabled" data-state-field="online_status_enabled" ${draft.values.online_status_enabled?"checked":""}>启用角色 QQ 在线状态</label></div>
-        <p class="state-edit-help">正在输入只跟随当前私聊窗口；QQ 在线状态和自定义短状态按角色保存，切换私聊窗口或新建会话都不会丢失。启用后会更新该角色绑定的 QQ 账号：在线状态按角色模拟状态上报在线／离开／忙碌，自定义短状态显示公开短文案；两者共用同一路展示，同一时刻只报一种，日程里写了公开文案时以日程为准，否则在线状态优先于短状态。</p>`
+        <p class="state-edit-help">正在输入只跟随当前私聊窗口；QQ 在线状态和自定义短状态按角色保存，切换私聊窗口或新建会话都不会丢失。启用后会更新该角色绑定的 QQ 账号：在线状态按角色模拟状态上报在线／离开／忙碌，自定义短状态显示公开短文案；两者共用同一路展示，同一时刻只报一种，日程里写了公开文案时以日程为准，否则在线状态优先于短状态。</p>`}`
         :`<p class="state-edit-title">${e(draft.base.title)}</p><label for="state-public-wording">公开短文案（最多 8 个字，可留空）<input id="state-public-wording" type="text" data-state-field="presence" value="${e(draft.values.presence)}" autocomplete="off"></label>
         <p class="state-edit-help">当前文案：${e(current()?.presence||"留空")}；清空后不提供日程文案。</p>`;
-      const title=draft.kind==="contact"?"联系安排":maintenance?.titles[draft.kind];
+      const title=draft.kind==="contact"?"联系安排":settings&&scope.telegram?"正在输入提示":maintenance?.titles[draft.kind];
       const hideLegend=grouped||["intensity","health","hunger","mood","patrol"].includes(draft.kind);
       const bodyMarkup=`<fieldset class="state-config-fields" ${disabled?"disabled":""}>${hideLegend?`<legend class="sr-only">${title||"状态配置"}</legend>`:`<legend>${title|| (settings?"编辑展示设置":"编辑日程公开文案")}</legend>`}${content}</fieldset>${after}`;
       return `<form id="state-edit-form" data-state-form-kind="${draft.kind}"${grouped?' class="state-config-form"':""}>${grouped?`<div class="state-config-body">${bodyMarkup}</div>`:bodyMarkup}
@@ -376,14 +377,14 @@ window.CompanionStateEditor = (() => {
         mood:"mood",patrol:"patrol",planning:"planning",weather:"weather",datetime:"datetime",presentation:"settings"};
       const kind=kinds[feature];
       if(!kind)return "";
-      const title=maintenance?.titles[kind]||"QQ 展示设置";
+      const title=kind==="settings"&&scope.telegram?"正在输入提示":maintenance?.titles[kind]||"QQ 展示设置";
       const tokenReady=typeof (kind==="settings"&&windowSelected()?status.edit_token:status.role_edit_token)==="string";
       const unavailable=!tokenReady||(kind==="settings"?!editableFields(kind).every(key=>key==="typing_refresh_seconds"?Number.isInteger(status.settings?.[key])&&status.settings[key]>=1&&status.settings[key]<=10:typeof status.settings?.[key]==="boolean")
         :kind==="align"?!maintenance.canAlign(status):!maintenance?.fields(kind)?.length
           ||!maintenance.fields(kind).every(key=>maintenance.validField(key,status.settings?.[key])));
       const editing=draft&&(draft.kind===kind||feature==="cycle"&&draft.kind==="align"||feature==="planning"&&draft.kind==="wording");
       const action=feature==="home"?"home":feature==="energy"?"intensity":kind;
-      const scopes=feature==="presentation"?"当前角色 · QQ 展示":"当前人格";
+      const scopes=feature==="presentation"?(scope.telegram?"当前私聊窗口":"当前角色 · QQ 展示"):"当前人格";
       const summary=feature==="home"?maintenance.actionSummary("home",status,e)
         :feature==="energy"?maintenance.actionSummary("intensity",status,e)
           :feature==="health"||feature==="hunger"?maintenance.actionSummary(feature,status,e)

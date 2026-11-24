@@ -210,3 +210,47 @@ test("mixed state settings keep role defaults and window controls on their own t
   assert.deepEqual(JSON.parse(JSON.stringify(posts[0].changes)),{typing_enabled:true,maintenance_minutes:45});
   editor.destroy();
 });
+
+test("Telegram typing settings round-trip through the selected window command", async () => {
+  const window={};
+  const context=vm.createContext({window,structuredClone,JSON,crypto,console});
+  vm.runInContext(fs.readFileSync(path.join(__dirname,"../pages/陪伴小屋/state-maintenance.js"),"utf8"),context);
+  vm.runInContext(source,context);
+  const status={settings:{typing_enabled:false,typing_refresh_seconds:4,presence_enabled:true,online_status_enabled:true},
+    edit_token:"window-edit",role_edit_token:"role-edit",state:{values:{}}};
+  const posts=[];
+  const editor=window.CompanionStateEditor.create({changed(){},api:async(method,route,body)=>{
+    posts.push({method,route,body});
+    Object.assign(status.settings,body.changes);
+    return {operation_id:"saved"};
+  },refresh:async()=>editor.setStatus(structuredClone(status))});
+  editor.setScope({installation_id:"install",operator_id:"owner",path:"state/selected",telegram:true,window_selected:true});
+  editor.setStatus(structuredClone(status));
+  editor.open("settings");
+  const markup=()=>editor.markup({feature:"presentation"});
+  assert.match(markup(),/data-state-field="typing_enabled"/);
+  assert.match(markup(),/data-state-field="typing_refresh_seconds" value="4"/);
+  assert.doesNotMatch(markup(),/presence_enabled|online_status_enabled|QQ/);
+  for(const [name,type,value] of [["typing_enabled","checkbox",true],["typing_refresh_seconds","number","9"],["presence_enabled","checkbox",false]]){
+    editor.input({target:{dataset:{stateField:name},type,checked:value,value,matches:()=>true}});
+  }
+  editor.submit({target:{id:"state-edit-form"},preventDefault(){}});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(posts.length,1);
+  const {method,route,body}=posts[0];
+  assert.equal(method,"POST");
+  assert.equal(route,"state/selected/command");
+  assert.equal(body.action,"configure");
+  assert.equal(body.edit_token,"window-edit");
+  assert.equal(Object.hasOwn(body,"role_edit_token"),false);
+  assert.deepEqual({...body.changes},{typing_enabled:true,typing_refresh_seconds:9});
+  editor.open("settings");
+  assert.match(markup(),/data-state-field="typing_enabled" checked/);
+  assert.match(markup(),/data-state-field="typing_refresh_seconds" value="9"/);
+  editor.click({target:{dataset:{stateEdit:"cancel"},closest(selector){return selector==="[data-state-edit]"?this:null;}}});
+  editor.setStatus({...status,edit_token:null});
+  assert.equal(editor.open("settings"),undefined);
+  assert.doesNotMatch(markup(),/id="state-edit-form"/);
+  assert.match(markup(),/data-state-edit="settings" disabled/);
+  editor.destroy();
+});
