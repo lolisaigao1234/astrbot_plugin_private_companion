@@ -78,12 +78,15 @@ class TelegramForwardOrigin:
     label: str
     sent_at: int
     user_id: str | None
+    chat_fingerprint: str | None = None
 
     def resource_hash(self, message_id):
         fields = ["telegram-forward", message_id, self.label, self.sent_at]
         # Existing user-origin nodes separately prove the original Telegram user ID.
         if self.user_id is None:
             fields.append(self.kind)
+        if self.chat_fingerprint:
+            fields.append(self.chat_fingerprint)
         return digest(fields)
 
     def attribution(self, sender):
