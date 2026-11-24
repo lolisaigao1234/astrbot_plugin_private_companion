@@ -11,6 +11,7 @@ import sqlite3
 import time
 import traceback
 from uuid import uuid4
+from weakref import WeakValueDictionary
 
 from companion_v2.adapters.astrbot.native import (
     HostPersona, NativePrivateBridge, bounded_native_lookup, event_account_id, event_peer_id,
@@ -83,6 +84,7 @@ class AstrBotMultiController:
         self._connection_accounts = ()
         # Lifecycle work may wait on AstrBot; keep that wait out of the lock
         # shared by Dashboard data APIs.
+        self._telegram_receipt_locks = WeakValueDictionary()
         self._control_lock = asyncio.Lock()
         self._lifecycle_lock = asyncio.Lock()
         self.session_topology = SessionTopology(self)
@@ -1664,7 +1666,14 @@ class AstrBotMultiController:
         """Report a target member's private reply to the original relay source."""
         from .relay_pending_events import process_private_receipts
         try:
-            await process_private_receipts(self, event, target)
+            if getattr(getattr(event, "platform_meta", None), "name", None) == "telegram":
+                # Save the prompt ID before judging a concurrent answer from this peer.
+                key = (target.platform_id, target.account_id, target.participant_id)
+                lock = self._telegram_receipt_locks.setdefault(key, asyncio.Lock())
+                async with lock:
+                    await process_private_receipts(self, event, target)
+            else:
+                await process_private_receipts(self, event, target)
         except Exception:
             logger.warning("[CompanionV2] 私聊递话回执处理失败", exc_info=True)
 

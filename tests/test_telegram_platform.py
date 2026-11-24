@@ -1464,6 +1464,32 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
         self.platform.client.send_message.assert_not_awaited()
         self.platform.send_by_session.assert_not_awaited()
 
+    async def test_early_consent_waits_for_the_native_prompt_receipt(self):
+        from astrbot_host.relay_pending import _read
+        target = self.controller.settings.target("tg-owner")
+        task = self.private_relay_task("waiting_reply", True, question_id=70)
+        receive = self.controller.process_private_relay_receipts
+        dispatched, acknowledge = asyncio.Event(), asyncio.Event()
+
+        async def send(**kwargs):
+            if not dispatched.is_set():
+                dispatched.set()
+                await acknowledge.wait()
+                return NS(message_id=80)
+            return NS(message_id=82)
+
+        self.platform.client.send_message.side_effect = send
+        answer = asyncio.create_task(receive(self.reply_to_prompt(71, 70, "my reply"), target))
+        try:
+            await asyncio.wait_for(dispatched.wait(), 10)
+            consent = asyncio.create_task(receive(self.reply_to_prompt(81, 80), target))
+            await asyncio.wait({consent}, timeout=0.2)
+        finally:
+            acknowledge.set()
+        await asyncio.gather(answer, consent)
+        self.assertEqual(_read(self.controller.runtime)["tasks"][task]["state"], "reported")
+        self.assertEqual(self.platform.client.send_message.await_count, 2)
+
     async def test_telegram_question_accepts_only_subsequent_ordinary_messages(self):
         from astrbot_host.relay_pending import _read
 
