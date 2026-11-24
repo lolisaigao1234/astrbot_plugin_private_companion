@@ -18,11 +18,11 @@ from .relay_pending import (claim_expired, claim_group, claim_private_receipts, 
 # clause. An approval verb inside a question, quotation or refusal grants nothing.
 _QQ_PAUSE = r"[，,。.!！、 ]*"
 _QQ_ASSENT = (r"(?:我(?:当然)?同意|(?:当然)?(?:可以|同意|好|行|没问题))"
-              r"(?:的|滴|哒|嘞)?(?:呀|啊|哦|吧|啦|呢)?")
-_QQ_SHARE = (r"(?:请|麻烦)?(?:你)?(?:帮我)?(?:转告|转发|带回去|告诉[他她])"
-             r"(?:给?[他她]|给对方)?(?:一下)?(?:吧)?")
+              r"(?:的|滴|哒|嘞)?(?:呀|啊|哦|吧|啦|呢|(?<=可以)了|(?<=同意)了)?")
+_QQ_SHARE = (r"(?:请|麻烦)?(?:你(?:可以)?)?(?:帮我)?"
+             r"(?:(?:转告|转发|带回去|告诉[他她])(?:给?[他她]|给对方)?|[跟和](?:[他她]|对方)说)(?:一[下声])?(?:吧)?")
 _QQ_PERMISSION = re.compile(
-    rf"(?:不好意思(?:{_QQ_PAUSE}刚看到)?|刚看到|嗯嗯?|没问题|没什么不好|没事|那)?{_QQ_PAUSE}"
+    rf"(?:不好意思(?:{_QQ_PAUSE}刚看到)?|刚看到|嗯嗯?|没问题|没什么不好|没事|那|是的?|对的?)?{_QQ_PAUSE}"
     rf"(?:{_QQ_ASSENT}(?:{_QQ_PAUSE}{_QQ_ASSENT}){{0,2}}(?:{_QQ_PAUSE}{_QQ_SHARE})?|{_QQ_SHARE})"
     rf"(?:{_QQ_PAUSE}(?:谢谢你?|麻烦你了|辛苦了|没关系))?[。！!.~～]*"
 )

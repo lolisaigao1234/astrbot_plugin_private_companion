@@ -170,7 +170,7 @@ class RelayPendingEventTests(unittest.IsolatedAsyncioTestCase):
             "kind": "private_receipt", "state": "waiting_permission", "target_user_id": "2002",
             "source_id": "1001", "reply_text": "private answer", "expires_at": time.time() + 60,
         })
-        for answer in ("我还没想好", "今天天气不错", "好的"):
+        for answer in ("我还没想好", "是的", "你可以", "今天天气不错", "好的"):
             self.event.message_str = answer
             await process_private_receipts(self.controller, self.event, target)
         self.assertEqual(_read(self.runtime)["tasks"][task]["state"], "unconfirmed")
@@ -184,7 +184,8 @@ class RelayPendingEventTests(unittest.IsolatedAsyncioTestCase):
                                     "不好意思刚看到，同意转告。", "好的，你转告吧", "行吧",
                                     "不好意思，刚看到，可以", "好的呀", "好嘞", "我同意，可以转告她", "可以啦", "可以。谢谢",
                                     "没事，可以", "可以告诉他", "行行行", "嗯嗯，可以",
-                                    "可以，帮我转告一下吧", "可以，请帮我转告他"), 1):
+                                    "可以，帮我转告一下吧", "可以，请帮我转告他",
+                                    "可以跟他说", "你可以转告他", "是的，可以", "可以了"), 1):
             with self.subTest(answer=answer):
                 task = add_task(self.runtime, {
                     "kind": "private_receipt", "state": "waiting_permission", "target_user_id": "2002",
