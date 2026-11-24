@@ -1476,6 +1476,13 @@ test("account-link routes are not exposed through other workspace channels", asy
   assert.equal(h.calls.length, 0);
 });
 
+test("QQ Official keeps its numeric account label for either transport", async () => {
+  const h = await harness();
+  for (const platform_name of ["qq_official", "qq_official_webhook"]) {
+    assert.equal(h.product.accountLabel({platform_name, account_id: "123"}), "QQ 123");
+  }
+});
+
 test("Telegram account labels follow the adapter family for numeric and named instances", async () => {
   const h = await harness();
   for (const account_id of ["12345", "private-bot"]) {

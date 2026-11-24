@@ -24,11 +24,11 @@ function harness(windowKind="none",section="state") {
     directory:()=>({installation_id:"install",operator_id:"operator",targets}),
     selection:()=>({target_id:windowKind==="none"?null:"selected",bot_id:"bot-1",role_id:"role-1"}),roleTarget:()=>targets[0]},
     CompanionStateEditor:{create:()=>({setScope:value=>scopes.push(value),setStatus:value=>{if(value)statuses.push(value);},
-      invalidate(){},markup:()=>"",destroy(){},discardIfPristine:()=>true,interacting:false})}};
+      open(){},invalidate(){},markup:()=>"",destroy(){},discardIfPristine:()=>true,interacting:false})}};
   const document={addEventListener(){},querySelector:()=>null,body:{classList:{toggle(){}}},hidden:false};
   const root={isConnected:true,innerHTML:"",addEventListener(){},removeEventListener(){},querySelector:()=>null,
     querySelectorAll:()=>[],contains:()=>false};
-  vm.runInNewContext(source,{window,document,Promise,Intl,Date,console,setTimeout:()=>1,clearTimeout(){}});
+  vm.runInNewContext(source,{window,document,Promise,Intl,Date,console,requestAnimationFrame(){},setTimeout:()=>1,clearTimeout(){}});
   const page=window.CompanionStatePage;
   return {page,root,requests,scopes,statuses,ready:page.mount(root,{section,feature:"presentation"})};
 }
@@ -65,10 +65,13 @@ for(const kind of ["none","group","other_bot"])test(`contact state never reads a
   h.page.unmount();
 });
 
-test("a Telegram window explains QQ-only status on a direct presentation link",async()=>{
+test("a Telegram presentation link displays window typing and hides QQ channels",async()=>{
   const h=harness("telegram");await h.ready;
   assert.match(h.root.innerHTML,/Telegram/);
-  assert.doesNotMatch(h.root.innerHTML,/data-state-feature="presentation"|data-state-edit="settings"|QQ 状态/);
+  assert.equal(h.scopes.at(-1).telegram,true);
+  assert.match(h.root.innerHTML,/输入提示刷新间隔.*7 秒/s);
+  assert.doesNotMatch(h.root.innerHTML,/QQ 状态|在线状态|自定义短状态/);
+  assert.equal(h.page.openEditor("settings","typing_refresh_seconds"),true);
   assert.equal(h.page.openEditor("settings","online_status_enabled"),false);
   h.page.unmount();
 });

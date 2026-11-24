@@ -6,7 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace as NS
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from telegram import Update
 
@@ -114,7 +114,11 @@ class TelegramCaptureTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase
         self.assertIn("caption", captured.text)
         self.assertNotIn(self.platform.client.token, captured.text)
         self.bridge.file_settings = lambda *_: {"file_understanding_enabled": True, "file_understanding_max_size_mb": 1}
-        with patch("astrbot_host.files.loader.fetch_attachment", AsyncMock(return_value=bytes(1024**2 + 1))):
+        with patch("astrbot_host.media.aiohttp.TCPConnector"), patch("astrbot_host.media.aiohttp.ClientSession") as session:
+            response = NS(status=200, headers={}, content_length=1024**2 + 1)
+            request = MagicMock()
+            request.return_value.__aenter__.return_value = response
+            session.return_value.__aenter__.return_value.get = request
             captured = (await self.bridge.capture(self.event)).unwrap()
         self.assertIn("caption", captured.text)
         self.assertIn("文件超过读取大小上限", captured.text)

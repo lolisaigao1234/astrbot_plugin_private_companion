@@ -77,6 +77,8 @@ class TelegramQuote(CapturedQuote):
     companion_sender: bool = False
     selection_offset: int | None = None
 
+    link_suffixes: tuple = ()
+
     def observation_text(self):
         sender = f"伙伴 ({self.sender_id})" if self.companion_sender else self.sender_id
         return f"[引用消息 {self.message_id}，原发送者 {sender}，时间 {self.sent_at}]\n{self.text}"
@@ -100,7 +102,11 @@ class QuoteDescriptor:
     @classmethod
     def restore(cls, data):
         if "selection_offset" in data:
-            return TelegramQuoteDescriptor(**{**data, "images": tuple(image_descriptor(i) for i in data["images"])})
+            fields = {**data, "images": tuple(image_descriptor(i) for i in data["images"])}
+            if "link_suffixes" in fields:
+                fields["link_suffixes"] = tuple(tuple(item) for item in fields["link_suffixes"])
+                return TelegramLinkedQuoteDescriptor(**fields)
+            return TelegramQuoteDescriptor(**fields)
         if "forwards" in data:
             from .forward_models import ForwardQuoteDescriptor
             return ForwardQuoteDescriptor.restore(data)
@@ -113,6 +119,11 @@ class QuoteDescriptor:
 @dataclass(frozen=True)
 class TelegramQuoteDescriptor(QuoteDescriptor):
     selection_offset: int | None = None
+
+
+@dataclass(frozen=True)
+class TelegramLinkedQuoteDescriptor(TelegramQuoteDescriptor):
+    link_suffixes: tuple = ()
 
 
 def event_forwards(event):

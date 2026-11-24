@@ -4,7 +4,7 @@ from datetime import datetime
 import json
 
 from companion_v2.execution.models import TaskContext, TaskError, require, stamp
-from companion_v2.conversation.native_observations import observations_available, validate_observation
+from companion_v2.conversation.native_observations import history_speaker, observations_available
 from companion_v2.sources.repositories import SourceRepository
 from companion_v2.memory.codec import source
 from .account_links import PrivateAccountLinks, member_for
@@ -84,12 +84,12 @@ def history(application, context, *, at, cursor=None):
                     continue
                 require(application.tasks.check_context_access(original, action="conversation.reply", observed_at=at))
                 reference = source(json.loads(row["source_json"]))
-                validate_observation(runtime, row, original, reference)
+                speaker = history_speaker(runtime, row, original, reference)
                 record = require(SourceRepository(runtime).read(reference, resolved=original.actor,
                     capability="conversation.reply", observed_at=at, authorizer=application.tasks.identity))
                 if record.content_hash != row["content_hash"]:
                     continue
-                text, speaker = record.payload, "user" if row["kind"] == "input" else "assistant"
+                text = record.payload
             else:
                 from companion_v2.delivery.service import DeliveryRequest
                 row = application.outbound._row(item["original_id"])

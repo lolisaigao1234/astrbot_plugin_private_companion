@@ -92,7 +92,15 @@ def message_references(event):
             images = tuple(freeze_attachment(event, image_locator(index, item.file, item.url))
                            for index, item in enumerate(part.chain or ())
                            if getattr(item.type, "value", item.type) == "Image")
+    # AstrBot inserts these suffixes in the admitted Plain. Keep their UTF-16
+    # locations and fingerprints so verified history can recover Telegram's text.
+    link_suffixes = []
+    for entity in original.entities or original.caption_entities or ():
+        if entity.type == "text_link" and entity.url:
+            suffix = f" ({entity.url})"
+            link_suffixes.append((entity.offset + entity.length, len(suffix.encode("utf-16-le")) // 2,
+                                  digest(suffix)))
     quote = TelegramQuote(position, str(original.message_id), sender, int(original.date.timestamp()),
                           safe_text(event, text) if text.strip() else "[附件]", companion_sender=sender == bot_id,
-                          selection_offset=raw.quote.position if raw.quote else None)
+                          selection_offset=raw.quote.position if raw.quote else None, link_suffixes=tuple(link_suffixes))
     return replace(references, quote=quote, images=images)
