@@ -191,23 +191,35 @@ class MultiPrivateBridge(NativePrivateBridge):
             pieces.append(sticker)
         return safe_text(event, "".join(pieces))
 
+    @staticmethod
+    def has_direct_and_quoted_photo(event):
+        from astrbot.core.message.components import Image, Reply
+
+        parts = event.message_obj.message
+        return (any(isinstance(part, Image) for part in parts)
+                and any(isinstance(child, Image) for part in parts if isinstance(part, Reply)
+                        for child in part.chain or ()))
+
     async def prepare_telegram_album(self, event):
-        """Keep album components within the shared budget before AstrBot builds its request."""
+        """Budget direct attachments and embedded quote photos before SDK request collection."""
         import base64
-        from astrbot.core.message.components import File, Image, Plain, Record, Video
+        from astrbot.core.message.components import File, Image, Plain, Record, Reply, Video
         from companion_v2.adapters.astrbot.files import MAX_FILES, file_locator
-        from companion_v2.adapters.astrbot.native import NativeAudioLocator
+        from companion_v2.adapters.astrbot.native import NativeAudioLocator, NativeImageLocator
         from companion_v2.adapters.astrbot.telegram_media import freeze_attachment
         from companion_v2.conversation.media.audio.models import MAX_AUDIO_BYTES, MAX_INPUT_AUDIOS
         from companion_v2.conversation.media.models import MAX_IMAGE_BYTES, MAX_INPUT_IMAGES, MAX_TURN_BYTES, fits_budget
         from companion_v2.conversation.media.video.models import MAX_VIDEO_BYTES, MAX_VIDEOS
         from .audio.loader import fetch_native_audio_bytes
-        from .core_reply_media import direct_image_locators, frozen_image_locators
+        from .core_reply_media import frozen_image_locators
         from .core_reply_video_sources import video_positions
         from .telegram_forward_burst import bounded_file_component
         from .video.loader import fetch_native_video_bytes
 
-        images = {i.position: i for i in direct_image_locators(frozen_image_locators(event))}
+        locators = frozen_image_locators(event)
+        images = {item.position: item for item in locators if isinstance(item, NativeImageLocator)}
+        quote_images = {(quote.position, image.position): image for quote in locators
+                        if not isinstance(quote, NativeImageLocator) for image in quote.images}
         message = event.message_obj
         videos = {v.position: v for v in video_positions(event, video_type=Video, limit=None)}
         limited = "[附件超过读取上限，本轮未读取]"
@@ -216,6 +228,20 @@ class MultiPrivateBridge(NativePrivateBridge):
         limits = {Image: MAX_INPUT_IMAGES, Record: MAX_INPUT_AUDIOS, Video: MAX_VIDEOS, File: MAX_FILES}
         counts = defaultdict(int)
         photos = []
+
+        async def load_photo(locator):
+            nonlocal remaining
+            if len(photos) >= MAX_INPUT_IMAGES or remaining <= 0:
+                raise TaskError("host_image_limit", "turn photo capacity exhausted")
+            photo = await self.image_loader(locator, maximum_bytes=min(remaining, MAX_IMAGE_BYTES))
+            size = photo.descriptor.retained_bytes
+            if (photo.descriptor.position != locator.position or size > remaining
+                    or not fits_budget((*photos, photo.descriptor))):
+                raise TaskError("host_image_limit", "image exceeds turn limits")
+            remaining -= size
+            photos.append(photo.descriptor)
+            return Image.fromBytes(photo.content)
+
         for position, part in enumerate(message.message):
             kind = type(part)
             if kind not in limits:
@@ -225,12 +251,9 @@ class MultiPrivateBridge(NativePrivateBridge):
                 continue
             try:
                 if kind is Image:
-                    photo = await self.image_loader(images[position], maximum_bytes=min(remaining, MAX_IMAGE_BYTES))
-                    if photo.descriptor.position != position or not fits_budget((*photos, photo.descriptor)):
-                        raise TaskError("host_image_limit", "image exceeds album limits")
-                    size = photo.descriptor.retained_bytes
-                    replacement = Image.fromBytes(photo.content)
-                elif kind is Video:
+                    replacements[position] = await load_photo(images[position])
+                    continue
+                if kind is Video:
                     if position not in videos:
                         replacements[position] = Plain(limited)
                         continue
@@ -250,13 +273,30 @@ class MultiPrivateBridge(NativePrivateBridge):
                 if size > remaining:
                     replacements[position] = Plain(limited)
                     continue
-                if kind is Image:
-                    photos.append(photo.descriptor)
                 remaining -= size
                 counts[kind] += 1
                 replacements[position] = replacement
             except TaskError as exc:
+                remaining = max(0, remaining - getattr(exc, "bytes_read", 0))
                 replacements[position] = Plain(limited if exc.code.endswith("_limit") else "[附件不可用]")
+        # AstrBot gathers Reply.chain independently of the direct message components.
+        for position, reply in enumerate(message.message):
+            if not isinstance(reply, Reply):
+                continue
+            chain = list(reply.chain or ())
+            for index, child in enumerate(chain):
+                if not isinstance(child, Image):
+                    continue
+                locator = quote_images.get((position, index))
+                if locator is None:
+                    chain[index] = Plain("[附件不可用]")
+                    continue
+                try:
+                    chain[index] = await load_photo(locator)
+                except TaskError as exc:
+                    remaining = max(0, remaining - getattr(exc, "bytes_read", 0))
+                    chain[index] = Plain(limited if exc.code.endswith("_limit") else "[附件不可用]")
+            reply.chain = chain
         notes = list(dict.fromkeys(part.text for part in replacements.values() if isinstance(part, Plain)))
         message.message = [replacements.get(position, part) for position, part in enumerate(message.message)]
         if notes:
@@ -1355,7 +1395,8 @@ class MultiHostSession:
                 self.bridge.connections.assert_current(connection_lease)
                 self._validate_core_group_admission(group_admission, context, captured)
                 if (context.scope.kind is ScopeKind.PRIVATE and event.platform_meta.name == "telegram"
-                        and (captured.telegram_burst or getattr(event.message_obj.raw_message.message, "media_group_id", None))):
+                        and (captured.telegram_burst or getattr(event.message_obj.raw_message.message, "media_group_id", None)
+                             or self.bridge.has_direct_and_quoted_photo(event))):
                     await self.bridge.prepare_telegram_album(event)
                     self.bridge.connections.assert_current(connection_lease)
                 turn_id = "core-reply:" + digest([context.key, captured.event_id])
