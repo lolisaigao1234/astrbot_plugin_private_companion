@@ -326,7 +326,9 @@ class TelegramIntakeLifecycleTests(TelegramHostFixture, unittest.IsolatedAsyncio
         config = self.controller.config
         config["multi_host"]["group_targets"] = [
             dict(target_id="topic", platform_id="tg-main", account_id="tg-main",
-                 bot_id="bot-tg", group_id="-400#23")]
+                 bot_id="bot-tg", group_id="-400#23"),
+            dict(target_id="wildcard", platform_id="tg-main", account_id="tg-main",
+                 bot_id="bot-tg", group_id="*")]
         self.window_personas["tg-main:GroupMessage:-400#23"] = "original"
         self.controller = self.make_controller(config)
         plugin = self.started_plugin()
@@ -556,7 +558,7 @@ class TelegramPresenceTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
 
 class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        windows = ("-400", "-100400", "-100400#23")
+        windows = ("-400", "-100400", "-100400#23", "*")
         config = self.controller.config
         config["multi_host"]["group_targets"] = [
             dict(target_id=f"group-{i}", platform_id="tg-main", account_id="tg-main",
