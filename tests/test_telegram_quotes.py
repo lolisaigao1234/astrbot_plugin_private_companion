@@ -116,6 +116,42 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
                          [("80", reference), ("81", reference), ("81", reference),
                           ("82", reference), ("83", "conversation.native_input")])
 
+    async def test_comment_before_forwards_stays_with_new_turn(self):
+        from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA
+
+        plugin = self.started_plugin()
+        earlier = await self.event(number=70, text="earlier turn")
+        previous = plugin._private_reply_followups().start(
+            "tg-owner", earlier, "70", ((earlier, "earlier turn", earlier.created_at),))
+        comment = await self.event(number=71, text="compare these")
+        forward = await self.event(number=72, text="report", forward_origin={
+            "type": "hidden_user", "sender_user_name": "Ada", "date": 1700000000})
+        manager = plugin._private_debounce_manager()
+        comment_seen = asyncio.Event()
+        reserve = manager.reserve
+
+        def reserve_message(key, event, text):
+            if event is comment:
+                comment_seen.set()
+            return reserve(key, event, text)
+
+        async def receive_comment():
+            try:
+                await plugin.receive_companion_message(comment)
+            finally:
+                comment_seen.set()
+
+        with patch.object(manager, "reserve", side_effect=reserve_message), patch.object(
+                self.controller, "prepare_core_reply", wraps=self.controller.prepare_core_reply) as prepare:
+            pending = asyncio.create_task(receive_comment())
+            await asyncio.wait_for(comment_seen.wait(), timeout=10)
+            await asyncio.gather(pending, plugin.receive_companion_message(forward))
+        self.assertEqual([entry[1] for entry in previous.entries], ["earlier turn"])
+        self.assertEqual(prepare.await_count, 1)
+        winner, = [event for event in (comment, forward) if event.get_extra(CORE_REPLY_CONTEXT_EXTRA)]
+        self.assertIn("compare these", winner.message_str)
+        self.assertIn("来源：Ada]\nreport", winner.message_str)
+
     async def test_forwarded_command_stays_reference_text(self):
         from astrbot_host.binding import message_text
         from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA

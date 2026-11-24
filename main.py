@@ -1289,9 +1289,12 @@ class PrivateCompanionV2StagingPlugin(Star):
         forward_policy = (resolve_forward_intake_policy(self.staging)
                           if event_has_forward else None)
         target_key = getattr(target, "target_id", None) if channel == "private" else None
-        if (plain_text is not None and isinstance(target_key, str) and target_key
-                and not forwarded
-                and self._private_reply_followups().active_for(target_key) is not None):
+        followups = self._private_reply_followups() if plain_text is not None and target_key else None
+        earlier_reply = followups.active_for(target_key) if followups is not None else None
+        # Telegram can send the requester's comment before the forwarded updates.
+        # Let the private debounce window settle before assigning it to an older turn.
+        defer_followup = earlier_reply is not None and getattr(getattr(event, "platform_meta", None), "name", None) == "telegram"
+        if earlier_reply is not None and not forwarded and not defer_followup:
             if event_has_forward:
                 await parse_event_forwards(
                     event, policy=forward_policy,
@@ -1498,6 +1501,9 @@ class PrivateCompanionV2StagingPlugin(Star):
                                 event, target, core_reply_plan, debounced_entries, prepare_context)
                     elif status == "ready" and debounced_entries:
                         merged_text = debounce_manager.combined(debounce_pending, debounced_entries)
+                        if (defer_followup and followups.active_for(target_key) is earlier_reply
+                                and self._fold_private_follow_up(event, target, event_ref, merged_text)):
+                            return
                         aggregated_forwards = await coalesce_debounced_forwards(
                             event, debounced_entries,
                             policy=forward_policy or resolve_forward_intake_policy(self.staging),
@@ -1514,6 +1520,9 @@ class PrivateCompanionV2StagingPlugin(Star):
                         if core_reply_plan is not None:
                             plan_text = combine_text_and_forward_summary(merged_text, aggregated_forwards)
                             core_reply_plan = self._core_reply_plan_with_text(core_reply_plan, plan_text)
+                if (status == "bypass" and defer_followup and followups.active_for(target_key) is earlier_reply
+                        and self._fold_private_follow_up(event, target, event_ref, plain_text)):
+                    return
                 if status == "bypass" and forward_parse_task is not None:
                     parsed = await await_event_forwards_parsed(
                         event, policy=forward_policy,
