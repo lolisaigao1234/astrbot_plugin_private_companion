@@ -11,15 +11,17 @@ from unittest.mock import AsyncMock, patch
 from tests.test_telegram_platform import OWNER, TelegramHostFixture
 from telegram import PhotoSize, Update
 from astrbot.core.platform.sources.telegram.tg_event import TelegramPlatformEvent
-from astrbot.core.message.components import Reply
+from astrbot.core.message.components import Image, Reply
 from companion_v2.execution.models import require
+from astrbot_host.media import load_native_image
 
 
 class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.platform.client.id = 424242
         self.platform.client.username = "synthetic_bot"
-        self.types = replace(self.types, reply=Reply, quote_loader=AsyncMock(side_effect=AssertionError("Telegram must not look up the quoted message")))
+        self.types = replace(self.types, image=Image, image_loader=load_native_image,
+                                  reply=Reply, quote_loader=AsyncMock(side_effect=AssertionError("Telegram must not look up the quoted message")))
         config = self.controller.config
         config["multi_host"]["targets"].append(dict(config["multi_host"]["targets"][0],
             target_id="tg-linked", participant_id=str(OWNER + 1)))
@@ -47,6 +49,18 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
         evidence = access.capture(context, reference)
         return access.evidence(context, evidence), (evidence.speaker_id, evidence.source_kind)
 
+    def quoted_evidence(self, result):
+        session = self.controller.session
+        context = session.authority.select(self.controller.settings.target("tg-owner"), result.route.scope, result.role)
+        row = self.controller.runtime.read_one("""SELECT source_json FROM conversation_native_observations
+            WHERE event_id=? AND json_extract(source_json, '$.owner')='conversation.native_reference'""",
+            (result.event_id,))
+        from companion_v2.memory.codec import source
+        access = session.application.memory.writer.access
+        quoted = access.capture(context, source(json.loads(row["source_json"])))
+        self.assertEqual((quoted.speaker_id, quoted.source_kind), (None, "observation"))
+        return access.evidence(context, quoted)
+
     def prompt(self, event, original, text):
         from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA, inject_core_reply_prompt
 
@@ -72,16 +86,7 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
                     self.assertNotIn(original, result.text)
             human_text, (_, kind) = self.observe(result)
             self.assertEqual((human_text, kind), ("说说看", "human_message"))
-            session = self.controller.session
-            context = session.authority.select(self.controller.settings.target("tg-owner"), result.route.scope, result.role)
-            row = self.controller.runtime.read_one("""SELECT source_json FROM conversation_native_observations
-                WHERE event_id=? AND json_extract(source_json, '$.owner')='conversation.native_reference'""",
-                (result.event_id,))
-            from companion_v2.memory.codec import source
-            access = session.application.memory.writer.access
-            quoted = access.capture(context, source(json.loads(row["source_json"])))
-            self.assertEqual((quoted.speaker_id, quoted.source_kind), (None, "observation"))
-            record = access.evidence(context, quoted)
+            record = self.quoted_evidence(result)
             self.assertIn(original, record)
             self.assertIn(str(sender), record)
             if selection:
@@ -170,9 +175,7 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
     async def test_captioned_photos_keep_the_original_sender_and_image(self):
         from astrbot_host.core_reply_media import frozen_image_locators, prepare_native_input_images
         from tests.test_conversation_images import image_bytes
-        from astrbot_host.media import load_native_image
         source = image_bytes("green")
-        self.bridge.image_loader = load_native_image
         photo = [{"file_id": "file", "file_unique_id": "unique", "width": 2, "height": 2}]
         for sender in (OWNER, 424242):
             with patch.object(PhotoSize, "get_file", new=AsyncMock(return_value=NS(
@@ -181,6 +184,11 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
             quote, = require(await self.bridge.capture(event)).quotes
             self.assertEqual((quote.text, quote.sender_id), ("\n[图片 1]\n绿", str(sender)))
             self.assertEqual(len(quote.images), 1)
+            with patch.object(PhotoSize, "get_file", new=AsyncMock(return_value=NS(file_path="unused"))):
+                selection = await self.event(number=22, text="引用", quote={"text": "绿", "position": 0},
+                    reply_to_message=self.message(10, sender, photo=photo, caption="绿色"))
+            partial, = require(await self.bridge.capture(selection)).quotes
+            self.assertEqual((partial.text, partial.images, frozen_image_locators(selection)), ("绿", (), ()))
             original = require(await self.bridge.capture_core_reply(event))
             session = self.controller.session
             target = self.controller.settings.target("tg-owner")
@@ -216,3 +224,61 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
                                        reply_to_message=self.message(10, **original))
             outcome = await session.receive(invalid, target)
             self.assertEqual(outcome.failure.code, "quote_original_changed")
+
+    async def test_replies_to_admitted_forwards_and_replies_verify_the_embedded_body(self):
+        session = self.controller.session
+        target = self.controller.settings.target("tg-owner")
+        origins = (
+            {"type": "hidden_user", "sender_user_name": "Hidden"},
+            {"type": "user", "sender_user": self.message(1, 42)["from"]},
+            {"type": "chat", "sender_chat": {"id": -111, "type": "supergroup", "title": "Group"}},
+            {"type": "channel", "chat": {"id": -222, "type": "channel", "title": "News"}, "message_id": 9},
+        )
+        for index, origin in enumerate(origins):
+            number = 100 + 10 * index
+            forwarded = dict(text="😀原文", forward_origin=dict(origin, date=1699990000))
+            require(await session.receive(await self.event(number, **forwarded), target))
+            quoted = self.message(number, **forwarded)
+            for seq, selection in enumerate(({}, {"quote": {"text": "原", "position": 2}}), 1):
+                event = await self.event(number + seq, text="讨论", reply_to_message=quoted, **selection)
+                full = require(await self.bridge.capture_core_reply(event))
+                quote, = full.quotes
+                self.assertEqual(quote.sender_id, str(OWNER))
+                self.assertEqual(quote.forward_origin.kind, origin["type"])
+                self.observe(full)
+                evidence = self.quoted_evidence(full)
+                self.assertIn(quote.forward_origin.attribution(str(OWNER)), evidence)
+                if selection:
+                    self.assertNotIn("原文", evidence)
+                prompt = self.prompt(event, full, quote.text + "讨论")
+                self.assertIn(quote.forward_origin.attribution(str(OWNER)), prompt)
+                self.assertEqual(prompt.count(quote.text), 1)
+                require(await session.receive(event, target))
+            for seq, changes in enumerate((dict(text="其他"), dict(forward_origin=None),
+                                          dict(forward_origin=dict(origin, date=1699990001))), 3):
+                changed = await self.event(number + seq, text="?", reply_to_message=dict(quoted, **changes))
+                self.assertEqual((await session.receive(changed, target)).failure.code, "quote_original_changed")
+            nested = await self.event(number + 6, text="继续", reply_to_message=self.message(number + 1, text="讨论"))
+            require(await session.receive(nested, target))
+            changed = await self.event(number + 7, text="继续", reply_to_message=self.message(number + 1, text="错误"))
+            self.assertEqual((await session.receive(changed, target)).failure.code, "quote_original_changed")
+
+    async def test_admitted_static_sticker_keeps_converted_image_and_emoji(self):
+        from telegram import Sticker
+        from astrbot_host.core_reply_media import frozen_image_locators
+        from tests.test_conversation_images import image_bytes
+
+        sticker = dict(file_id="file", file_unique_id="unique", type="regular", width=2, height=2,
+                       emoji="🍀", is_animated=False, is_video=False)
+        url = "base64://" + base64.b64encode(image_bytes("green")).decode()
+        target = self.controller.settings.target("tg-owner")
+        with patch.object(Sticker, "get_file", new=AsyncMock(return_value=NS(file_path=url))):
+            original = await self.event(10, sticker=sticker)
+            quoted = await self.event(11, text="看看", reply_to_message=self.message(10, sticker=sticker))
+        require(await self.controller.session.receive(original, target))
+        capture = require(await self.bridge.capture(quoted))
+        quote, = capture.quotes
+        self.assertEqual(quote.text, "\n[图片 1]\nSticker: 🍀")
+        self.assertEqual(len(quote.images), 1)
+        self.assertEqual(len(frozen_image_locators(quoted)[0].images), 1)
+        require(await self.controller.session.receive(quoted, target))
