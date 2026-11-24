@@ -1,7 +1,8 @@
 """Group trigger facts from the authenticated native message components."""
 
 from collections.abc import Mapping
-from companion_v2.adapters.astrbot.group_mentions import bot_mention_ids, official_mention_targets, telegram_reply_to_bot
+from companion_v2.adapters.astrbot.group_mentions import bot_mention_ids, official_mention_targets
+from companion_v2.adapters.astrbot.telegram_reply import telegram_reply_to_bot
 
 
 def group_trigger_facts(event, account_id):

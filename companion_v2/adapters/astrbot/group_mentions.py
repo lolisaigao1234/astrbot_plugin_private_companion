@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 from companion_v2.conversation.group_timing import SELF_MENTION
 from .group_quotes import mention_text
-from .telegram_reply import reply_original
+from .telegram_reply import telegram_plain_text
 from .voice_stt import (
     ASTRBOT_STT_TRANSCRIPTS_EXTRA,
     STT_EXTRA_KEYS,
@@ -83,37 +83,6 @@ def _official_original(event, identifiers):
     restored = QQ_MENTION.sub(lambda match: SELF_MENTION
         if (match.group("short") or match.group("xml")) in identifiers else match.group(), content)
     return parse_face(restored).strip()
-
-
-def _telegram_group_message(event):
-    if (_get(_get(event, "platform_meta"), "name") == "telegram"
-            and _get(event.message_obj.type, "value") == "GroupMessage"):
-        return _get(_get(event.message_obj, "raw_message"), "message")
-    return None
-
-
-def _sent_by_bot(event, original):
-    author = _get(original, "from_user")
-    return (_get(author, "is_bot") is True
-            and _get(author, "id") == _get(_get(event, "client"), "id"))
-
-
-def telegram_reply_to_bot(event):
-    return _sent_by_bot(event, reply_original(_telegram_group_message(event)))
-
-
-def telegram_has_reply_prefix(event):
-    # AstrBot prefixes even implicit references to a bot-created forum topic.
-    message = _telegram_group_message(event)
-    return bool(_get(message, "text")) and _sent_by_bot(event, _get(message, "reply_to_message"))
-
-
-def telegram_plain_text(event, text):
-    if telegram_has_reply_prefix(event):
-        for marker in ("/ ", f"/@{event.message_obj.self_id} "):
-            if text.startswith(marker):
-                return text[len(marker):]
-    return text
 
 
 def _telegram_mention_projection(event, parts):
