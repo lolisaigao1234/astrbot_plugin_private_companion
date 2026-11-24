@@ -162,7 +162,7 @@ window.CompanionStateEditor = (() => {
         if(!maintenance?.canAlign(status))return;
         draft={kind,base:maintenance.snapshot(status),values:{applicability:"",day:status.state.cycle_timeline?.cycle_day??""},stale:false};
       } else {
-        const item=status.calendar?.items?.[index];if(!usable(item))return;
+        const item=status.calendar?.items?.[index];if(scope.telegram||!usable(item))return;
         draft={kind:"wording",base:structuredClone(item),values:{presence:item.presence||""},stale:false};
       }
       category=categoryOf(kind);
