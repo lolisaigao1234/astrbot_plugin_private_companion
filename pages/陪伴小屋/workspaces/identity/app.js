@@ -86,10 +86,14 @@
   const personFilter = person => isPrivateUser(person) ? "stable"
     : person?.group_member ? "temporary" : person ? "discovered" : null;
   const accountPlatform = item => ({
-    telegram:"Telegram", wechat_native:"微信", weixin_oc:"微信", lark:"飞书",
+    telegram:"Telegram", wechat_native:"微信", weixin_oc:"微信",
     default:"QQ", qq:"QQ", aiocqhttp:"QQ", onebot:"QQ", qq_official:"QQ", qq_official_webhook:"QQ",
   })[item.platform_name || item.platform_id || item.platform] || "账号";
-  const peerLabel = item => accountPlatform(item) + " " + (item.native_account_id || "未知");
+  const peerLabel = item => {
+    const id = String(item.native_account_id || "未知"), platform = accountPlatform(item);
+    // QQ Official people have an opaque ID, which is not a QQ number.
+    return (platform === "QQ" && !/^\d+$/.test(id) ? "账号" : platform) + " " + id;
+  };
   const accountLabel = item => item.account_name || (item.account_id && (accountPlatform(item) === "Telegram"
     || /^\d+$/.test(String(item.account_id))) ? accountPlatform(item) + " " + item.account_id : "当前 Bot 账号");
   const groupsOf = (person) => person.groups && typeof person.groups === "object" ? person.groups : {};
