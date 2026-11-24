@@ -1287,7 +1287,8 @@ class PrivateCompanionV2StagingPlugin(Star):
         target_key = getattr(target, "target_id", None) if channel == "private" else None
         if target_key and not is_calendar_command:
             await wait_for_quoted_forward(event, target, self._private_debounce_manager(),
-                                          getattr(self.staging, "prepare_core_reply_context", None))
+                                          getattr(self.staging, "prepare_core_reply_context", None),
+                                          self._private_delivery_dedup().seen)
         debounce_input = (private_debounce_input(event, collecting=self._private_debounce_manager().collecting_event,
                                                   target_key=target_key)
                           if channel == "private" and not is_calendar_command else None)
