@@ -10,7 +10,7 @@ from companion_v2.sources.models import SourceRecord
 from companion_v2.conversation.forwards.service import prepare_forward
 
 from .models import (CapturedQuote, QuoteDescriptor, QuoteImageEvent, TelegramQuote, TelegramQuoteDescriptor,
-                     TelegramLinkedQuoteDescriptor, TelegramForwardedQuoteDescriptor, OWNER)
+                     TelegramLinkedQuoteDescriptor, TelegramMentionQuoteDescriptor, TelegramForwardedQuoteDescriptor, OWNER)
 from .forward_models import (ForwardQuoteDescriptor, ForwardQuoteMediaDescriptor, QuoteMediaDescriptor,
                              QuotedForwardEvent)
 from .originals import original_sources
@@ -51,6 +51,9 @@ def prepare_quote(sources, parent, audience, captured):
             return TelegramForwardedQuoteDescriptor(*values, selection_offset=captured.selection_offset,
                 link_suffixes=captured.link_suffixes, forward_origin=replace(origin, label=label),
                 origin_resource_hash=digest(["telegram-forward", captured.message_id, origin.label, origin.sent_at])), record
+        if captured.self_mentions:
+            return TelegramMentionQuoteDescriptor(*values, selection_offset=captured.selection_offset,
+                link_suffixes=captured.link_suffixes, self_mentions=captured.self_mentions), record
         if captured.link_suffixes:
             return TelegramLinkedQuoteDescriptor(*values, selection_offset=captured.selection_offset,
                                                  link_suffixes=captured.link_suffixes), record

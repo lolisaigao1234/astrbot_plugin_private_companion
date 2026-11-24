@@ -92,6 +92,8 @@ class TelegramQuote(CapturedQuote):
 
     forward_origin: TelegramForwardOrigin | None = None
 
+    self_mentions: tuple = ()
+
     def observation_text(self):
         sender = f"伙伴 ({self.sender_id})" if self.companion_sender else self.sender_id
         attribution = self.forward_origin.attribution(sender) if self.forward_origin else f"原发送者 {sender}"
@@ -122,6 +124,9 @@ class QuoteDescriptor:
                 if "forward_origin" in fields:
                     fields["forward_origin"] = TelegramForwardOrigin(**fields["forward_origin"])
                     return TelegramForwardedQuoteDescriptor(**fields)
+                if "self_mentions" in fields:
+                    fields["self_mentions"] = tuple(tuple(item) for item in fields["self_mentions"])
+                    return TelegramMentionQuoteDescriptor(**fields)
                 return TelegramLinkedQuoteDescriptor(**fields)
             return TelegramQuoteDescriptor(**fields)
         if "forwards" in data:
@@ -141,6 +146,11 @@ class TelegramQuoteDescriptor(QuoteDescriptor):
 @dataclass(frozen=True)
 class TelegramLinkedQuoteDescriptor(TelegramQuoteDescriptor):
     link_suffixes: tuple = ()
+
+
+@dataclass(frozen=True)
+class TelegramMentionQuoteDescriptor(TelegramLinkedQuoteDescriptor):
+    self_mentions: tuple = ()
 
 
 @dataclass(frozen=True, kw_only=True)

@@ -11,8 +11,10 @@ import unittest
 import wave
 from unittest.mock import AsyncMock, Mock, patch
 
+import httpx
+
 from telegram.error import BadRequest, Forbidden, InvalidToken, NetworkError, RetryAfter, TimedOut
-from telegram import Chat, ForumTopicCreated, ForumTopicEdited, Message, MessageEntity, Update, User
+from telegram import Chat, ForumTopicCreated, ForumTopicEdited, Message, MessageEntity, TextQuote, Update, User
 from astrbot.core.message.components import Plain, Reply
 from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
 from astrbot.core.platform.message_type import MessageType
@@ -529,6 +531,41 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
             self.assertEqual((reference.sender_id, reference.text, reference.companion_sender),
                              ("321", "成员原文", False))
 
+    async def test_group_quotes_verify_admitted_link_text(self):
+        session = self.controller.session
+        target = self.controller.settings.target("group-0")
+        url = "https://example.org/guide"
+        sender = User(321, "Quoted", False)
+
+        async def receive(event):
+            event.created_at = self.clock.now().timestamp()
+            return await session.receive(event, target)
+
+        for n, prefix, mentions in ((10, "😀 ", []), (20, "😀 @Synthetic_bot <提及自己> ", [MessageEntity("mention", 3, 14)])):
+            end = len(prefix.encode("utf-16-le")) // 2
+            link = MessageEntity("text_link", end, 5, url=url)
+            fields = dict(message_id=n, from_user=sender, text=prefix + "guide 片段", entities=[*mentions, link])
+            original = await group_event(self.platform, **fields)
+            require(await receive(original))
+            embedded = original.message_obj.raw_message.message
+            for number, extra in ((n + 1, {}), (n + 2, {"quote": TextQuote("片段", end + 6)})):
+                reply = await group_event(self.platform, message_id=number, reply_to_message=embedded, **extra)
+                captured = require(await session.bridge.groups.capture(reply))
+                self.assertEqual((captured.principal.native_account_id, captured.quotes[0].sender_id),
+                                 (str(OWNER), "321"))
+                require(await receive(reply))
+
+            for index, (changes, offset, expected) in enumerate((
+                ({}, end + 5, "quote_original_changed"),
+                ({"entities": [*mentions, MessageEntity("text_link", end, 5, url=url + "x")]},
+                 end + 6, "quote_original_changed"),
+                ({"from_user": User(322, "Other", False)}, end + 6, "quote_original_scope_mismatch"),
+            ), 3):
+                altered = await group_event(self.platform, **(fields | changes))
+                reply = await group_event(self.platform, message_id=n + index,
+                    reply_to_message=altered.message_obj.raw_message.message, quote=TextQuote("片段", offset))
+                self.assertEqual((await receive(reply)).failure.code, expected)
+
     async def test_group_delivery_and_collective_audience(self):
         from astrbot.core.message.message_event_result import MessageChain
 
@@ -768,6 +805,42 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
         self.platform.client.send_message.assert_awaited_once()
         self.assertNotIn(token, " ".join(logs.output))
 
+    async def test_httpx_logs_redact_delivery_notice_and_relay_requests(self):
+        from astrbot_host.private_notice import send_private_notice
+        from astrbot_host.relay_pending_events import _send_private
+
+        token = self.platform.client.token
+        event = telegram_event(self.platform)
+        route = authenticate_notice_route(self.controller, event, ScopeKind.PRIVATE, expected_post="message")
+        paths = []
+
+        def respond(request):
+            paths.append(request.url.path)
+            return httpx.Response(200)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+            async def chat_action(*args, **kwargs):
+                await http.post(f"https://telegram.invalid/bot{token}/sendChatAction")
+
+            async def message(*args, **kwargs):
+                await http.post(f"https://telegram.invalid/bot{token}/sendMessage")
+
+            self.platform.client.send_chat_action.side_effect = chat_action
+            self.platform.client.send_message.side_effect = message
+            with self.assertLogs("httpx", "INFO") as logs:
+                self.assertEqual((await self.send()).status, "delivered")
+                notice = await send_private_notice(self.controller, event, text="验证", route=route)
+                relay = await _send_private(self.controller, event, platform_id="tg-main",
+                                            login="tg-main", peer=str(OWNER), text="回执")
+                self.assertEqual((notice["state"], relay["state"]), ("delivered", "delivered"))
+
+        methods = ["sendChatAction", "sendMessage"] * 3
+        self.assertEqual(paths, [f"/bot{token}/{method}" for method in methods])
+        self.assertEqual(len(logs.records), len(methods))
+        for record, method in zip(logs.records, methods):
+            self.assertIn(f"/bot[redacted]/{method}", record.getMessage())
+            self.assertNotIn(token, repr(record.args))
+
     async def test_unavailable_refusal_classifier_keeps_dispatch_unknown(self):
         self.platform.client.send_message.side_effect = NetworkError("connection lost")
         with patch("companion_v2.adapters.astrbot.platform_sender._telegram_refusal", side_effect=ImportError):
@@ -835,14 +908,18 @@ class TelegramPrivateCommandTests(TelegramHostFixture, unittest.IsolatedAsyncioT
         await self.plugin.receive_companion_message(event)
         return event
 
+    async def wait_for_contention(self, lock):
+        async def waiting():
+            while not lock._waiters:
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(waiting(), timeout=30)
+
     async def dispatch_overlapping_notices(self, peer, owner=None):
         from astrbot_host.private_notice import notice_cooldown_lock
 
         lock = notice_cooldown_lock(self.controller, owner)
 
-        async def wait_for_contention():
-            while not lock._waiters:
-                await asyncio.sleep(0)
         sending, release = asyncio.Event(), asyncio.Event()
 
         async def send(*args):
@@ -854,7 +931,7 @@ class TelegramPrivateCommandTests(TelegramHostFixture, unittest.IsolatedAsyncioT
         try:
             await asyncio.wait_for(sending.wait(), timeout=10)
             second = asyncio.create_task(self.dispatch("你好", peer))
-            await asyncio.wait_for(wait_for_contention(), timeout=30)
+            await self.wait_for_contention(lock)
             self.clock.advance(timedelta(seconds=61))
         finally:
             release.set()
@@ -942,9 +1019,7 @@ class TelegramPrivateCommandTests(TelegramHostFixture, unittest.IsolatedAsyncioT
         lock = notice_cooldown_lock(self.controller)
         async with lock:
             queued = asyncio.create_task(self.dispatch("你好", peer))
-            async with asyncio.timeout(30):
-                while not lock._waiters:
-                    await asyncio.sleep(0)
+            await self.wait_for_contention(lock)
             key = stranger_block_view_id("tg-main", "tg-main", str(peer))
             with self.controller.runtime.transaction() as connection:
                 connection.execute("INSERT INTO memory_views VALUES (?, ?, ?, ?, 'active', ?, ?, ?)",
@@ -971,9 +1046,7 @@ class TelegramPrivateCommandTests(TelegramHostFixture, unittest.IsolatedAsyncioT
             lock = notice_cooldown_lock(self.controller, owner)
             async with lock:
                 queued = asyncio.create_task(self.dispatch("你好", peer))
-                async with asyncio.timeout(30):
-                    while not lock._waiters:
-                        await asyncio.sleep(0)
+                await self.wait_for_contention(lock)
                 if peer == OWNER:
                     grants.issue_grant(grant_id="restored-dialogue", subject=context.actor.subject,
                                        scope=context.scope, capability="conversation.reply",
@@ -1005,7 +1078,11 @@ class TelegramPrivateCommandTests(TelegramHostFixture, unittest.IsolatedAsyncioT
     async def test_reset_requires_admin_and_confirmation(self):
         authority = self.controller.authority
         context = authority.context("tg-owner", "role-tg")
-        event = await self.dispatch("全部重置")
+        from astrbot_host.reset_command import receive_reset_command
+        plain = telegram_event(self.platform, text="全部重置")
+        self.assertIsNone(await receive_reset_command(self.controller, plain))
+        self.platform.send_by_session.assert_not_awaited()
+        event = await self.dispatch("陪伴 全部重置")
         self.assertTrue(event.call_llm)
         self.assertIn("只允许安装核心管理员", self.sent_text())
         authority.provision_scope(authority.settings.target("tg-owner"), context.scope,
@@ -1088,6 +1165,19 @@ class TelegramPrivateAdmissionTests(TelegramHostFixture, unittest.IsolatedAsynci
             await directory.observe(event)
             rows = json.loads(directory.path.read_text(encoding="utf-8"))
             self.assertEqual([row.get("display_name", "") for row in rows.values()], [expected])
+
+    async def test_directory_reads_old_telegram_observations_without_the_placeholder(self):
+        event = telegram_event(self.platform)
+        directory = self.controller.session_topology
+        await directory.observe(event)
+        rows = json.loads(directory.path.read_text(encoding="utf-8"))
+        stored = next(iter(rows.values()))
+        for name, expected in (("Unknown", ""), ("Unknown Artist", "Unknown Artist")):
+            stored["display_name"] = name
+            directory.path.write_text(json.dumps(rows), encoding="utf-8")
+            windows = await directory.inventory()
+            self.assertEqual([row.get("display_name", "") for row in windows
+                              if row.get("unified_msg_origin") == event.unified_msg_origin], [expected])
 
     async def test_private_text_is_admitted_with_the_bot_astrbot_rebuilt(self):
         await self.start_host()

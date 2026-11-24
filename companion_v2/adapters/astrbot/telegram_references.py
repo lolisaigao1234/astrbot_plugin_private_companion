@@ -1,6 +1,7 @@
 """Freeze Telegram references from the delivered update and its converted chain."""
 
 from dataclasses import dataclass, replace
+from types import SimpleNamespace
 
 from companion_v2.conversation.forwards.models import CapturedForward, CapturedForwardNode
 from companion_v2.conversation.quotes.models import TelegramForwardOrigin, TelegramQuote
@@ -56,6 +57,57 @@ def _origin(event, origin):
                                  str(origin.sender_user.id) if origin.type == "user" else None)
 
 
+def private_text_parts(message, parts):
+    """Restore self mentions only when the authenticated update matches AstrBot's chain."""
+    raw = message.raw_message.message
+    if not raw.text or not any(entity.type == "mention" for entity in raw.entities):
+        return parts
+    # Text messages have optional Reply, ordered At components, then optional Plain.
+    # Captions already contain their mentions. Leave transformed or stale chains alone.
+    kinds = [getattr(part.type, "value", part.type) for part in parts]
+    mentions = [part for part, kind in zip(parts, kinds) if kind == "At"]
+    plain = [part.text for part, kind in zip(parts, kinds) if kind == "Plain"]
+    expected = (["Reply"] if "Reply" in kinds else []) + ["At"] * len(mentions) + ["Plain"] * len(plain)
+    if not mentions or len(plain) > 1 or kinds != expected:
+        return parts
+
+    source = raw.text.encode("utf-16-le")
+    projected, restored, targets = [], [], []
+    cursor = 0
+    for entity in raw.entities:
+        if entity.type not in ("mention", "text_link"):
+            continue
+        start, end = entity.offset * 2, (entity.offset + entity.length) * 2
+        if not cursor <= start < end <= len(source):
+            return parts
+        label = source[start:end]
+        visible = label
+        if entity.type == "mention":
+            name = raw.parse_entity(entity)
+            if not name.startswith("@"):
+                return parts
+            name = name[1:]
+            target = name
+            if name.lower() == message.self_id.lower():
+                target = message.self_id
+                visible = b""
+            targets.append((name, target))
+        elif entity.url:
+            label += f" ({entity.url})".encode("utf-16-le")
+            visible = label
+        restored.extend((source[cursor:start], label))
+        projected.extend((source[cursor:start], visible))
+        cursor = end
+    if targets != [(part.name, part.qq) for part in mentions]:
+        return parts
+    projected.append(source[cursor:])
+    restored.append(source[cursor:])
+    if projected == restored or b"".join(projected) != "".join(plain).encode("utf-16-le"):
+        return parts
+    # Keep earlier indices (notably Reply) stable, including for mention-only text.
+    return (*parts[:-1], SimpleNamespace(type="Plain", text=b"".join(restored).decode("utf-16-le")))
+
+
 def private_references(event):
     message = event.message_obj
     raw = getattr(message.raw_message, "message", None)
@@ -103,13 +155,18 @@ def message_references(event):
     # AstrBot inserts these suffixes in the admitted Plain. Keep their UTF-16
     # locations and fingerprints so verified history can recover Telegram's text.
     link_suffixes = []
+    self_mentions = []
     for entity in original.entities or original.caption_entities or ():
         if entity.type == "text_link" and entity.url:
             suffix = f" ({entity.url})"
             link_suffixes.append((entity.offset + entity.length, len(suffix.encode("utf-16-le")) // 2,
                                   digest(suffix)))
+        elif raw.chat.type != "private" and entity.type == "mention":
+            spelling = original.parse_entity(entity) if original.text else original.parse_caption_entity(entity)
+            if spelling[1:].casefold() == message.self_id.casefold():
+                self_mentions.append((entity.offset, spelling))
     quote = TelegramQuote(position, str(original.message_id), sender, int(original.date.timestamp()),
                           safe_text(event, text) if text.strip() else "[附件]", companion_sender=sender == bot_id,
                           selection_offset=raw.quote.position if raw.quote else None, link_suffixes=tuple(link_suffixes),
-                          forward_origin=_origin(event, original.forward_origin))
+                          forward_origin=_origin(event, original.forward_origin), self_mentions=tuple(self_mentions))
     return replace(references, quote=quote, images=images)

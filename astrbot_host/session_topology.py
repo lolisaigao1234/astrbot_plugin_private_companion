@@ -26,7 +26,7 @@ from companion_v2.execution.models import TaskError, digest
 from .identity_derivation import derive_bot_id, derive_role_id, role_display_name
 from .native import SESSION_SETTINGS_LOOKUP_BUDGET_SECONDS, load_session_settings
 from .multi_settings import find_persona_mapping
-from .display_names import configured_platform_families, event_person_names, platform_label
+from .display_names import configured_platform_families, event_person_names, platform_label, telegram_placeholder
 
 
 logger = logging.getLogger(__name__)
@@ -639,11 +639,14 @@ class SessionTopology:
             accounts = [row for row in accounts if (row["platform_id"], row["account_id"]) in routes]
         platforms = {row["platform_id"] for row in accounts}
         native, issues = await self._native_sessions(platforms, scope_kind=scope_kind)
+        telegram_instances = {row["platform_id"] for row in accounts if row.get("platform_name") == "telegram"}
         observed = {}
         for row in self._observed().values():
             umo = row.get("unified_msg_origin")
             route = self.route(umo)
             if route and route[0] in platforms and (scope_kind is None or route[1] == scope_kind):
+                if route[0] in telegram_instances and route[1] == "private" and telegram_placeholder(row.get("display_name")):
+                    row.pop("display_name")
                 observed.setdefault(umo, []).append(row)
                 native.setdefault(umo, {"unified_msg_origin": umo,
                                        "conversation_id": row.get("conversation_id")})
