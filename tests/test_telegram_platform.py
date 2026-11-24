@@ -827,7 +827,10 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
                              f"{title}-{topic}")
             self.assertEqual(event_person_names(event), (member, ""))
         await directory.observe(await group_event(self.platform, -100400, "supergroup", text=None,
-                                                 title="新群名", new_chat_title="新群名"))
+                                                 title="新群名", new_chat_title="新群名", message_id=44))
+        await directory.observe(await group_event(self.platform, -100400, "supergroup", 24, text="迟到",
+                                                 title="阅读群", message_id=43))
+        self.assertEqual(directory.stored_group_names()[("tg-main", "tg-main", "-100400#24")], "新群名")
         self.assertEqual(directory.stored_group_names()[("tg-main", "tg-main", "-100400#23")],
                          "新群名-故事")
 
