@@ -216,8 +216,8 @@ class MultiPrivateBridge(NativePrivateBridge):
         from companion_v2.conversation.media.understanding import media_scope_enabled, settings as understanding_settings
         from .audio.loader import fetch_native_audio_bytes
         from .core_reply_media import frozen_image_locators
-        from .core_reply_video_sources import video_positions
-        from .telegram_forward_burst import bounded_file_component
+        from .core_reply_video_sources import file_is_video, video_file_suffix, video_positions
+        from .telegram_forward_burst import bounded_file_component, temporary_file_component
         from .video.loader import fetch_native_video_bytes
 
         locators = frozen_image_locators(event)
@@ -276,7 +276,8 @@ class MultiPrivateBridge(NativePrivateBridge):
 
         async def prepare_part(position, part, *, image=None):
             nonlocal remaining, file_deadline
-            kind = type(part)
+            # Telegram delivers GIFs and videos sent as files as documents.
+            kind = Video if file_is_video(part) else type(part)
             if counts[kind] >= limits[kind] or remaining <= 0:
                 return Plain(exhausted_note)
             try:
@@ -289,7 +290,11 @@ class MultiPrivateBridge(NativePrivateBridge):
                     data = await read_attachment(fetch_native_video_bytes(
                         video, maximum_bytes=min(remaining, MAX_VIDEO_BYTES)))
                     size = len(data)
-                    replacement = Video(file="base64://" + base64.b64encode(data).decode("ascii"))
+                    if type(part) is File:
+                        name = freeze_attachment(event, file_locator(position, part)).name
+                        replacement = temporary_file_component(event, name, data, video_file_suffix(name) or ".mp4")
+                    else:
+                        replacement = Video(file="base64://" + base64.b64encode(data).decode("ascii"))
                 elif kind is Record:
                     location = part.url or part.file
                     locator = NativeAudioLocator(position, location, telegram_temp=location == part.path)
@@ -345,7 +350,7 @@ class MultiPrivateBridge(NativePrivateBridge):
                         chain[index] = Plain("[附件不可用]")
                         continue
                     expected_kind = None
-                    if kind is Video:
+                    if kind is Video or file_is_video(child):
                         settings = preferences()
                         if not (settings["video_understanding_enabled"] and settings["video_understanding_quoted_enabled"]
                                 and media_scope_enabled(settings, "video_understanding", context.scope)):
