@@ -183,7 +183,8 @@ class RelayPendingEventTests(unittest.IsolatedAsyncioTestCase):
         for i, answer in enumerate(("我同意", "可以，转告她吧", "可以，谢谢", "好的，谢谢", "当然可以", "可以带回去",
                                     "不好意思刚看到，同意转告。", "好的，你转告吧", "行吧",
                                     "不好意思，刚看到，可以", "好的呀", "好嘞", "我同意，可以转告她", "可以啦", "可以。谢谢",
-                                    "没事，可以", "可以告诉他", "行行行", "嗯嗯，可以"), 1):
+                                    "没事，可以", "可以告诉他", "行行行", "嗯嗯，可以",
+                                    "可以，帮我转告一下吧", "可以，请帮我转告他"), 1):
             with self.subTest(answer=answer):
                 task = add_task(self.runtime, {
                     "kind": "private_receipt", "state": "waiting_permission", "target_user_id": "2002",
