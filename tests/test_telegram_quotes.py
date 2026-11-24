@@ -166,7 +166,10 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
     async def test_comment_quoting_an_older_forward_gets_its_own_turn(self):
         await self.check_reply_to_forward(in_burst=False)
 
-    async def check_reply_to_forward(self, *, in_burst):
+    async def test_partial_quote_in_a_forward_burst_keeps_the_selected_passage(self):
+        await self.check_reply_to_forward(in_burst=True, partial=True)
+
+    async def check_reply_to_forward(self, *, in_burst, partial=False):
         from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA
 
         plugin = self.started_plugin()
@@ -177,7 +180,8 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
         second = await make_forward(81, "second-body")
         original = first if in_burst else await make_forward(67, "older-body")
         comment = await self.event(number=82, text="my reply", reply_to_message=
-                                   original.message_obj.raw_message.message.to_dict())
+                                   original.message_obj.raw_message.message.to_dict(),
+                                   **({"quote": {"text": "body", "position": 6}} if partial else {}))
         manager = plugin._private_debounce_manager()
         ready = asyncio.Event()
         reserve = manager.reserve
@@ -205,6 +209,8 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
             with patch("astrbot.core.astr_main_agent._get_session_conv", AsyncMock(return_value=NS(history="[]"))):
                 request, _ = await collect_initial_request(burst, NS(), NS(provider_wake_prefix="", provider_settings={}))
             payload = json.dumps(await request.assemble_context(), ensure_ascii=False)
+            if partial:
+                self.assertIn("所选片段：body", burst.message_str)
             for body in ("first-body", "second-body", "my reply"):
                 self.assertEqual(payload.count(body), 1)
         else:
