@@ -258,6 +258,40 @@ class TelegramCaptureTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase
         self.assertIn("附件超过读取上限", serialized)
         self.assertNotIn(self.platform.client.token, serialized)
 
+    async def test_sdk_album_keeps_caption_and_first_photo_after_deadline(self):
+        from astrbot.core.astr_main_agent import collect_initial_request
+        from astrbot_host.media import load_native_image
+        from tests.test_conversation_images import image_bytes
+
+        await self.convert(photo=[dict(file_id="1", file_unique_id="1", width=3, height=2)],
+                           caption="slow album caption", media_group_id="album")
+        self.event.message_obj.message.extend([Image.fromURL("https://example.org/slow"),
+                                               Image.fromURL("https://example.org/third")])
+        event = self.platform.create_event(self.event.message_obj)
+        event.created_at = self.clock.now().timestamp()
+        payload = image_bytes("red")
+        positions = []
+
+        async def load(locator, **kwargs):
+            positions.append(locator.position)
+            if len(positions) == 1:
+                return await load_native_image(locator, **kwargs)
+            await asyncio.Event().wait()
+
+        with patch.object(self.bridge, "image_loader", load), patch(
+                "astrbot_host.media.fetch_image", AsyncMock(return_value=payload)), patch(
+                "companion_v2.adapters.astrbot.native.MEDIA_PREPARE_TIMEOUT", 0.2), patch(
+                "astrbot.core.astr_main_agent._get_session_conv", AsyncMock(return_value=NS(history="[]"))):
+            await asyncio.wait_for(self.started_plugin().receive_companion_message(event), 5)
+            request, _ = await collect_initial_request(event, NS(), NS(provider_wake_prefix="", provider_settings={}))
+            message = await request.assemble_context()
+        self.assertEqual(len(positions), 2)
+        images = [base64.b64decode(part["image_url"]["url"].split(",", 1)[1])
+                  for part in message["content"] if part["type"] == "image_url"]
+        self.assertEqual(images, [payload])
+        self.assertIn("slow album caption", str(message))
+        self.assertIn("附件读取超时", str(message))
+
     async def test_managed_records_and_files_share_the_read_budget(self):
         from companion_v2.execution.models import TaskError
 

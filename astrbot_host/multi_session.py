@@ -207,7 +207,7 @@ class MultiPrivateBridge(NativePrivateBridge):
         import base64
         from astrbot.core.message.components import File, Image, Plain, Record, Reply, Video
         from companion_v2.adapters.astrbot.files import MAX_FILES, file_locator
-        from companion_v2.adapters.astrbot.native import NativeAudioLocator, NativeImageLocator
+        from companion_v2.adapters.astrbot.native import MEDIA_PREPARE_TIMEOUT, NativeAudioLocator, NativeImageLocator
         from companion_v2.adapters.astrbot.telegram_media import freeze_attachment
         from companion_v2.conversation.media.audio.models import MAX_AUDIO_BYTES, MAX_INPUT_AUDIOS
         from companion_v2.conversation.media.models import MAX_IMAGE_BYTES, MAX_INPUT_IMAGES, MAX_TURN_BYTES, fits_budget
@@ -225,17 +225,35 @@ class MultiPrivateBridge(NativePrivateBridge):
         message = event.message_obj
         videos = {v.position: v for v in video_positions(event, video_type=Video, limit=None)}
         limited = "[附件超过读取上限，本轮未读取]"
+        timed_out = "[附件读取超时，本轮未读取]"
+        deadline = asyncio.get_running_loop().time() + MEDIA_PREPARE_TIMEOUT
+        exhausted_note = limited
         replacements = {}
         remaining = MAX_TURN_BYTES
         limits = {Image: MAX_INPUT_IMAGES, Record: MAX_INPUT_AUDIOS, Video: MAX_VIDEOS, File: MAX_FILES}
         counts = defaultdict(int)
         photos = []
 
+        async def read_attachment(awaitable):
+            nonlocal exhausted_note, remaining
+            try:
+                return await asyncio.wait_for(awaitable, deadline - asyncio.get_running_loop().time())
+            except asyncio.TimeoutError:
+                # A cancelled download may already have spent the remaining allowance.
+                remaining = 0
+                exhausted_note = timed_out
+                raise TaskError("host_media_timeout", "attachment preparation timed out") from None
+
+        def unavailable(error):
+            if error.code.endswith("_limit") or error.code == "host_media_timeout":
+                return Plain(exhausted_note)
+            return Plain("[附件不可用]")
+
         async def load_photo(locator):
             nonlocal remaining
             if len(photos) >= MAX_INPUT_IMAGES or remaining <= 0:
                 raise TaskError("host_image_limit", "turn photo capacity exhausted")
-            photo = await self.image_loader(locator, maximum_bytes=min(remaining, MAX_IMAGE_BYTES))
+            photo = await read_attachment(self.image_loader(locator, maximum_bytes=min(remaining, MAX_IMAGE_BYTES)))
             size = photo.descriptor.retained_bytes
             if (photo.descriptor.position != locator.position or size > remaining
                     or not fits_budget((*photos, photo.descriptor))):
@@ -250,7 +268,7 @@ class MultiPrivateBridge(NativePrivateBridge):
             if kind not in limits:
                 continue
             if counts[kind] >= limits[kind] or remaining <= 0:
-                replacements[position] = Plain(limited)
+                replacements[position] = Plain(exhausted_note)
                 continue
             try:
                 if kind is Image:
@@ -260,19 +278,20 @@ class MultiPrivateBridge(NativePrivateBridge):
                     if position not in videos:
                         replacements[position] = Plain(limited)
                         continue
-                    data = await fetch_native_video_bytes(videos[position], maximum_bytes=min(remaining, MAX_VIDEO_BYTES))
+                    data = await read_attachment(fetch_native_video_bytes(
+                        videos[position], maximum_bytes=min(remaining, MAX_VIDEO_BYTES)))
                     size = len(data)
                     replacement = Video(file="base64://" + base64.b64encode(data).decode("ascii"))
                 elif kind is Record:
                     location = part.url or part.file
                     locator = NativeAudioLocator(position, location, telegram_temp=location == part.path)
-                    data = await fetch_native_audio_bytes(freeze_attachment(event, locator),
-                                                          maximum_bytes=min(remaining, MAX_AUDIO_BYTES))
+                    data = await read_attachment(fetch_native_audio_bytes(
+                        freeze_attachment(event, locator), maximum_bytes=min(remaining, MAX_AUDIO_BYTES)))
                     size = len(data)
                     replacement = Record(file="base64://" + base64.b64encode(data).decode("ascii"))
                 else:
                     locator = freeze_attachment(event, file_locator(position, part))
-                    replacement, size = await bounded_file_component(event, locator, remaining)
+                    replacement, size = await read_attachment(bounded_file_component(event, locator, remaining))
                 if size > remaining:
                     remaining = 0
                     replacements[position] = Plain(limited)
@@ -282,7 +301,7 @@ class MultiPrivateBridge(NativePrivateBridge):
                 replacements[position] = replacement
             except TaskError as exc:
                 remaining = max(0, remaining - getattr(exc, "bytes_read", 0))
-                replacements[position] = Plain(limited if exc.code.endswith("_limit") else "[附件不可用]")
+                replacements[position] = unavailable(exc)
         # AstrBot gathers Reply.chain independently of the direct message components.
         for position, reply in enumerate(message.message):
             if not isinstance(reply, Reply):
@@ -299,7 +318,7 @@ class MultiPrivateBridge(NativePrivateBridge):
                     chain[index] = await load_photo(locator)
                 except TaskError as exc:
                     remaining = max(0, remaining - getattr(exc, "bytes_read", 0))
-                    chain[index] = Plain(limited if exc.code.endswith("_limit") else "[附件不可用]")
+                    chain[index] = unavailable(exc)
             reply.chain = chain
         notes = list(dict.fromkeys(part.text for part in replacements.values() if isinstance(part, Plain)))
         message.message = [replacements.get(position, part) for position, part in enumerate(message.message)]
