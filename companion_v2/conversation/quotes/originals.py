@@ -43,7 +43,8 @@ def _telegram_original(messages, context, saved, quote, body, references, at):
             raise TaskError("quote_original_changed", "Telegram forward requires one admitted node")
         forward, = forwards
         node, = forward.nodes
-        if (forward.resource_hash != quote.origin_resource_hash or node.sender_id != origin.user_id
+        if (forward.resource_hash != origin.resource_hash(quote.message_id)
+                or forward.resource_hash != quote.origin_resource_hash or node.sender_id != origin.user_id
                 or node.sent_at != origin.sent_at):
             raise TaskError("quote_original_changed", "Telegram forward origin differs from admitted node")
         owner = node
