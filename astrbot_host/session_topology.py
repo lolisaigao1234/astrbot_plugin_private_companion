@@ -536,6 +536,11 @@ class SessionTopology:
             group_name = platform_label(getattr(group, "group_name", None), peer)
             if group_name:
                 row["group_name"] = group_name
+            if meta.name == "telegram":
+                original = message.raw_message.message
+                row["telegram_chat_id"] = str(original.chat.id)
+                row["telegram_chat_title"] = platform_label(original.new_chat_title or original.chat.title)
+                row["telegram_topic_name"] = platform_label(getattr(message, "_telegram_topic_name", None))
         else:
             nickname, _ = event_person_names(event)
             if not nickname and meta.name != "telegram":
@@ -555,6 +560,19 @@ class SessionTopology:
             # erase the last recognized name. New observations replace ID fallbacks.
             if not row.get(field) and previous_name:
                 row[field] = previous_name
+        if chat_id := row.get("telegram_chat_id"):
+            previous = rows.get(key, {})
+            title = row["telegram_chat_title"] or previous.get("telegram_chat_title", "")
+            row["telegram_topic_name"] = row["telegram_topic_name"] or previous.get("telegram_topic_name", "")
+            if title:
+                platform_prefix = row["unified_msg_origin"].partition(":")[0] + ":"
+                # The parent title applies to every observed topic on this account.
+                for sibling in (*rows.values(), row):
+                    if (isinstance(sibling, dict) and sibling.get("telegram_chat_id") == chat_id
+                            and sibling.get("account_id") == row["account_id"]
+                            and sibling.get("unified_msg_origin", "").startswith(platform_prefix)):
+                        sibling["telegram_chat_title"] = title
+                        sibling["group_name"] = "-".join(filter(None, (title, sibling.get("telegram_topic_name"))))
         rows[key] = row
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(".json.tmp")

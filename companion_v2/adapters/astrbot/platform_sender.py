@@ -248,8 +248,16 @@ class AstrBotPlatformSender:
                 return not_sent("empty_message")
             chain = self._chain(component_plan, platform_name=platform_name)
 
+            telegram_quote = ""
             if platform_name == "telegram":
-                from .telegram_wire import telegram_visible
+                from .telegram_wire import member_usernames, send_optional_reply, telegram_visible, telegram_mentions
+                if scope.kind is ScopeKind.GROUP and envelope.plan:
+                    from astrbot.core.message.components import Reply
+                    usernames = await member_usernames(lease.client, scope.native_scope_id, envelope.plan.mentions)
+                    chain.chain = telegram_mentions(chain.chain, usernames)
+                    telegram_quote = envelope.plan.quote
+                    if telegram_quote:
+                        chain.chain.insert(0, Reply(id=telegram_quote))
                 if not telegram_visible(chain.chain):
                     return not_sent("empty_message")
 
@@ -268,7 +276,10 @@ class AstrBotPlatformSender:
             stage = "platform_send"
             try:
                 with redact_telegram_token(lease.client if platform_name == "telegram" else None):
-                    accepted = await platform.send_by_session(session, chain)
+                    if telegram_quote:
+                        accepted = await send_optional_reply(lease.client, chain, session.session_id)
+                    else:
+                        accepted = await platform.send_by_session(session, chain)
                 if platform_name == "telegram" and accepted is False:
                     return not_sent("platform_session_transport_unavailable")
             except Exception as error:

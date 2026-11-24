@@ -1,4 +1,4 @@
-"""Freeze Telegram private references from the delivered update and its converted chain."""
+"""Freeze Telegram references from the delivered update and its converted chain."""
 
 from dataclasses import dataclass, replace
 
@@ -43,6 +43,13 @@ def private_references(event):
     if (raw is None or str(raw.chat.id) != peer or raw.chat.type != "private"
             or str(getattr(raw.from_user, "id", None)) != peer or str(raw.message_id) != str(message.message_id)):
         raise TaskError("host_route_mismatch", "Telegram update does not match the private message")
+    return message_references(event)
+
+
+def message_references(event):
+    """Read references after the caller has authenticated the chat and speaker."""
+    message = event.message_obj
+    raw = message.raw_message.message
     origin = raw.forward_origin
     source = ""
     if origin:
@@ -66,11 +73,14 @@ def private_references(event):
     original = raw.reply_to_message
     if not (original or reply or raw.external_reply or raw.quote):
         return references
+    bot_id = str(getattr(event.client, "id", None))
     user = getattr(original, "from_user", None)
     sender = str(user.id) if user else None
-    if (raw.external_reply or not original or original.chat.id != raw.chat.id or original.chat.type != "private"
+    other_topic = (original and original.is_topic_message
+                   and original.message_thread_id != raw.message_thread_id)
+    if (other_topic or raw.external_reply or not original or original.chat.id != raw.chat.id or original.chat.type != raw.chat.type
             or original.message_id <= 0 or original.message_id == raw.message_id
-            or sender is None or sender not in (peer, str(getattr(event.client, "id", None)))
+            or not user or original.sender_chat or raw.chat.type == "private" and sender not in (str(raw.chat.id), bot_id)
             or not original.date or original.date.timestamp() <= 0):
         return replace(references, unavailable=True)
     position, part = reply or (0, None)
@@ -83,6 +93,6 @@ def private_references(event):
                            for index, item in enumerate(part.chain or ())
                            if getattr(item.type, "value", item.type) == "Image")
     quote = TelegramQuote(position, str(original.message_id), sender, int(original.date.timestamp()),
-                          safe_text(event, text) if text.strip() else "[附件]", companion_sender=sender != peer,
+                          safe_text(event, text) if text.strip() else "[附件]", companion_sender=sender == bot_id,
                           selection_offset=raw.quote.position if raw.quote else None)
     return replace(references, quote=quote, images=images)

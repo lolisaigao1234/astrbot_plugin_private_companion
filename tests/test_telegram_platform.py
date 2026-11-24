@@ -123,7 +123,7 @@ class TelegramPlatformTests(unittest.TestCase):
 
 
 async def group_event(platform, chat_id=-400, kind="group", topic=None, text="你好", **fields):
-    chat = Chat(chat_id, kind, is_forum=True if topic else None)
+    chat = Chat(chat_id, kind, title=fields.pop("title", None), is_forum=True if topic else None)
     message = Message(22, date=datetime.now(timezone.utc), chat=chat, text=text,
                       from_user=fields.pop("from_user", User(OWNER, "Synthetic", False)),
                       message_thread_id=topic, is_topic_message=bool(topic), **fields)
@@ -362,6 +362,58 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
         self.platform.client.send_chat_action = AsyncMock()
         self.platform.client.send_message = AsyncMock()
 
+    async def test_outgoing_mentions_and_optional_quote_use_the_original_topic(self):
+        from astrbot_host.core_reply_outbound import prepare_core_reply_outbound_message
+        from astrbot.core.message.message_event_result import MessageChain
+
+        for username in ("synthetic_member", None):
+            event = await group_event(self.platform, -100400, "supergroup", 23,
+                                      from_user=User(OWNER, "Member", False, username=username))
+            native = require(await self.controller.session.bridge.groups.capture(event))
+            prepared = dict(native_input=native, event_id="22", channel="group",
+                            outbound_settings=dict(reply_quote_enabled=True, reply_mention_speaker_enabled=True))
+            message = prepare_core_reply_outbound_message(event, prepared, MessageChain(chain=[Plain("回答")]))
+            async def send_message(**payload):
+                if not payload.get("allow_sending_without_reply"):
+                    raise BadRequest("Message to be replied not found")
+            self.platform.client.send_message.side_effect = send_message
+            await event.send(message)
+            payload = self.platform.client.send_message.await_args.kwargs
+            self.assertEqual((payload["chat_id"], payload["message_thread_id"], payload["reply_to_message_id"]),
+                             ("-100400", "23", "22"))
+            mention = "@synthetic_member" if username else f"tg://user?id={OWNER}"
+            self.assertIn(mention, payload["text"].replace(chr(92), ""))
+            self.assertIn("回答", payload["text"])
+            self.assertNotIn("None", payload["text"])
+
+    async def test_topic_directory_tracks_group_topic_and_member_renames(self):
+        from telegram import ForumTopicEdited
+        directory = self.controller.session_topology
+        for title, topic, member in (("读书群", "小说", "阿青"), ("阅读群", "故事", "青")):
+            event = await group_event(self.platform, -100400, "supergroup", 23, text=None,
+                                      title=title, forum_topic_edited=ForumTopicEdited(name=topic),
+                                      from_user=User(OWNER, member, False))
+            await directory.observe(event)
+            self.assertEqual(directory.stored_group_names()[("tg-main", "tg-main", "-100400#23")],
+                             f"{title}-{topic}")
+            self.assertEqual(event_person_names(event), (member, ""))
+        await directory.observe(await group_event(self.platform, -100400, "supergroup", text=None,
+                                                 title="新群名", new_chat_title="新群名"))
+        self.assertEqual(directory.stored_group_names()[("tg-main", "tg-main", "-100400#23")],
+                         "新群名-故事")
+
+    async def test_group_quote_keeps_the_other_members_identity(self):
+        quote = Message(17, date=datetime.now(timezone.utc), chat=Chat(-400, "group"),
+                        from_user=User(321, "Quoted", False), text="成员原文")
+        event = await group_event(self.platform, reply_to_message=quote)
+        bridge = self.controller.session.bridge.groups
+        for capture in (bridge.capture, bridge.capture_text_only):
+            result = require(await capture(event))
+            self.assertEqual(result.principal.native_account_id, str(OWNER))
+            reference, = result.quotes
+            self.assertEqual((reference.sender_id, reference.text, reference.companion_sender),
+                             ("321", "成员原文", False))
+
     async def test_group_delivery_and_collective_audience(self):
         from astrbot.core.message.message_event_result import MessageChain
 
@@ -392,11 +444,19 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
             self.assertEqual(context.scope.kind, ScopeKind.GROUP)
             self.assertEqual({r.kind.value for r in context.audience.recipients}, {"human", "group"})
             await event.send(MessageChain(chain=[Plain("前台")]))
+            from companion_v2.delivery.plan import OutboundPlan
+            self.platform.client.get_chat_member = AsyncMock(return_value=NS(user=User(OWNER, "成员", False,
+                                                                                       username="speaker")))
+            plan = OutboundPlan(quote="22", mentions=(str(OWNER),)) if topic else None
             receipt = await sender.send(DeliveryEnvelope("part", "op", context, 1, "后台", digest("后台"),
-                                        binding, before_dispatch=lambda: True))
+                                        binding, before_dispatch=lambda: True, plan=plan))
             self.assertEqual(receipt.status, "delivered", receipt)
             calls = self.platform.client.send_message.await_args_list
             self.assertEqual(len(calls), 2)
+            if topic:
+                self.assertIn("@speaker", calls[1].kwargs["text"])
+                self.assertEqual(calls[1].kwargs["reply_to_message_id"], "22")
+                self.assertTrue(calls[1].kwargs["allow_sending_without_reply"])
             for call in calls:
                 self.assertEqual(call.kwargs["chat_id"], str(chat))
                 self.assertEqual(call.kwargs.get("message_thread_id"), str(topic) if topic else None)

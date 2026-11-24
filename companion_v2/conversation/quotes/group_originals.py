@@ -17,12 +17,17 @@ def original_sources(messages, context, event, quote, text, at):
     instruction = messages.batch(current["batch_id"])["role_instruction"]
     # Inspect only routing metadata before reading bodies. An already known ID
     # in another group/private scene or persona cannot be republished as new.
+    from .models import TelegramQuoteDescriptor
+    telegram = isinstance(quote, TelegramQuoteDescriptor)
+    # Telegram message IDs are local to a chat; other chats may reuse them.
     rows = messages.runtime.read_all("""SELECT i.*, b.context_json FROM conversation_inputs i
         JOIN conversation_batches b ON b.batch_id = i.batch_id
         WHERE json_extract(i.event_json, '$.event_id') = ?
         AND json_extract(i.event_json, '$.scope.platform') = ?
-        AND json_extract(i.event_json, '$.scope.account_id') = ? LIMIT 2""",
-        (quote.message_id, event.scope.platform, event.scope.account_id))
+        AND json_extract(i.event_json, '$.scope.account_id') = ?
+        AND (? IS NULL OR json_extract(i.event_json, '$.scope.native_scope_id') = ?) LIMIT 2""",
+        (quote.message_id, event.scope.platform, event.scope.account_id,
+         event.scope.native_scope_id if telegram else None, event.scope.native_scope_id))
     if len(rows) > 1:
         raise TaskError("quote_original_ambiguous", "known group original is not unique")
     evidence = []
@@ -37,7 +42,17 @@ def original_sources(messages, context, event, quote, text, at):
         item, source = groups.read_input(groups.input_ref(row), context, instruction, at, current["rowid"], evidence=evidence)
         from companion_v2.conversation.messages import event_from_document
         saved = event_from_document(data, original)
-        if (item["text"] != text or tuple(replace(i, position=0) for i in getattr(saved, "images", ()))
+        body = item["text"]
+        if telegram and quote.selection_offset is not None:
+            if getattr(saved, "images", ()):
+                body = body.removeprefix("\n[图片 1]\n")
+            start = quote.selection_offset * 2
+            selected = text.encode("utf-16-le")
+            if body.encode("utf-16-le")[start:start + len(selected)] != selected:
+                raise TaskError("quote_original_changed", "quoted selection differs from the admitted original")
+            evidence.append(source)
+            continue
+        if (body != text or tuple(replace(i, position=0) for i in getattr(saved, "images", ()))
                 != tuple(replace(i, position=0) for i in quote.images)
                 or any(getattr(saved, name, ()) != getattr(quote, name, ()) for name in ("audios", "videos", "forwards"))):
             raise TaskError("quote_original_changed", "quote differs from the already admitted group original")

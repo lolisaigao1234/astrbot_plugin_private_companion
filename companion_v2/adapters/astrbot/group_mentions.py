@@ -107,16 +107,38 @@ def _telegram_parts(event, parts):
     original = event.message_obj.raw_message.message
     # AstrBot moves all At components ahead of Plain. Telegram entity offsets
     # are UTF-16 code units, so preserve inline mentions even after emoji.
-    mentions = [entity for entity in original.entities if entity.type == "mention"
-                and original.parse_entity(entity)[1:].casefold() == event.message_obj.self_id.casefold()]
+    body = original.text or original.caption or ""
+    entities = original.entities if original.text else original.caption_entities
+    parse = original.parse_entity if original.text else original.parse_caption_entity
+    mentions = [entity for entity in entities if entity.type == "mention"
+                and parse(entity)[1:].casefold() == event.message_obj.self_id.casefold()]
     if mentions:
-        encoded = original.text.encode("utf-16-le")
+        encoded = body.encode("utf-16-le")
         for entity in reversed(mentions):
             start, end = entity.offset * 2, (entity.offset + entity.length) * 2
             encoded = encoded[:start] + SELF_MENTION.encode("utf-16-le") + encoded[end:]
-        return (SimpleNamespace(type="Plain", text=encoded.decode("utf-16-le")),)
-    return tuple(SimpleNamespace(type="Plain", text=telegram_plain_text(event, part.text))
-                 for part in parts if component_kind(part) == "Plain")
+        body = encoded.decode("utf-16-le")
+    from .telegram_media import sticker_marker
+    sticker = sticker_marker(event)
+    result = []
+    for part in parts:
+        kind = component_kind(part)
+        if kind == "At":
+            result.append(SimpleNamespace(type="Plain", text=""))
+            continue
+        if kind == "Plain":
+            text = telegram_plain_text(event, part.text)
+            if mentions:
+                text, mentions = body, ()
+            if sticker and text.startswith("Sticker: "):
+                text = ""
+            part = SimpleNamespace(type="Plain", text=text)
+        result.append(part)
+    if mentions:
+        result.append(SimpleNamespace(type="Plain", text=body))
+    if sticker:
+        result.append(SimpleNamespace(type="Plain", text=sticker))
+    return tuple(result)
 
 
 def group_message_parts(event, account_id, *, native_parts=None):

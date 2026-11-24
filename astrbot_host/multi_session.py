@@ -1293,7 +1293,14 @@ class MultiHostSession:
                     raw_text = "".join(part.text for part in getattr(event.message_obj, "message", ())
                         if getattr(getattr(part, "type", None), "value", getattr(part, "type", None)) == "Plain"
                         and isinstance(getattr(part, "text", None), str))
-                    captured = replace(captured, text=telegram_plain_text(event, raw_text),
+                    if getattr(getattr(event, "platform_meta", None), "name", "") == "telegram":
+                        from companion_v2.adapters.astrbot.telegram_media import safe_text, sticker_marker
+                        raw_text = safe_text(event, telegram_plain_text(event, raw_text))
+                        if sticker := sticker_marker(event):
+                            raw_text = sticker
+                        if captured.forward_origin:
+                            raw_text = f"[转发消息，来源：{captured.forward_origin}]\n{raw_text}"
+                    captured = replace(captured, text=raw_text,
                         merged_event_ids=tuple((group_admission or {}).get("debounced_event_ids", ())))
                 segmentation_settings, presentation_settings = None, None
                 group_tool_profile = "full"
