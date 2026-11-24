@@ -2,6 +2,7 @@
 
 from tests import astrbot_data_root  # noqa: F401 - isolate SDK data before import
 
+import asyncio
 import base64
 import json
 from pathlib import Path
@@ -180,6 +181,7 @@ class TelegramCaptureTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase
             captured = (await self.bridge.capture(self.event)).unwrap()
         self.assertEqual([image.descriptor.position for image in captured.images], [0, 2])
         self.assertIn("album caption", captured.text)
+        first_photo = captured.images[0]
         # Each image fits alone. Only the latter crosses the shared byte limit.
         budget = max(image.descriptor.retained_bytes for image in captured.images)
         with patch("companion_v2.conversation.media.models.MAX_TURN_BYTES", budget), patch(
@@ -195,6 +197,19 @@ class TelegramCaptureTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase
             captured = (await self.bridge.capture(self.event)).unwrap()
         self.assertEqual([image.descriptor.position for image in captured.images], [2])
         self.assertIn("album caption", captured.text)
+
+        # A slow second photo must not discard the caption or the admitted first one.
+        async def slow_photo(locator, **kwargs):
+            if locator.position == 0:
+                return first_photo
+            await asyncio.Event().wait()
+
+        with patch.object(self.bridge, "image_loader", slow_photo), patch(
+                "companion_v2.adapters.astrbot.native.MEDIA_PREPARE_TIMEOUT", 0.1):
+            timed = (await self.bridge.capture(self.event)).unwrap()
+        self.assertEqual(timed.images, (first_photo,))
+        self.assertIn("album caption", timed.text)
+        self.assertIn("附件读取超时", timed.text)
 
         # Exercise the managed reply entry and the SDK's serialized provider request.
         from astrbot.core.astr_main_agent import collect_initial_request
