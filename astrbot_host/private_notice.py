@@ -97,8 +97,10 @@ async def send_group_notice(controller, route, *, text, mention_id="", transport
             chat, _, topic = peer.partition("#")
             label = "@" + mention
             entity = MessageEntity("text_link", 0, len(label), url="tg://user?id=" + mention)
-            await route.client.send_message(chat_id=chat, message_thread_id=int(topic) if topic else None,
-                                            text=f"{label} {text}", entities=[entity])
+            with redact_telegram_token(route.client):
+                await route.client.send_message(
+                    chat_id=chat, message_thread_id=int(topic) if topic else None,
+                    text=f"{label} {text}", entities=[entity])
         else:
             chain = [At(qq=mention), Plain(" ")] if mention else []
             chain.append(Plain(str(text)))

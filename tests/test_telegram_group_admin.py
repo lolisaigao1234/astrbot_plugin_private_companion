@@ -3,10 +3,44 @@ import unittest
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, patch
 
+import httpx
+
 from tests.test_telegram_platform import OWNER, TelegramPlatform, group_event
 
 
 class TelegramAdministrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_standing_and_mentioned_relay_redact_httpx_requests(self):
+        from astrbot_host.group_standing import resolve_group_standing
+        from astrbot_host.private_notice import send_group_notice
+
+        platform = TelegramPlatform()
+        bot = platform.client
+        event = await group_event(platform)
+        route = NS(peer="-400", platform=platform, client=bot, platform_name="telegram",
+                   platform_id="tg-main", login="tg-main")
+        transport = httpx.MockTransport(lambda request: httpx.Response(200))
+        async with httpx.AsyncClient(transport=transport) as http:
+            async def lookup(*, chat_id, user_id):
+                await http.post(f"https://telegram.invalid/bot{bot.token}/getChatMember")
+                return NS(user=NS(id=user_id), status="member")
+
+            async def send(**kwargs):
+                await http.post(f"https://telegram.invalid/bot{bot.token}/sendMessage")
+
+            bot.get_chat_member = lookup
+            bot.send_message = send
+            with self.assertLogs("httpx", "INFO") as logs:
+                standing = await resolve_group_standing(event, {})
+                receipt = await send_group_notice(None, route, text="Hello", mention_id=str(OWNER))
+
+        self.assertEqual(standing["role"], "member")
+        self.assertEqual(receipt["state"], "delivered")
+        lookup_record, send_record = logs.records
+        self.assertIn("/bot[redacted]/getChatMember", lookup_record.getMessage())
+        self.assertIn("/bot[redacted]/sendMessage", send_record.getMessage())
+        for record in logs.records:
+            self.assertNotIn(bot.token, repr(vars(record)))
+
     async def test_standing_is_chat_scoped_cached_and_fails_closed(self):
         from astrbot_host.group_standing import resolve_group_standing
 

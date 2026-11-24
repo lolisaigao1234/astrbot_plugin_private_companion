@@ -42,6 +42,7 @@ async def resolve_group_standing(event, cache, *, fresh=False):
         return group_sender_standing(event)
     from companion_v2.adapters.astrbot.group import group_event_route
     from companion_v2.adapters.astrbot.native import bounded_native_lookup
+    from companion_v2.adapters.astrbot.telegram_logging import redact_telegram_token
 
     route = group_event_route(event)
     chat = event.message_obj.raw_message.message.chat.id
@@ -54,8 +55,9 @@ async def resolve_group_standing(event, cache, *, fresh=False):
         role = entry[2]
     else:
         try:
-            member = await bounded_native_lookup(
-                client.get_chat_member(chat_id=chat, user_id=int(route.sender_id)), operation="group_standing")
+            with redact_telegram_token(client):
+                member = await bounded_native_lookup(
+                    client.get_chat_member(chat_id=chat, user_id=int(route.sender_id)), operation="group_standing")
             if str(member.user.id) != route.sender_id:
                 return None
             role = {"creator": "owner", "administrator": "admin", "member": "member"}.get(member.status)
