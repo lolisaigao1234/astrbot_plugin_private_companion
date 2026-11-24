@@ -1145,6 +1145,9 @@ class PrivateCompanionV2StagingPlugin(Star):
         if not self.staging.claims(event):
             declines_group = getattr(self.staging, "declines_telegram_group", None)
             if callable(declines_group) and declines_group(event):
+                raw = getattr(getattr(event.message_obj, "raw_message", None), "message", None)
+                if getattr(raw, "new_chat_title", None):
+                    self.staging.session_topology.schedule_observe(event, parent_rename=True)
                 suppress_default_reply(event)
                 return
             # 不是本插件的目标：这条消息从来没有进入它的预期范围，回复与否都不是

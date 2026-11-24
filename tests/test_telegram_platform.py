@@ -370,6 +370,36 @@ class TelegramHostFixture(MultiFixture):
 
 
 class TelegramIntakeLifecycleTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_parent_rename_updates_only_configured_topics_without_claiming_chat(self):
+        config = self.controller.config
+        config["multi_host"]["group_targets"] = [dict(target_id="topic", platform_id="tg-main",
+            account_id="tg-main", bot_id="bot-tg", group_id="-100400#23")]
+        self.window_personas["tg-main:GroupMessage:-100400#23"] = "original"
+        self.controller = self.make_controller(config)
+        await self.start_host()
+        plugin = self.started_plugin()
+        directory = self.controller.session_topology
+        for topic, name in ((23, "Books"), (24, "Other")):
+            await directory.observe(await group_event(self.platform, -100400, "supergroup", topic,
+                title="Club", text=None, message_id=30, forum_topic_created=ForumTopicCreated(name, 0)))
+        parent = ("tg-main", "tg-main", "-100400")
+        with patch.object(self.controller, "prepare_core_reply", new_callable=AsyncMock) as prepare:
+            for number, title, foreign, expected in ((41, "Reading", False, "Reading"),
+                                                     (40, "Earlier", False, "Reading"),
+                                                     (42, "Foreign", True, "Reading")):
+                event = await group_event(self.platform, -100400, "supergroup", title=title, text=None,
+                                          message_id=number, new_chat_title=title)
+                if foreign:
+                    event.client = telegram_bot()
+                self.assertFalse(self.controller.claims(event))
+                await plugin.receive_companion_message(event)
+                await asyncio.gather(*tuple(directory._pending))
+                names = directory.stored_group_names()
+                self.assertEqual(names[(*parent[:2], "-100400#23")], expected + "-Books")
+                self.assertEqual(names[(*parent[:2], "-100400#24")], "Club-Other")
+                self.assertNotIn(parent, names)
+            prepare.assert_not_awaited()
+
     async def test_queued_group_from_replaced_managed_client(self):
         # Like the SDK bot, this fixture supports weak references.
         class Bot(NS):
