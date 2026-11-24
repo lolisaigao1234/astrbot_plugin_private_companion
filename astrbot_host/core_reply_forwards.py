@@ -127,6 +127,42 @@ def telegram_private_forward(event):
     return getattr(getattr(raw, "chat", None), "type", "") == "private"
 
 
+def quoted_telegram_forward(event):
+    raw = getattr(getattr(event.message_obj, "raw_message", None), "message", None)
+    original = getattr(raw, "reply_to_message", None)
+    if (not original or getattr(raw, "external_reply", None) or not (raw.text or raw.caption)
+            or original.chat.id != raw.chat.id):
+        return None
+
+    def matches(candidate):
+        forward = telegram_forward_message(candidate)
+        return (forward is not None and candidate.client is event.client
+                and forward.chat.id == raw.chat.id and forward.message_id == original.message_id)
+    return matches
+
+
+async def wait_for_quoted_forward(event, target, manager, prepare_context):
+    """Telegram can finish converting a reply before the forward it addresses."""
+    if not callable(prepare_context) or getattr(getattr(event, "platform_meta", None), "name", None) != "telegram":
+        return
+    raw = getattr(getattr(event.message_obj, "raw_message", None), "message", None)
+    original = getattr(raw, "reply_to_message", None)
+    if not getattr(original, "forward_origin", None) or telegram_private_forward(event):
+        return
+    matches = quoted_telegram_forward(event)
+    if matches is None or manager.collecting_event(target.target_id, matches):
+        return
+    try:
+        result = await prepare_context(event, target, group_admission=None)
+    except Exception:
+        return  # The ordinary quote path will authenticate the event before dispatch.
+    if result.failure is not None:
+        return
+    policy = result.unwrap().debounce
+    if policy and policy.enabled and (raw.date - original.date).total_seconds() <= policy.total_seconds:
+        await manager.wait_for_event(target.target_id, matches, policy.max_seconds)
+
+
 def private_debounce_input(event: Any, *, collecting=None, target_key=None) -> tuple[str, bool] | None:
     """Extract ``(plain_text, has_forward)`` for private-debounce-eligible messages.
 
@@ -150,16 +186,8 @@ def private_debounce_input(event: Any, *, collecting=None, target_key=None) -> t
             return None
         original = getattr(raw, "reply_to_message", None)
         if original is not None or getattr(raw, "quote", None):
-            if (not original or not collecting or not target_key or not (raw.text or raw.caption)
-                    or original.chat.id != raw.chat.id):
-                return None
-
-            def quoted_forward(candidate):
-                forward = telegram_forward_message(candidate)
-                return (forward is not None and candidate.client is event.client
-                        and forward.chat.id == raw.chat.id and forward.message_id == original.message_id)
-
-            if not collecting(target_key, quoted_forward):
+            matches = quoted_telegram_forward(event)
+            if not matches or not collecting or not target_key or not collecting(target_key, matches):
                 return None
             components = _message_components(event)
             allowed = {"Plain", "Reply", "At"}
