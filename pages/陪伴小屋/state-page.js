@@ -355,7 +355,7 @@ window.CompanionStatePage = (() => {
       telegramTarget()
         ? {name:"presentation",label:"正在输入提示",icon:"radio-tower",value:data.windowSelected?(settings.typing_enabled?"已开启":"已关闭"):"未选择私聊窗口",help:"当前私聊窗口 · 输入提示刷新间隔"}
         : {name:"presentation",label:"QQ 状态",icon:"radio-tower",value:`${[settings.typing_enabled,settings.presence_enabled,settings.online_status_enabled].filter(Boolean).length} 项已开启`,help:"正在输入提示 · 在线状态 · 自定义短状态"},
-      {name:"planning",label:"日程配置",icon:"calendar-days",value:settings.calendar_enabled?(settings.schedule_simulation_mode==="continuous"?"连续日程":"日程编排"):"日程已关闭",help:telegramTarget()?"规划方式 · 日程安排":"规划方式 · 安排与公开文案"},
+      {name:"planning",label:"日程配置",icon:"calendar-days",value:settings.calendar_enabled?(settings.schedule_simulation_mode==="continuous"?"连续日程":"日程编排"):"日程已关闭",help:telegramTarget()||unknownPlatform()?"规划方式 · 日程安排":"规划方式 · 安排与公开文案"},
       {name:"weather",label:"天气",icon:"cloud-sun",value:settings.planning_weather_enabled?(location||"地点待配置"):"天气感知已关闭",help:"角色所在地 · 实况信息时效"},
       {name:"datetime",label:"时间与日期",icon:"calendar-clock",value:local({hour:"2-digit",minute:"2-digit",hourCycle:"h23"})+" · "+local({month:"long",day:"numeric",weekday:"long"}),help:zone+" · 日期背景"},
     ];
@@ -416,7 +416,7 @@ window.CompanionStatePage = (() => {
       body=overviewMarkup(feature,"展示通道",`${enabled} 项开关已开启`,"受理确认只说明请求被平台接受，不代表客户端当前展示状态。",[["正在输入",channel("typing_enabled",diag?.typing)],["自定义短状态",channel("presence_enabled",diag?.custom_status)],["输入提示刷新间隔",data.windowSelected?`${settings.typing_refresh_seconds??"未提供"} 秒（取值 1–10）`:"未选择私聊窗口"],["诊断时间",diag?.observed_at?when(diag.observed_at):"尚无诊断记录"]])+(editor?.markup({feature,details:presentationMarkup(status,{receiptsOnly:true})})||"");
     } else body=workspaceOverview(status,feature)+(editor?.markup({feature})||"");
     const scopePill=telegramTyping?"当前私聊窗口":featureScopes[feature]||"当前角色";
-    const subtitle=telegramTyping?"配置当前窗口的正在输入提示与刷新间隔。":featureSubtitles[feature]||"";
+    const subtitle=telegramTyping?"配置当前窗口的正在输入提示与刷新间隔。":feature==="planning"&&(telegramTarget()||unknownPlatform())?"维护日程计划，连续陪伴模式可在这里设置。":featureSubtitles[feature]||"";
     return `<section id="state-feature-detail" class="state-feature-detail state-config-page" data-state-config-feature="${feature}" aria-labelledby="state-feature-title">
       <header><button type="button" class="state-feature-back" data-state-feature-close aria-label="收起${title}" title="返回状态看板" ${editor?.busy?"disabled":""}><i data-lucide="arrow-left" aria-hidden="true"></i></button><div class="state-feature-head-main">
           <span class="state-eyebrow">状态 · ${title}</span>
