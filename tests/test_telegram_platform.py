@@ -12,8 +12,8 @@ import wave
 from unittest.mock import AsyncMock, Mock, patch
 
 from telegram.error import BadRequest, Forbidden, InvalidToken, NetworkError, RetryAfter, TimedOut
-from telegram import Chat, Message, MessageEntity, Update, User
-from astrbot.core.message.components import Plain
+from telegram import Chat, ForumTopicCreated, Message, MessageEntity, Update, User
+from astrbot.core.message.components import Plain, Reply
 from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.platform.sources.telegram.tg_adapter import TelegramPlatformAdapter
@@ -131,6 +131,16 @@ async def group_event(platform, chat_id=-400, kind="group", topic=None, text="�
     return platform.create_event(native)
 
 
+async def forum_reply_event(platform, *, topic_root):
+    original = Message(10 if topic_root else 11, date=datetime.now(timezone.utc),
+                       chat=Chat(-400, "supergroup", is_forum=True),
+                       from_user=User(platform.client.id, "Bot", True),
+                       is_topic_message=True, message_thread_id=10,
+                       forum_topic_created=ForumTopicCreated("Topic", 0) if topic_root else None,
+                       text=None if topic_root else "之前")
+    return await group_event(platform, kind="supergroup", topic=10, text="/ 原文", reply_to_message=original)
+
+
 class TelegramGroupTests(unittest.IsolatedAsyncioTestCase):
     async def test_sdk_group_and_topic_routes(self):
         platform = TelegramPlatform()
@@ -162,6 +172,15 @@ class TelegramGroupTests(unittest.IsolatedAsyncioTestCase):
                 facts = group_trigger_facts(event, "tg-main")
                 self.assertEqual((facts["mentioned"], facts["quoted_bot"]), (mentioned, replied))
                 self.assertEqual(group_message_text(event, "tg-main"), expected)
+
+    async def test_bot_created_topic_only_addresses_bot_for_genuine_replies(self):
+        platform = TelegramPlatform()
+        for topic_root in (True, False):
+            with self.subTest(topic_root=topic_root):
+                event = await forum_reply_event(platform, topic_root=topic_root)
+                self.assertEqual(any(isinstance(part, Reply) for part in event.message_obj.message), not topic_root)
+                self.assertEqual(group_trigger_facts(event, "tg-main")["quoted_bot"], not topic_root)
+                self.assertEqual(group_message_text(event, "tg-main"), "/ 原文")
 
     async def test_reply_to_member_whose_id_matches_the_instance_is_unaddressed(self):
         platform = TelegramPlatform()

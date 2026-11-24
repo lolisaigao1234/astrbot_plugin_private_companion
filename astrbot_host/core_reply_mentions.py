@@ -4,7 +4,7 @@ from collections.abc import Mapping
 import logging
 import re
 
-from companion_v2.adapters.astrbot.group_mentions import telegram_reply_to_bot
+from companion_v2.adapters.astrbot.group_mentions import telegram_has_reply_prefix
 from companion_v2.conversation.group_timing import SELF_MENTION
 
 
@@ -105,7 +105,7 @@ def restore_group_mentions(event, request, native_input, native_context):
     prompt = getattr(request, "prompt", None)
     if not isinstance(original, str) or not isinstance(plain, str) or not isinstance(prompt, str):
         return
-    if telegram_reply_to_bot(event):
+    if telegram_has_reply_prefix(event):
         plain = event.message_obj.message_str
     if original == plain:
         return
