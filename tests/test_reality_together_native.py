@@ -334,6 +334,35 @@ class NativeRealityTogetherTests(unittest.IsolatedAsyncioTestCase):
         plugin.send_telegram_group_invite.assert_awaited_once()
         self.assertEqual(plugin.issued, 1)
 
+    async def test_group_invite_closed_before_dm_ack_reports_unusable_ticket(self):
+        identity = context()
+        identity["audience"]["scope"].update(platform="tg-main", kind="group", session_id="-100#23")
+        plugin = FakeTogether()
+        plugin.telegram_group_invite_route = Mock(return_value=object())
+        dispatched, acknowledge = asyncio.Event(), asyncio.Event()
+
+        async def send(route, url):
+            dispatched.set()
+            await acknowledge.wait()
+            return {"state": "delivered"}
+
+        plugin.send_telegram_group_invite = AsyncMock(side_effect=send)
+        provider = TOGETHER.NativeTogetherProvider(plugin, self.root, version=PRODUCT_VERSION)
+        req = request(provider, "together.room.create", invocation="in-flight", identity=identity,
+                      arguments={"mode": "call"})
+        creating = asyncio.create_task(provider.execute(req, before_dispatch=lambda: True))
+        try:
+            await asyncio.wait_for(dispatched.wait(), 5)
+            close = request(provider, "together.room.close", invocation="close-in-flight", identity=identity)
+            self.assertTrue((await provider.execute(close, before_dispatch=lambda: True))["result"]["ticket_revoked"])
+        finally:
+            acknowledge.set()
+        original = await creating
+        self.assertTrue(original["result"]["delivered_privately"])
+        self.assertFalse(original["result"]["ticket_available"])
+        self.assertEqual(await provider.execute(req, before_dispatch=lambda: True), original)
+        plugin.send_telegram_group_invite.assert_awaited_once()
+
     async def test_close_revokes_group_ticket_after_uncertain_delivery(self):
         identity = context()
         identity["audience"]["scope"].update(platform="tg-main", kind="group", session_id="-100#23")

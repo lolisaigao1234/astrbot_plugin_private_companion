@@ -8,15 +8,25 @@ from an authenticated inbound event for that same account.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from time import time
 from uuid import uuid4
+from weakref import WeakValueDictionary
 
 
 KEY = "conversation.relay.pending.v1"
 MAX_TASKS = 200
 LIVE_STATES = frozenset({"waiting", "sending", "waiting_reply", "reporting", "waiting_permission"})
 REPORTABLE_KINDS = frozenset({"group_wait", "private_receipt"})
+
+
+_receipt_locks = WeakValueDictionary()
+
+
+def telegram_receipt_lock(runtime, platform, account, peer):
+    """Serialize dispatch/registration with answers on the same private route."""
+    return _receipt_locks.setdefault((runtime, platform, account, str(peer)), asyncio.Lock())
 
 
 def _read(runtime):
@@ -168,6 +178,10 @@ def claim_telegram_receipt(runtime, account, user_id, message_id, *, reply_to=No
     block_key = f"conversation.relay.private_seen_block:{peer}:{block}"
     legacy_key = "conversation.relay.private_seen:" + peer
     with runtime.transaction() as connection:
+        now = time()
+        data = _read(runtime)
+        if not data["tasks"]:
+            return [], []
         # Old installations recorded only a high-water mark; keep that replay boundary.
         cursor = connection.execute(
             "INSERT INTO runtime_metadata(key, value) SELECT ?, ? WHERE NOT EXISTS "
@@ -178,17 +192,15 @@ def claim_telegram_receipt(runtime, account, user_id, message_id, *, reply_to=No
         )
         if not cursor.rowcount:
             return [], []
-        now = time()
-        data = _read(runtime)
         _prune(connection, data, now)
         prompts = _waiting_receipts(data, user_id, account, now, "waiting_permission")
+        waiting = _waiting_receipts(data, user_id, account, now, "waiting_reply")
         permission, replies = [], []
         matches = [task for task in prompts if reply_to is not None and task.get("prompt_message_id") == reply_to]
         if matches:
             if len(matches) == 1 and type(reply_to) is int and 0 < reply_to < message_id and permission_answer:
                 permission = _claim_receipt(matches)
         else:
-            waiting = _waiting_receipts(data, user_id, account, now, "waiting_reply")
             if reply_to is not None:
                 addressed = [task for task in waiting if task.get("question_message_id") == reply_to]
                 if len(addressed) == 1 and type(reply_to) is int and 0 < reply_to < message_id:

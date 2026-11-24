@@ -1,4 +1,5 @@
 """Telegram group management against the installed adapter, with a synthetic bot."""
+import asyncio
 import unittest
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, patch
@@ -99,6 +100,48 @@ class TelegramAdministrationTests(unittest.IsolatedAsyncioTestCase):
             return await port.invoke("relay:" + action, invocation)
 
         return fixture, platform, invoke
+
+    async def test_early_answer_waits_for_initial_question_registration(self):
+        import json
+        from datetime import timedelta
+        from astrbot_host.multi_controller import AstrBotMultiController
+        from astrbot_host.relay_pending import _read
+        from companion_v2.conversation.relay_tools import SEND_ACTION
+        from tests.test_relay_tools import NOW
+        from tests.test_telegram_platform import telegram_event
+
+        fixture, platform, invoke = await self.relay_fixture()
+        args = dict(destination_id="家人甲", text="Question", need_receipt=True)
+        operation = json.loads((await invoke("relay_message", args)).source.payload)["operation_id"]
+        fixture.current_input = dict(event_id="confirm", observed_at=(NOW + timedelta(seconds=1)).isoformat())
+        fixture.current_text = "确认发送"
+        dispatched, acknowledge = asyncio.Event(), asyncio.Event()
+
+        async def send(**kwargs):
+            dispatched.set()
+            await acknowledge.wait()
+            return NS(message_id=70)
+
+        platform.client.send_message.side_effect = send
+        sending = asyncio.create_task(invoke(SEND_ACTION, dict(args, confirmed=True, operation_id=operation)))
+        try:
+            await asyncio.wait_for(dispatched.wait(), 10)
+            target = fixture.port.bridge.settings.targets[0]
+            controller = NS(runtime=fixture.runtime)
+            answer = telegram_event(platform, 71, "my answer", 2002)
+            with patch("astrbot_host.relay_pending_events._report_receipt",
+                       new=AsyncMock(return_value="reported")) as report:
+                incoming = asyncio.create_task(AstrBotMultiController.process_private_relay_receipts(controller, answer, target))
+                await asyncio.sleep(0)
+                acknowledge.set()
+                sent, _ = await asyncio.gather(sending, incoming)
+                self.assertEqual(sent.state, "succeeded")
+                report.assert_awaited_once()
+                self.assertEqual(report.await_args.args[-1], "my answer")
+            task, = _read(fixture.runtime)["tasks"].values()
+            self.assertEqual(task["state"], "reported")
+        finally:
+            acknowledge.set()
 
     async def test_relays_resolve_only_configured_windows_and_keep_confirmation(self):
         import json

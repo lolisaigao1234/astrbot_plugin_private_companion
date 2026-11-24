@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from datetime import datetime
 import asyncio
 import json
@@ -25,7 +26,7 @@ from companion_v2.storage.repositories import OperationRepository
 
 from .private_notice import prepare_relay_transport
 from .relay_dispatch import relay_group, relay_private
-from .relay_pending import add_task, scheduled_state
+from .relay_pending import add_task, scheduled_state, telegram_receipt_lock
 
 
 OWNER = "conversation.relay"
@@ -744,65 +745,68 @@ class RelayToolPort:
                 receipt_ref=receipt_ref)
         if plan.need_receipt and plan.destination_kind != "private":
             raise TaskError("relay_receipt_invalid", "回复回执只支持私聊递话")
-        controller, route, transport = self._route(invocation.context, plan)
-        if invocation.before_dispatch is not None:
-            invocation.before_dispatch()
-        at = self._app().now()
-        require(operations.transition_outbox(operation_id, part_id,
-            expected_operation_state=OperationState.ACCEPTED, next_operation_state=OperationState.UNKNOWN,
-            expected_outbox_state="pending", next_outbox_state="unknown", observed_at=at))
-        try:
-            sender = relay_group if plan.destination_kind == "group" else relay_private
-            result = await sender(controller, None, request=request, settings=settings,
-                actor_is_core=self._actor_is_core(invocation, settings),
-                actor_id=invocation.context.actor.subject.subject_id,
-                confirmed=confirmed or not plan.needs_confirm, base_route=route, transport=transport)
-        except Exception:
-            return self._response(invocation, {"state": "unknown", "operation_id": operation_id,
-                                               "instruction": "结果未知，禁止自动重发"},
-                                  state="unknown", effect="unknown", operation_id=operation_id,
-                                  error_code="relay_delivery_unknown")
-        if isinstance(result, dict) and result.get("state") == "failed":
-            code = result["receipt"]["reason"]
-            receipt_ref = f"relay-refused:{code}:{operation_id}"
-            require(operations.transition_outbox(operation_id, part_id,
-                expected_operation_state=OperationState.UNKNOWN, next_operation_state=OperationState.COMPLETED,
-                expected_outbox_state="unknown", next_outbox_state="cancelled", observed_at=self._app().now(),
-                receipt_ref=receipt_ref))
-            return self._response(invocation, {}, state="failed", effect="not_committed",
-                                  operation_id=operation_id, receipt_ref=receipt_ref, error_code=code)
-        message_id = result.get("receipt", {}).get("message_id") if isinstance(result, dict) else None
-        if route.platform_name == "telegram" and type(message_id) is int and message_id > 0:
-            receipt_ref = f"telegram-message:{message_id}"
-        elif route.platform_name == "telegram" and isinstance(message_id, str) and message_id.startswith("session:"):
-            receipt_ref = "telegram-" + message_id
-        else:
-            receipt_ref = _onebot_receipt_ref(message_id)
-        if not isinstance(result, dict) or result.get("state") != "sent" or receipt_ref is None:
-            return self._response(invocation, {"state": "unknown", "operation_id": operation_id,
-                                               "instruction": "没有获得平台成功回执，禁止自动重发"},
-                                  state="unknown", effect="unknown", operation_id=operation_id,
-                                  error_code="relay_delivery_unknown")
         runtime = self._app().runtime
-        with runtime.transaction():
+        lock = (telegram_receipt_lock(runtime, *telegram_account, plan.destination_id)
+                if telegram_account and plan.need_receipt else nullcontext())
+        async with lock:
+            controller, route, transport = self._route(invocation.context, plan)
+            if invocation.before_dispatch is not None:
+                invocation.before_dispatch()
+            at = self._app().now()
             require(operations.transition_outbox(operation_id, part_id,
-                expected_operation_state=OperationState.UNKNOWN, next_operation_state=OperationState.COMPLETED,
-                expected_outbox_state="unknown", next_outbox_state="accepted", observed_at=self._app().now(),
-                receipt_ref=receipt_ref))
-            if plan.need_receipt:
-                add_task(runtime, {
-                    "kind": "private_receipt", "state": "waiting_reply", "telegram_account": telegram_account,
-                    "target_user_id": plan.destination_id,
-                    "source_kind": invocation.context.scope.kind.value,
-                    "source_id": invocation.context.scope.native_scope_id,
-                    "source_user": invocation.context.actor.principal.native_account_id,
-                    "question": plan.text, "sent_text": plan.text,
-                    "question_message_id": message_id if telegram_account and type(message_id) is int else None,
-                    "confirm_before_report": plan.confirm_before_report,
-                    "operation_id": operation_id,
-                    "expires_at": time() + 12 * 3600,
-                    "signature": digest(["relay-private-receipt", operation_id]),
-                })
+                expected_operation_state=OperationState.ACCEPTED, next_operation_state=OperationState.UNKNOWN,
+                expected_outbox_state="pending", next_outbox_state="unknown", observed_at=at))
+            try:
+                sender = relay_group if plan.destination_kind == "group" else relay_private
+                result = await sender(controller, None, request=request, settings=settings,
+                    actor_is_core=self._actor_is_core(invocation, settings),
+                    actor_id=invocation.context.actor.subject.subject_id,
+                    confirmed=confirmed or not plan.needs_confirm, base_route=route, transport=transport)
+            except Exception:
+                return self._response(invocation, {"state": "unknown", "operation_id": operation_id,
+                                                   "instruction": "结果未知，禁止自动重发"},
+                                      state="unknown", effect="unknown", operation_id=operation_id,
+                                      error_code="relay_delivery_unknown")
+            if isinstance(result, dict) and result.get("state") == "failed":
+                code = result["receipt"]["reason"]
+                receipt_ref = f"relay-refused:{code}:{operation_id}"
+                require(operations.transition_outbox(operation_id, part_id,
+                    expected_operation_state=OperationState.UNKNOWN, next_operation_state=OperationState.COMPLETED,
+                    expected_outbox_state="unknown", next_outbox_state="cancelled", observed_at=self._app().now(),
+                    receipt_ref=receipt_ref))
+                return self._response(invocation, {}, state="failed", effect="not_committed",
+                                      operation_id=operation_id, receipt_ref=receipt_ref, error_code=code)
+            message_id = result.get("receipt", {}).get("message_id") if isinstance(result, dict) else None
+            if route.platform_name == "telegram" and type(message_id) is int and message_id > 0:
+                receipt_ref = f"telegram-message:{message_id}"
+            elif route.platform_name == "telegram" and isinstance(message_id, str) and message_id.startswith("session:"):
+                receipt_ref = "telegram-" + message_id
+            else:
+                receipt_ref = _onebot_receipt_ref(message_id)
+            if not isinstance(result, dict) or result.get("state") != "sent" or receipt_ref is None:
+                return self._response(invocation, {"state": "unknown", "operation_id": operation_id,
+                                                   "instruction": "没有获得平台成功回执，禁止自动重发"},
+                                      state="unknown", effect="unknown", operation_id=operation_id,
+                                      error_code="relay_delivery_unknown")
+            with runtime.transaction():
+                require(operations.transition_outbox(operation_id, part_id,
+                    expected_operation_state=OperationState.UNKNOWN, next_operation_state=OperationState.COMPLETED,
+                    expected_outbox_state="unknown", next_outbox_state="accepted", observed_at=self._app().now(),
+                    receipt_ref=receipt_ref))
+                if plan.need_receipt:
+                    add_task(runtime, {
+                        "kind": "private_receipt", "state": "waiting_reply", "telegram_account": telegram_account,
+                        "target_user_id": plan.destination_id,
+                        "source_kind": invocation.context.scope.kind.value,
+                        "source_id": invocation.context.scope.native_scope_id,
+                        "source_user": invocation.context.actor.principal.native_account_id,
+                        "question": plan.text, "sent_text": plan.text,
+                        "question_message_id": message_id if telegram_account and type(message_id) is int else None,
+                        "confirm_before_report": plan.confirm_before_report,
+                        "operation_id": operation_id,
+                        "expires_at": time() + 12 * 3600,
+                        "signature": digest(["relay-private-receipt", operation_id]),
+                    })
         return self._response(invocation, {"state": "sent", "operation_id": operation_id,
             "destination_kind": plan.destination_kind, "destination_id": plan.destination_id,
             "mention_id": plan.mention_id, "receipt_ref": receipt_ref, "audit": plan.audit},
