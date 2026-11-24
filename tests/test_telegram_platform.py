@@ -953,6 +953,28 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
             title="Book-Club", new_chat_title="Library", message_id=44))
         self.assertEqual(directory.stored_group_names()[("tg-main", "tg-main", peer)], "Library-Science-Fiction")
 
+    async def test_parent_rename_uses_legacy_title_and_defers_unknown_boundary(self):
+        directory = self.controller.session_topology
+        for chat, known_parent in ((-100400, "Book"), (-100401, None)):
+            peer = f"{chat}#23"
+            for route, label in ((str(chat), known_parent), (peer, "Book-Club-Science-Fiction")):
+                if label:
+                    origin = f"tg-main:GroupMessage:{route}"
+                    directory._store_observation(digest(["tg-main", "tg-main", origin]), {
+                        "unified_msg_origin": origin, "account_id": "tg-main", "group_name": label,
+                    })
+            for message_id, title in enumerate(("Book-Club" if known_parent else "Book", "Library"), 44):
+                await directory.observe(await group_event(self.platform, chat, "supergroup", text=None,
+                    title=title, new_chat_title=title, message_id=message_id))
+            key = ("tg-main", "tg-main", peer)
+            expected = "Library-Club-Science-Fiction" if known_parent else "Book-Club-Science-Fiction"
+            self.assertEqual(directory.stored_group_names()[key], expected)
+            if not known_parent:
+                event = await group_event(self.platform, chat, "supergroup", 23, title="Library", text=None,
+                    forum_topic_created=ForumTopicCreated("Science-Fiction", 0), message_id=46)
+                await directory.observe(event)
+                self.assertEqual(directory.stored_group_names()[key], "Library-Science-Fiction")
+
     async def test_chat_rename_updates_legacy_topics_on_the_same_account(self):
         directory = self.controller.session_topology
         for peer, label in (("-100400", "旧-群名"), ("-100400#23", "旧-群名-故事"),
