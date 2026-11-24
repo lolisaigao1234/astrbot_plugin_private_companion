@@ -78,7 +78,7 @@ from .astrbot_host.core_reply_forwards import (
     merge_followup_forwards,
     parse_event_forwards,
     prepare_forward_only_request,
-    private_debounce_input,
+    private_debounce_input, wait_for_quoted_forward,
     telegram_private_forward,
     resolve_forward_intake_policy,
 )
@@ -1291,6 +1291,9 @@ class PrivateCompanionV2StagingPlugin(Star):
         is_calendar_command = (channel == "private" and not forwarded
                                and parse_calendar_command(str(getattr(event, "message_str", "") or "")))
         target_key = getattr(target, "target_id", None) if channel == "private" else None
+        if target_key and not is_calendar_command:
+            await wait_for_quoted_forward(event, target, self._private_debounce_manager(),
+                                          getattr(self.staging, "prepare_core_reply_context", None))
         debounce_input = (private_debounce_input(event, collecting=self._private_debounce_manager().collecting_event,
                                                   target_key=target_key)
                           if channel == "private" and not is_calendar_command else None)

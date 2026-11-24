@@ -667,6 +667,33 @@ class TelegramPresenceTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
         finally:
             self.presence.finish_native_reply(self.context, "rate-limited")
 
+    async def test_rate_limit_survives_a_new_reply_to_the_same_peer(self):
+        self.enable_typing()
+        loop = asyncio.get_running_loop()
+        sent = asyncio.Event()
+        times = []
+
+        async def action(**kwargs):
+            times.append(loop.time())
+            if len(times) == 1:
+                raise RetryAfter(1)
+            sent.set()
+            return True
+
+        self.action.side_effect = action
+        self.presence.begin_native_reply(self.context, "first")
+        route = self.presence.route(self.context)
+        async with asyncio.timeout(3):
+            while self.presence.results_for(self.context).get("typing:" + route, {}).get("retry_after") != 1:
+                await asyncio.sleep(0.01)
+        self.presence.finish_native_reply(self.context, "first")
+        self.presence.begin_native_reply(self.context, "second")
+        try:
+            await asyncio.wait_for(sent.wait(), 5)
+            self.assertGreaterEqual(times[1] - times[0], 1)
+        finally:
+            self.presence.finish_native_reply(self.context, "second")
+
     async def test_slow_rate_limited_action_is_independent_of_reply(self):
         self.enable_typing()
         entered, release = asyncio.Event(), asyncio.Event()
@@ -845,7 +872,10 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
                              f"{title}-{topic}")
             self.assertEqual(event_person_names(event), (member, ""))
         await directory.observe(await group_event(self.platform, -100400, "supergroup", text=None,
-                                                 title="新群名", new_chat_title="新群名"))
+                                                 title="新群名", new_chat_title="新群名", message_id=44))
+        await directory.observe(await group_event(self.platform, -100400, "supergroup", 24, text="迟到",
+                                                 title="阅读群", message_id=43))
+        self.assertEqual(directory.stored_group_names()[("tg-main", "tg-main", "-100400#24")], "新群名")
         self.assertEqual(directory.stored_group_names()[("tg-main", "tg-main", "-100400#23")],
                          "新群名-故事")
 

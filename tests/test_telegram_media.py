@@ -2,6 +2,7 @@
 
 from tests import astrbot_data_root  # noqa: F401 - isolate SDK data before import
 
+import asyncio
 import base64
 import json
 from pathlib import Path
@@ -163,6 +164,26 @@ class TelegramCaptureTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase
             else:
                 self.assertEqual(oversized.failure.code, "host_video_limit")
 
+    async def test_standalone_video_respects_turn_limit_before_sdk_request(self):
+        from astrbot.core.astr_main_agent import collect_initial_request
+        from companion_v2.conversation.media.video.models import MAX_VIDEO_BYTES
+        from companion_v2.execution.models import TaskError
+        await self.convert(video=dict(file_id="v", file_unique_id="v", duration=1, width=64, height=48),
+                           caption="my video caption")
+        self.event = self.platform.create_event(self.event.message_obj)
+        self.event.created_at = self.clock.now().timestamp()
+        target = self.controller.settings.target("tg-owner")
+        load = AsyncMock(side_effect=TaskError("host_video_limit", "synthetic oversized video"))
+        with patch("astrbot_host.video.loader.fetch_native_video_bytes", load), patch(
+                "astrbot.core.astr_main_agent._get_session_conv", AsyncMock(return_value=NS(history="[]"))):
+            (await self.controller.session.prepare_core_reply(self.event, target)).unwrap()
+            request, _ = await collect_initial_request(self.event, NS(), NS(provider_wake_prefix="", provider_settings={}))
+            payload = json.dumps(await request.assemble_context(), ensure_ascii=False)
+        self.assertEqual(load.await_args.kwargs["maximum_bytes"], MAX_VIDEO_BYTES)
+        self.assertIn("my video caption", payload)
+        self.assertIn("附件超过读取上限", payload)
+        self.assertFalse(any(isinstance(part, Video) for part in self.event.message_obj.message))
+
     async def test_album_keeps_two_original_photos_and_caption(self):
         from astrbot_host.media import load_native_image
         from tests.test_conversation_images import image_bytes
@@ -180,6 +201,7 @@ class TelegramCaptureTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase
             captured = (await self.bridge.capture(self.event)).unwrap()
         self.assertEqual([image.descriptor.position for image in captured.images], [0, 2])
         self.assertIn("album caption", captured.text)
+        first_photo = captured.images[0]
         # Each image fits alone. Only the latter crosses the shared byte limit.
         budget = max(image.descriptor.retained_bytes for image in captured.images)
         with patch("companion_v2.conversation.media.models.MAX_TURN_BYTES", budget), patch(
@@ -195,6 +217,19 @@ class TelegramCaptureTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase
             captured = (await self.bridge.capture(self.event)).unwrap()
         self.assertEqual([image.descriptor.position for image in captured.images], [2])
         self.assertIn("album caption", captured.text)
+
+        # A slow second photo must not discard the caption or the admitted first one.
+        async def slow_photo(locator, **kwargs):
+            if locator.position == 0:
+                return first_photo
+            await asyncio.Event().wait()
+
+        with patch.object(self.bridge, "image_loader", slow_photo), patch(
+                "companion_v2.adapters.astrbot.native.MEDIA_PREPARE_TIMEOUT", 0.1):
+            timed = (await self.bridge.capture(self.event)).unwrap()
+        self.assertEqual(timed.images, (first_photo,))
+        self.assertIn("album caption", timed.text)
+        self.assertIn("附件读取超时", timed.text)
 
         # Exercise the managed reply entry and the SDK's serialized provider request.
         from astrbot.core.astr_main_agent import collect_initial_request

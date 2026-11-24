@@ -139,7 +139,7 @@ async def merge_forward_burst(event, target, plan, entries, prepare_context):
                 or item.role != plan.captured.role or item.recipients != plan.captured.recipients):
             continue
         verified.append((item, source_event))
-    if len(verified) < 2:
+    if not verified or len(entries) < 2:
         return plan
     # Intake awaits can complete out of order. Telegram orders messages in this chat by ID.
     verified.sort(key=lambda pair: int(pair[0].event_id))
@@ -150,6 +150,8 @@ async def merge_forward_burst(event, target, plan, entries, prepare_context):
     forward_slots = max(0, remaining_media - direct_count)
     omitted = max(0, sum(map(len, media)) - remaining_media)
     note = f"\n[另有 {omitted} 个附件超过读取上限]" if omitted else ""
+    if len(verified) < len(entries):
+        note += f"\n[另有 {len(entries) - len(verified)} 条消息未通过核验，本轮未读取]"
     for i, section in _bounded_sections(originals, MAX_MERGED_CHARS - len(note)):
         if sections:
             section = "\n\n" + section

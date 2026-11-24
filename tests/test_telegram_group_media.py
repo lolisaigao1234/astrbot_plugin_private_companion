@@ -1,6 +1,7 @@
 """Group updates converted by AstrBot with offline, synthetic file contents."""
 
 from dataclasses import replace
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace as NS
 import unittest
@@ -91,6 +92,19 @@ class TelegramGroupMediaTests(TelegramHostFixture, unittest.IsolatedAsyncioTestC
         if caption:
             self.assertIn(caption, captured.text)
         self.assertIn("附件超过读取上限", captured.text)
+
+        async def slow_photo(locator, **kwargs):
+            if locator.position == captured.images[0].descriptor.position:
+                return captured.images[0]
+            await asyncio.Event().wait()
+
+        with patch.object(self.bridge, "image_loader", slow_photo), patch(
+                "companion_v2.adapters.astrbot.group.MEDIA_PREPARE_TIMEOUT", 0.1):
+            timed = await self.capture(message)
+        self.assertEqual(timed.images, captured.images)
+        self.assertIn("附件读取超时", timed.text)
+        if caption:
+            self.assertIn(caption, timed.text)
 
         import base64
         from astrbot.core.astr_main_agent import collect_initial_request

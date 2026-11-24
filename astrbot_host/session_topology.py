@@ -578,7 +578,6 @@ class SessionTopology:
                 row[field] = previous_name
         if chat_id := row.get("telegram_chat_id"):
             previous = rows.get(key, {})
-            title = row["telegram_chat_title"] or previous.get("telegram_chat_title", "")
             # The adapter can cache a historical creation name from a reply.
             # Use its hint for discovery, and explicit edits for later renames.
             rename = row.pop("telegram_topic_rename")
@@ -591,15 +590,20 @@ class SessionTopology:
                 row["telegram_topic_name"] = previous.get("telegram_topic_name") or row["telegram_topic_name"]
             if last_rename:
                 row["telegram_topic_rename_id"] = last_rename
+            platform_prefix = row["unified_msg_origin"].partition(":")[0] + ":"
+            siblings = [item for item in rows.values() if isinstance(item, dict)
+                        and item.get("telegram_chat_id") == chat_id and item.get("account_id") == row["account_id"]
+                        and item.get("unified_msg_origin", "").startswith(platform_prefix)]
+            latest = max(siblings, key=lambda item: item.get("telegram_chat_title_id", 0), default={})
+            title = row["telegram_chat_title"]
+            title_id = message_id
+            if not title or message_id < latest.get("telegram_chat_title_id", 0):
+                title, title_id = latest.get("telegram_chat_title", ""), latest.get("telegram_chat_title_id", 0)
             if title:
-                platform_prefix = row["unified_msg_origin"].partition(":")[0] + ":"
-                # The parent title applies to every observed topic on this account.
-                for sibling in (*rows.values(), row):
-                    if (isinstance(sibling, dict) and sibling.get("telegram_chat_id") == chat_id
-                            and sibling.get("account_id") == row["account_id"]
-                            and sibling.get("unified_msg_origin", "").startswith(platform_prefix)):
-                        sibling["telegram_chat_title"] = title
-                        sibling["group_name"] = "-".join(filter(None, (title, sibling.get("telegram_topic_name"))))
+                for sibling in (*siblings, row):
+                    sibling["telegram_chat_title"] = title
+                    sibling["telegram_chat_title_id"] = title_id
+                    sibling["group_name"] = "-".join(filter(None, (title, sibling.get("telegram_topic_name"))))
         rows[key] = row
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(".json.tmp")
