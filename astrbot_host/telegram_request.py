@@ -35,7 +35,14 @@ def protect_telegram_request(event, request):
         value = getattr(request, name, None)
         if value:
             setattr(request, name, clean(value))
+    dropped = False
     for name in ("image_urls", "audio_urls"):
         urls = getattr(request, name, None)
         if urls:
-            setattr(request, name, [url for url in urls if not isinstance(url, str) or token not in url])
+            retained = [url for url in urls if not isinstance(url, str) or token not in url]
+            dropped |= len(retained) != len(urls)
+            setattr(request, name, retained)
+    if dropped:
+        parts = list(getattr(request, "extra_user_content_parts", ()) or ())
+        if not any(isinstance(part, TextPart) and part.text == "[附件不可用]" for part in parts):
+            request.extra_user_content_parts = [*parts, TextPart(text="[附件不可用]")]

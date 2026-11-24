@@ -83,6 +83,16 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
             self.assertEqual(facts["quoted_bot_message"], author == self.platform.client.id)
             self.assertEqual(facts["bot_account_id"], str(self.platform.client.id))
 
+            from companion_v2.conversation.generation import LocalReplyGenerator
+            generator = self.controller.session.application.generator
+            self.assertEqual(generator.resolve_bot_sender(native.route.scope), self.platform.client.id)
+            request = NS(context=NS(materials=()), images=(), audios=(),
+                         event=NS(scope=NS(kind=native.route.scope.kind, account_id=str(OWNER)),
+                                  principal=native.principal, quotes=native.quotes))
+            local = LocalReplyGenerator._laya_facts(request, lambda scope: generator.resolve_bot_sender(native.route.scope))
+            self.assertFalse(local.get("is_bot_message", False))
+            self.assertEqual(local.get("quoted_bot_message", False), author == self.platform.client.id)
+
     async def test_private_quotes_preserve_original_source_and_selected_text(self):
         from astrbot.core.utils.quoted_message.chain_parser import ReplyChainParser
 
@@ -478,6 +488,40 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
                 payload = json.dumps(await request.assemble_context(), ensure_ascii=False)
                 self.assertEqual(payload.count(caption), 1)
                 self.assertEqual(payload.count(quote_text), 1)
+
+    async def test_transcribed_voice_reply_includes_caption_once(self):
+        from pathlib import Path
+        from telegram import Voice
+        from astrbot.core.astr_main_agent import MainAgentBuildConfig, _process_quote_message, collect_initial_request
+        from astrbot.core.message.components import Plain
+        from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA, inject_core_reply_prompt
+        from tests.audio_support import audio_bytes
+
+        async def download(url, *, path):
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_bytes(audio_bytes())
+
+        transcript, caption, quote_text = "语音转写正文", "这是语音说明", "先前的答复"
+        original = self.message(9, 424242, text=quote_text)
+        converted = await self.event(90, text="继续", reply_to_message=original)
+        reply = next(part for part in converted.message_obj.message if isinstance(part, Reply))
+        with patch.object(Voice, "get_file", AsyncMock(return_value=NS(file_path="https://example.org/voice"))), \
+                patch("astrbot.core.platform.sources.telegram.tg_adapter.download_file", download):
+            for number, header in ((100, []), (110, [reply])):
+                event = await self.event(number, voice={"file_id": "v", "file_unique_id": "v1", "duration": 1},
+                                         caption=caption, reply_to_message=original)
+                event.message_obj.message = [*header, Plain(transcript)]
+                event.message_str = transcript
+                core = require(await self.bridge.capture_core_reply(event))
+                self.assertIn(caption, core.text)
+                with patch("astrbot.core.astr_main_agent._get_session_conv", AsyncMock(return_value=NS(history="[]"))):
+                    request, _ = await collect_initial_request(event, NS(), MainAgentBuildConfig(tool_call_timeout=5))
+                    await _process_quote_message(event, request, "", NS())
+                event.set_extra(CORE_REPLY_CONTEXT_EXTRA, {"prepared": {"native_input": core}})
+                inject_core_reply_prompt(event, request)
+                payload = json.dumps(await request.assemble_context(), ensure_ascii=False)
+                for expected in (transcript, caption, quote_text):
+                    self.assertEqual(payload.count(expected), 1, expected)
 
     async def test_admitted_attachment_quotes_match_sdk_originals(self):
         from contextlib import ExitStack

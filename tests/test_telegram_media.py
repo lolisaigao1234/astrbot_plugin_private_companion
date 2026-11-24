@@ -239,6 +239,8 @@ class TelegramWireTests(unittest.IsolatedAsyncioTestCase):
                                   extra_user_content_parts=[TextPart(text=url)], image_urls=[url])
         plugin = ENTRY.PrivateCompanionV2StagingPlugin.__new__(ENTRY.PrivateCompanionV2StagingPlugin)
         await plugin.restate_companion_core_video_state(event, request)
+        await plugin.restate_companion_core_video_state(event, request)
+        self.assertEqual([part.text for part in request.extra_user_content_parts].count("[附件不可用]"), 1)
         for value in (request.prompt, request.contexts, request.extra_user_content_parts, request.image_urls):
             self.assertNotIn(event.client.token, str(value))
 

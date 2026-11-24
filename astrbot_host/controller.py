@@ -552,6 +552,7 @@ class AstrBotStagingController:
             return LayaDecisionService(LayaSettingsStore(self.data_root),
                 runtime=self.session.application.runtime, origin_key=context.key, client_factory=LayaDecisionClient)
 
+        self.session.application.generator.resolve_bot_sender = self.session.bridge.bot_sender_id
         self.session.application.attach_laya_decision(laya_for_context)
         return self.session
 
