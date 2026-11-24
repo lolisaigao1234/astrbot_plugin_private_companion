@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+from contextlib import contextmanager
 import hashlib
 import io
 import ipaddress
@@ -86,6 +87,14 @@ class AttachmentReadError(TaskError):
         self.bytes_read = bytes_read
 
 
+@contextmanager
+def account_for_decode(content):
+    try:
+        yield
+    except TaskError as error:
+        raise AttachmentReadError(error.code, str(error), len(content)) from None
+
+
 async def fetch_attachment(value, *, maximum_bytes):
     current = public_url(value)
     resolver = PublicImageResolver()
@@ -167,7 +176,7 @@ def _read_host_resolved_image(value, maximum_bytes):
             raise TaskError("host_image_limit", "image exceeds remaining capacity")
         content = stream.read(maximum_bytes + 1)
     if len(content) > maximum_bytes:
-        raise TaskError("host_image_limit", "image exceeds the intake byte budget")
+        raise AttachmentReadError("host_image_limit", "image exceeds the intake byte budget", len(content))
     return content
 
 
@@ -187,9 +196,10 @@ async def load_native_image(locator, *, maximum_bytes=MAX_IMAGE_BYTES):
         else:
             # Do not interpret a network message's file/path field as local disk authority.
             content = await fetch_image(value, maximum_bytes=maximum_bytes)
-        if len(content) > maximum_bytes:
-            raise TaskError("host_image_limit", "image exceeds remaining capacity")
-        return await asyncio.to_thread(inspect_image, content, locator.position)
+        with account_for_decode(content):
+            if len(content) > maximum_bytes:
+                raise TaskError("host_image_limit", "image exceeds remaining capacity")
+            return await asyncio.to_thread(inspect_image, content, locator.position)
     except TaskError:
         raise
     except Exception:
