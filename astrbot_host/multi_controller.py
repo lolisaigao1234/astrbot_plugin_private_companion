@@ -1509,7 +1509,7 @@ class AstrBotMultiController:
             message, session, meta = event.message_obj, event.session, event.platform_meta
             if getattr(message.type, "value", None) == "GroupMessage":
                 route = group_event_route(event)
-                target = self.settings.group_target(route.platform_id, route.account_id, route.group_id)
+                target = self.settings.group_target(*route.route_key, allow_template=route.platform_name != "telegram")
                 platform = self.context.get_platform_inst(meta.id)
                 if (target is None or platform is None or platform.get_client() is not event_native_client(platform, event)
                         or (connected and not native_client_connected(
@@ -1555,7 +1555,7 @@ class AstrBotMultiController:
             route = group_event_route(event)
         except (ValueError, AttributeError, TypeError):
             return True
-        if self.settings.group_target(*route.route_key) is None:
+        if self.settings.group_target(*route.route_key, allow_template=False) is None:
             logger.info("[CompanionV2] Telegram 群窗口未配置 platform=%s group=%s", meta.id, route.group_id)
             return True
         return False

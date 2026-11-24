@@ -391,10 +391,10 @@ class MultiHostSettings:
         identifier = "private-" + digest([platform_id, account_id, participant_id])[:24]
         return PrivateTarget(identifier, platform_id, account_id, template.bot_id, participant_id)
 
-    def group_target(self, platform_id, account_id, group_id):
+    def group_target(self, platform_id, account_id, group_id, *, allow_template=True):
         exact = next((item for item in self.group_targets if item.route_key ==
                       (platform_id, account_id, group_id)), None)
-        if exact is not None:
+        if exact is not None or not allow_template:
             return exact
         template = next((item for item in self.group_targets if item.route_key ==
                          (platform_id, account_id, "*")), None)

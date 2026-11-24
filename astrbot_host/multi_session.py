@@ -406,6 +406,9 @@ class MultiGroupBridge(NativeGroupBridge):
             context.actor.principal, context.actor.subject, context.actor.binding_id, context.actor.binding_revision)
 
     def target_for_route(self, platform_id, account_id, group_id):
+        family = self.authority.platform_name
+        if callable(family) and family(platform_id) == "telegram":
+            return self.settings.group_target(platform_id, account_id, group_id, allow_template=False)
         return (super().target_for_route(platform_id, account_id, group_id)
                 or self.settings.group_target(platform_id, account_id, group_id))
 
