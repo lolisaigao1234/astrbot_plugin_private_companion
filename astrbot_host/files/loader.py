@@ -12,7 +12,7 @@ from companion_v2.adapters.astrbot.files import NativeFileLocator, FileExtractio
 from companion_v2.adapters.astrbot.telegram_media import TelegramFile, fetch_location
 from companion_v2.execution.models import TaskError
 from companion_v2.foundation.refs import ScopeKind
-from ..media import fetch_attachment
+from ..media import AttachmentReadError, fetch_attachment
 
 
 async def decode_document(content, locator, *, maximum_chars, formats):
@@ -71,6 +71,9 @@ async def load_native_file(locator, *, client, scope, maximum_bytes, maximum_cha
             value = response.get("url", "") if isinstance(response, dict) else ""
         try:
             content = await fetch_attachment(value, maximum_bytes=maximum_bytes)
+        except AttachmentReadError as error:
+            code = "host_file_limit" if error.code == "host_image_limit" else "host_file_unavailable"
+            raise FileExtractionError(code, error.bytes_read) from None
         except TaskError as error:
             if error.code == "host_image_limit":
                 raise TaskError("host_file_limit", "file exceeds its original byte budget") from None

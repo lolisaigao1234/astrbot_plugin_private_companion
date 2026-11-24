@@ -80,6 +80,12 @@ async def fetch_image(value, *, maximum_bytes=MAX_IMAGE_BYTES):
     return await fetch_attachment(value, maximum_bytes=maximum_bytes)
 
 
+class AttachmentReadError(TaskError):
+    def __init__(self, code, reason, bytes_read):
+        super().__init__(code, reason)
+        self.bytes_read = bytes_read
+
+
 async def fetch_attachment(value, *, maximum_bytes):
     current = public_url(value)
     resolver = PublicImageResolver()
@@ -99,10 +105,17 @@ async def fetch_attachment(value, *, maximum_bytes):
                     if response.content_length is not None and response.content_length > maximum_bytes:
                         raise TaskError("host_image_limit", "image exceeds the intake byte budget")
                     content = bytearray()
-                    while chunk := await response.content.read(min(65536, maximum_bytes - len(content) + 1)):
-                        if len(content) + len(chunk) > maximum_bytes:
-                            raise TaskError("host_image_limit", "image exceeds the intake byte budget")
-                        content.extend(chunk)
+                    try:
+                        while chunk := await response.content.read(min(65536, maximum_bytes - len(content) + 1)):
+                            if len(content) + len(chunk) > maximum_bytes:
+                                raise AttachmentReadError("host_image_limit", "attachment exceeds the intake byte budget",
+                                                          len(content) + len(chunk))
+                            content.extend(chunk)
+                    except (aiohttp.ClientError, OSError) as exc:
+                        if content:
+                            raise AttachmentReadError("host_image_fetch_failed", "attachment download interrupted",
+                                                      len(content)) from exc
+                        raise
                     return bytes(content)
     finally:
         await resolver.close()
