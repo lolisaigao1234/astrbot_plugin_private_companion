@@ -61,6 +61,15 @@ def sticker_marker(event):
     return sticker_label(sticker)
 
 
+def remaining_file_budget(telegram, images, audios, videos, quotes):
+    if telegram is None:
+        return None
+    from companion_v2.conversation.media.models import MAX_TURN_BYTES
+    quoted_images = (image for quote in quotes for image in quote.images)
+    used = sum(item.descriptor.retained_bytes for item in (*images, *audios, *videos, *quoted_images))
+    return max(0, MAX_TURN_BYTES - used)
+
+
 async def capture_turn_media(bridge, references, images, audios, videos, text_parts, partial_media):
     """Give direct attachments first claim, then admit verified quote photos."""
     from companion_v2.conversation.media import models as visual

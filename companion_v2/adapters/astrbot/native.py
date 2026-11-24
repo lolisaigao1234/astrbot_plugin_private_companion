@@ -1163,8 +1163,10 @@ class NativePrivateBridge:
             if partial_media:
                 text = "".join(text_parts)
             if frozen_files:
+                from .telegram_media import remaining_file_budget
                 file_text = await prepare_file_text(frozen_files, self.file_loader, file_preferences,
-                    client=event_client, scope=scope, payload_budget=65536 - sum(map(len, text_parts)))
+                    client=event_client, scope=scope, payload_budget=65536 - sum(map(len, text_parts)),
+                    byte_budget=remaining_file_budget(telegram, images, audios, videos, quotes))
                 text = "".join(file_text.get(position, part) for position, part in enumerate(text_parts))
             if telegram and (telegram_caption or frozen_files):
                 text = telegram.quote_availability(text)

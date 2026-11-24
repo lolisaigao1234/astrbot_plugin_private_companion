@@ -56,7 +56,7 @@ def file_locator(position, part):
     return NativeFileLocator(position, safe_name(getattr(part, "name", None)), value if type(value) is str else "")
 
 
-async def prepare_file_text(locators, loader, preferences, *, client, scope, payload_budget=65536):
+async def prepare_file_text(locators, loader, preferences, *, client, scope, payload_budget=65536, byte_budget=None):
     remaining = preferences["file_understanding_max_chars"]
     deadline = asyncio.get_running_loop().time() + preferences["file_understanding_timeout_seconds"]
     result = {}
@@ -69,17 +69,24 @@ async def prepare_file_text(locators, loader, preferences, *, client, scope, pay
             entry["status"] = "文件理解未启用，未读取正文"
         elif not media_scope_enabled(preferences, "file_understanding", scope):
             entry["status"] = "当前会话范围未启用文件理解，未读取正文"
-        elif ordinal >= MAX_FILES or remaining < 1:
+        elif ordinal >= MAX_FILES or remaining < 1 or byte_budget == 0:
             entry["status"] = "本轮文件读取上限已达到，未读取此附件"
         else:
             try:
+                limit = preferences["file_understanding_max_size_mb"] * 1024 * 1024
+                if byte_budget is not None:
+                    limit = min(limit, byte_budget)
                 value = await asyncio.wait_for(loader(locator, client=client, scope=scope,
-                    maximum_bytes=preferences["file_understanding_max_size_mb"] * 1024 * 1024,
+                    maximum_bytes=limit,
                     maximum_chars=remaining, formats=preferences["file_understanding_allowed_suffixes"]),
                     timeout=max(0.01, deadline - asyncio.get_running_loop().time()))
                 if (type(value) is not FileText or value.position != locator.position
                         or value.name != locator.name or len(value.text) > remaining):
                     raise TaskError("host_file_invalid", "document loader changed the frozen attachment")
+                if value.byte_count > limit:
+                    raise TaskError("host_file_limit", "document exceeds its remaining byte budget")
+                if byte_budget is not None:
+                    byte_budget -= value.byte_count
                 entry.update(sha256=value.content_hash, byte_count=value.byte_count, text=value.text,
                              coverage="部分正文" if value.truncated else "已提取正文")
                 remaining -= len(value.text)
