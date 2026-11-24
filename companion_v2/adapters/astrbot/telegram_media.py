@@ -1,5 +1,6 @@
 """Telegram's file endpoint includes the credential in its path."""
 
+import asyncio
 from dataclasses import dataclass, field, replace
 
 from companion_v2.execution.models import TaskError
@@ -70,22 +71,27 @@ class TelegramReadBudget:
         self.remaining = max(0, self.remaining - size)
 
 
-async def capture_turn_media(bridge, references, images, audios, videos, text_parts, partial_media, budget):
+async def capture_turn_media(bridge, references, images, audios, videos, text_parts, partial_media, budget, *, timeout):
     """Give direct attachments first claim, then admit verified quote photos."""
     from companion_v2.conversation.media import models as visual
     from companion_v2.conversation.media.audio import models as voice
     from companion_v2.conversation.media.video import models as movie
 
     descriptors = {"image": [], "audio": [], "video": []}
+    deadline = asyncio.get_running_loop().time() + timeout
 
     async def capture(kind, locators, loader, expected, count, ceiling, *, quoted=False):
         accepted = []
         retained = descriptors[kind]
         for locator in locators:
             try:
+                time_left = deadline - asyncio.get_running_loop().time()
+                if time_left <= 0:
+                    raise asyncio.TimeoutError
                 if budget.remaining <= 0 or len(retained) >= count:
                     raise TaskError(f"host_{kind}_limit", "turn attachment capacity exhausted")
-                item = await loader(locator, maximum_bytes=min(budget.remaining, ceiling))
+                item = await asyncio.wait_for(
+                    loader(locator, maximum_bytes=min(budget.remaining, ceiling)), timeout=time_left)
                 if type(item) is not expected or item.descriptor.position != locator.position:
                     raise TaskError(f"host_{kind}_invalid", "loader changed the original component position")
                 retained.append(item.descriptor)
@@ -96,6 +102,13 @@ async def capture_turn_media(bridge, references, images, audios, videos, text_pa
                     raise TaskError(f"host_{kind}_limit", "decoded attachment exceeds the turn budget")
                 budget.debit(item.descriptor.retained_bytes)
                 accepted.append(item)
+            except asyncio.TimeoutError:
+                # A cancelled read can have consumed bytes without returning a descriptor.
+                budget.debit(budget.remaining)
+                if not (partial_media or quoted and any(descriptors.values())):
+                    raise TaskError("host_media_timeout", "attachment preparation exceeded its bounded intake time") from None
+                if not quoted:
+                    text_parts[locator.position] = "[附件读取超时，本轮未读取]"
             except TaskError as error:
                 consumed = getattr(error, "bytes_read", 0)
                 budget.debit(consumed)
