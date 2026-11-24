@@ -152,6 +152,58 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
         self.assertIn("compare these", winner.message_str)
         self.assertIn("来源：Ada]\nreport", winner.message_str)
 
+    async def test_comment_quoting_a_collected_forward_joins_its_burst(self):
+        await self.check_reply_to_forward(in_burst=True)
+
+    async def test_comment_quoting_an_older_forward_gets_its_own_turn(self):
+        await self.check_reply_to_forward(in_burst=False)
+
+    async def check_reply_to_forward(self, *, in_burst):
+        from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA
+
+        plugin = self.started_plugin()
+        async def make_forward(number, body):
+            return await self.event(number=number, text=body, forward_origin={
+                "type": "hidden_user", "sender_user_name": "Ada", "date": 1700000000})
+        first = await make_forward(80, "first-body")
+        second = await make_forward(81, "second-body")
+        original = first if in_burst else await make_forward(67, "older-body")
+        comment = await self.event(number=82, text="my reply", reply_to_message=
+                                   original.message_obj.raw_message.message.to_dict())
+        manager = plugin._private_debounce_manager()
+        ready = asyncio.Event()
+        reserve = manager.reserve
+        def record(key, event, text):
+            reservation = reserve(key, event, text)
+            if event is second:
+                ready.set()
+            return reservation
+        with patch.object(manager, "reserve", side_effect=record), patch.object(
+                self.controller, "prepare_core_reply", wraps=self.controller.prepare_core_reply) as prepare:
+            running = asyncio.gather(plugin.receive_companion_message(first), plugin.receive_companion_message(second))
+            await asyncio.wait_for(ready.wait(), timeout=60)
+            await asyncio.gather(running, plugin.receive_companion_message(comment))
+        winners = [event for event in (first, second, comment) if event.get_extra(CORE_REPLY_CONTEXT_EXTRA)]
+        self.assertEqual(prepare.await_count, 1 if in_burst else 2)
+        bursts = [event for event in winners if event.get_extra(CORE_REPLY_CONTEXT_EXTRA)["prepared"]["native_input"].telegram_burst]
+        burst, = bursts
+        for body in ("first-body", "second-body"):
+            self.assertEqual(burst.message_str.count(body), 1)
+        self.assertEqual(burst.message_str.count("my reply"), int(in_burst))
+        if in_burst:
+            self.assertIn("[消息 80][转发消息，来源：Ada]\nfirst-body", burst.message_str)
+            self.assertIn("回复转发消息 80", burst.message_str)
+            from astrbot.core.astr_main_agent import collect_initial_request
+            with patch("astrbot.core.astr_main_agent._get_session_conv", AsyncMock(return_value=NS(history="[]"))):
+                request, _ = await collect_initial_request(burst, NS(), NS(provider_wake_prefix="", provider_settings={}))
+            payload = json.dumps(await request.assemble_context(), ensure_ascii=False)
+            for body in ("first-body", "second-body", "my reply"):
+                self.assertEqual(payload.count(body), 1)
+        else:
+            self.assertIn(comment, winners)
+            original_input = comment.get_extra(CORE_REPLY_CONTEXT_EXTRA)["prepared"]["native_input"]
+            self.assertEqual([quote.message_id for quote in original_input.quotes], ["67"])
+
     async def test_forwarded_command_stays_reference_text(self):
         from astrbot_host.binding import message_text
         from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA
