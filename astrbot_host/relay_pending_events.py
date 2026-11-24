@@ -42,6 +42,15 @@ def _route(event, controller, *, kind, platform_id, login, peer):
         original = authenticate_notice_route(controller, event, origin, expected_post="message")
         if original is None or (original.platform_id, original.login) != (platform_id, login):
             raise TaskError("relay_account_unavailable", "无法验证递话来源")
+        settings = controller.settings
+        if kind is ScopeKind.GROUP:
+            destination = settings.group_target(platform_id, login, str(peer), allow_template=False)
+        else:
+            destination = next((window for window in settings.targets if
+                                (window.platform_id, window.account_id, window.participant_id) ==
+                                (platform_id, login, str(peer))), None)
+        if destination is None or destination.bot_id != original.bot_id:
+            raise TaskError("relay_target_unavailable", "递话目标窗口已移除")
         return replace(original, kind=kind, peer=str(peer), session_id=str(peer))
     return SimpleNamespace(
         kind=kind,
@@ -165,6 +174,8 @@ async def process_private_receipts(controller, event, target):
             claim_private_receipts, controller.runtime, target_user_id, permission=True)
     else:
         raw = getattr(getattr(event.message_obj, "raw_message", None), "message", None)
+        if getattr(raw, "external_reply", None) is not None or getattr(raw, "reply_to_story", None) is not None:
+            return
         answer = _text(getattr(raw, "text", ""), 800).rstrip("。！!.").strip()
         confirmed, rejected = answer in approvals, answer in (*refusals, "不同意", "不好")
         original = getattr(raw, "reply_to_message", None)

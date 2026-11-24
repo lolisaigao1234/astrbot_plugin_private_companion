@@ -39,11 +39,20 @@ def _write(connection, data):
     )
 
 
-def _prune(data, now):
+def _remove_task(connection, tasks, task_id):
+    task = tasks.pop(task_id)
+    if isinstance(task, dict) and task.get("telegram_account") and task.get("kind") == "group_wait":
+        outcome = {"sent": "already_sent", "failed": "failed", "waiting": "expired",
+                   "expired": "expired"}.get(task.get("state"), "unknown")
+        connection.execute("INSERT OR IGNORE INTO runtime_metadata(key,value) VALUES (?,?)",
+                           ("conversation.relay.outcome:" + task_id, outcome))
+
+
+def _prune(connection, data, now):
     tasks = data["tasks"]
     for task_id, task in list(tasks.items()):
         if not isinstance(task, dict):
-            del tasks[task_id]
+            _remove_task(connection, tasks, task_id)
             continue
         expires_at = task.get("expires_at")
         if isinstance(expires_at, (int, float)) and expires_at <= now:
@@ -57,17 +66,17 @@ def _prune(data, now):
                 task["state"] = "expired"
                 task["expired_at"] = now
             elif task.get("state") != "expired":
-                del tasks[task_id]
+                _remove_task(connection, tasks, task_id)
                 continue
         # 过期通知最多保留一天：同群一直没新消息时不至于长期占着队列。
         expired_at = task.get("expired_at")
         if (task.get("state") == "expired" and isinstance(expired_at, (int, float))
                 and now - expired_at > 24 * 60 * 60):
-            del tasks[task_id]
+            _remove_task(connection, tasks, task_id)
     if len(tasks) > MAX_TASKS:
         ordered = sorted(tasks.items(), key=lambda item: item[1].get("created_at", 0))
         for task_id, _ in ordered[:len(tasks) - MAX_TASKS]:
-            del tasks[task_id]
+            _remove_task(connection, tasks, task_id)
 
 
 def add_task(runtime, task):
@@ -75,7 +84,7 @@ def add_task(runtime, task):
     now = time()
     with runtime.transaction() as connection:
         data = _read(runtime)
-        _prune(data, now)
+        _prune(connection, data, now)
         signature = task.get("signature", "")
         if signature:
             for existing in data["tasks"].values():
@@ -92,6 +101,10 @@ def add_task(runtime, task):
 
 def scheduled_state(runtime, task_id):
     task = _read(runtime)["tasks"].get(task_id) or {}
+    if not task:
+        row = runtime.read_one("SELECT value FROM runtime_metadata WHERE key=?",
+                               ("conversation.relay.outcome:" + task_id,))
+        return row["value"] if row else "unknown"
     state = task.get("state")
     if state == "waiting" and task.get("expires_at", 0) <= time():
         return "expired"
@@ -104,7 +117,7 @@ def claim_group(runtime, group_id, target_user_id, now=None, *, telegram_account
     claimed = []
     with runtime.transaction() as connection:
         data = _read(runtime)
-        _prune(data, now)
+        _prune(connection, data, now)
         for task in data["tasks"].values():
             if (task.get("kind") == "group_wait" and task.get("state") == "waiting"
                     and task.get("group_id") == group_id
@@ -138,7 +151,7 @@ def claim_private_receipts(runtime, target_user_id, now=None, *, permission=Fals
     now = time() if now is None else now
     with runtime.transaction() as connection:
         data = _read(runtime)
-        _prune(data, now)
+        _prune(connection, data, now)
         state = "waiting_permission" if permission else "waiting_reply"
         claimed = _claim_receipt(_waiting_receipts(data, target_user_id, telegram_account, now, state))
         _write(connection, data)
@@ -167,7 +180,7 @@ def claim_telegram_receipt(runtime, account, user_id, message_id, *, reply_to=No
             return [], []
         now = time()
         data = _read(runtime)
-        _prune(data, now)
+        _prune(connection, data, now)
         prompts = _waiting_receipts(data, user_id, account, now, "waiting_permission")
         permission, replies = [], []
         matches = [task for task in prompts if reply_to is not None and task.get("prompt_message_id") == reply_to]
@@ -188,7 +201,10 @@ def claim_telegram_receipt(runtime, account, user_id, message_id, *, reply_to=No
                         # Legacy receipt tasks predate storage of the native question ID.
                         replies = _claim_receipt([task for task in waiting if task.get("question_message_id") is None])
             elif not (prompts and permission_answer):
-                replies = _claim_receipt(waiting)
+                eligible = [task for task in waiting if task.get("question_message_id") is None
+                            or task["question_message_id"] < message_id]
+                if len(eligible) == 1:
+                    replies = _claim_receipt(eligible)
         _write(connection, data)
         return permission, replies
 
@@ -203,7 +219,7 @@ def claim_expired(runtime, group_id=None, now=None, *, telegram_account=None):
     claimed = []
     with runtime.transaction() as connection:
         data = _read(runtime)
-        _prune(data, now)
+        _prune(connection, data, now)
         for task_id, task in list(data["tasks"].items()):
             if task.get("state") != "expired" or task.get("telegram_account") != telegram_account:
                 continue
@@ -211,7 +227,7 @@ def claim_expired(runtime, group_id=None, now=None, *, telegram_account=None):
                     task.get("kind") != "group_wait" or task.get("group_id") != group_id):
                 continue
             claimed.append(dict(task))
-            del data["tasks"][task_id]
+            _remove_task(connection, data["tasks"], task_id)
         _write(connection, data)
     return claimed
 

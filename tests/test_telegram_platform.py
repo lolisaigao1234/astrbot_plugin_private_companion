@@ -1448,6 +1448,51 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
         self.assertEqual(_read(self.controller.runtime)["tasks"][third]["state"], "waiting_permission")
         self.platform.client.send_message.assert_awaited_once()
 
+    async def test_private_receipt_does_not_report_to_removed_source_topic(self):
+        from time import time
+        from astrbot_host.relay_pending import _read, add_task
+        target = self.controller.settings.target("tg-owner")
+        task = add_task(self.controller.runtime, dict(kind="private_receipt", state="waiting_reply",
+            target_user_id=str(OWNER), source_kind="group", source_id="-100941#54", confirm_before_report=False,
+            question_message_id=71, expires_at=time()+60, telegram_account=["tg-main", "tg-main"]))
+        self.platform.send_by_session = AsyncMock(wraps=self.platform.send_by_session)
+        await self.controller.process_private_relay_receipts(telegram_event(self.platform, 72, "private reply"), target)
+        self.assertEqual(_read(self.controller.runtime)["tasks"][task]["state"], "failed")
+        self.platform.client.send_message.assert_not_awaited()
+        self.platform.send_by_session.assert_not_awaited()
+
+    async def test_telegram_question_accepts_only_subsequent_ordinary_messages(self):
+        from astrbot_host.relay_pending import _read
+
+        target = self.controller.settings.target("tg-owner")
+        task = self.private_relay_task("waiting_reply", False, question_id=101)
+        receive = self.controller.process_private_relay_receipts
+        await receive(telegram_event(self.platform, 99, "earlier private message"), target)
+        self.assertEqual(_read(self.controller.runtime)["tasks"][task]["state"], "waiting_reply")
+        external = telegram_event(self.platform, 102, "answer to a different chat")
+        raw = external.message_obj.raw_message.message
+        with raw._unfrozen():
+            raw.external_reply = NS()
+        await receive(external, target)
+        self.assertEqual(_read(self.controller.runtime)["tasks"][task]["state"], "waiting_reply")
+        self.platform.client.send_message.assert_not_awaited()
+        await receive(telegram_event(self.platform, 103, "my answer"), target)
+        self.assertEqual(_read(self.controller.runtime)["tasks"][task]["state"], "reported")
+        self.platform.client.send_message.assert_awaited_once()
+
+    async def test_multiple_waiting_telegram_questions_need_an_addressed_answer(self):
+        from astrbot_host.relay_pending import _read
+
+        target = self.controller.settings.target("tg-owner")
+        first = self.private_relay_task("waiting_reply", False, question_id=80)
+        second = self.private_relay_task("waiting_reply", False, question_id=81)
+        receive = self.controller.process_private_relay_receipts
+        await receive(telegram_event(self.platform, 82, "ambiguous"), target)
+        self.platform.client.send_message.assert_not_awaited()
+        await receive(self.reply_to_prompt(83, 81, "for the second requester"), target)
+        tasks = _read(self.controller.runtime)["tasks"]
+        self.assertEqual((tasks[first]["state"], tasks[second]["state"]), ("waiting_reply", "reported"))
+
     async def test_private_receipt_consent_selects_the_replied_to_prompt(self):
         from astrbot_host.relay_pending import _read
 

@@ -59,6 +59,18 @@ class RelayPendingEventTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["message"][0], {"type": "at", "data": {"qq": "7777"}})
         self.assertEqual(kwargs["message"][-1]["data"]["text"], "看到后回我")
 
+    def test_pruned_telegram_delivery_keeps_its_original_outcome(self):
+        from astrbot_host.relay_pending import finish, scheduled_state
+        from unittest.mock import patch
+        for state, expected in (("sent", "already_sent"), ("failed", "failed"), ("unknown", "unknown")):
+            with self.subTest(state=state):
+                task = add_task(self.runtime, {"kind": "group_wait", "state": "waiting",
+                    "expires_at": time.time()+10, "telegram_account": ["telegram", "main"]})
+                finish(self.runtime, task, state)
+                with patch("astrbot_host.relay_pending.time", return_value=time.time()+20):
+                    add_task(self.runtime, {"kind": "private_receipt", "state": "waiting_reply"})
+                self.assertEqual(scheduled_state(self.runtime, task), expected)
+
     def test_telegram_receipt_claims_distinct_out_of_order_messages_once(self):
         account = ["telegram", "main"]
         task = {"kind": "private_receipt", "state": "waiting_permission", "target_user_id": "peer",
