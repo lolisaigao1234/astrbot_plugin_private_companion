@@ -256,7 +256,9 @@ class AstrBotPlatformSender:
             stage = "platform_send"
             try:
                 with redact_telegram_token(lease.client if platform_name == "telegram" else None):
-                    await platform.send_by_session(session, chain)
+                    accepted = await platform.send_by_session(session, chain)
+                if platform_name == "telegram" and accepted is False:
+                    return not_sent("platform_session_transport_unavailable")
             except Exception as error:
                 if platform_name == "telegram":
                     try:

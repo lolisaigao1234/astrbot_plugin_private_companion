@@ -259,6 +259,12 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
         self.assertEqual((receipt.status, receipt.failure_code), ("unknown", None))
         self.assertEqual(self.platform.client.send_message.await_count, 2)
 
+    async def test_negative_session_ack_never_records_delivery(self):
+        self.platform.send_by_session = AsyncMock(return_value=False)
+        receipt = await self.send()
+        self.assertEqual(receipt.status, "not_sent")
+        self.assertIsNone(receipt.delivered_at)
+
     async def test_refusal_after_text_before_voice_is_unknown(self):
         audio = self.root / "synthetic.wav"
         with wave.open(str(audio), "wb") as stream:
@@ -346,6 +352,17 @@ class TelegramPrivateCommandTests(TelegramHostFixture, unittest.IsolatedAsyncioT
         self.assertEqual(self.sent_text(peer), "陌生人提示")
         self.clock.advance(timedelta(seconds=60))
         await self.dispatch("你好", peer)
+        self.assertEqual(self.platform.send_by_session.await_count, 2)
+
+    async def test_refused_stranger_notice_remains_due(self):
+        peer = OWNER + 1
+        self.controller.session.application.private_access_settings.defaults_installation = Mock(return_value={
+            "stranger_notice": True, "denied_reply": "陌生人提示",
+            "stranger_daily_cap": 1, "notice_cooldown_seconds": 60,
+        })
+        self.platform.send_by_session.side_effect = [False, None]
+        for _ in range(3):
+            await self.dispatch("你好", peer)
         self.assertEqual(self.platform.send_by_session.await_count, 2)
 
     async def test_stranger_cooldown_keeps_legacy_notice_on_its_own_platform(self):
