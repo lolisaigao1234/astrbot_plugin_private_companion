@@ -12,17 +12,23 @@ from .core_reply_forwards import MAX_CORE_FORWARD_IMAGES, component_kind
 def _bounded_sections(originals, budget=MAX_MERGED_CHARS):
     forward_ids = {item.event_id for item in originals if item.forward_origin}
     replied_to = set()
-    headers = []
+    headers, bodies = [], []
     for item in originals:
+        body = item.text
         if item.forward_origin:
-            headers.append(f"[转发消息，来源：{item.forward_origin}]\n")
+            header = f"[转发消息，来源：{item.forward_origin}]\n"
+            body = body.removeprefix(header)
         else:
-            reply_id = next((q.message_id for q in getattr(item, "quotes", ()) if q.message_id in forward_ids), None)
-            if reply_id:
-                replied_to.add(reply_id)
-            headers.append(f"[发起人的留言，回复转发消息 {reply_id}]\n" if reply_id else "[发起人的留言]\n")
-    bodies = [item.text.removeprefix(header) if item.forward_origin else item.text
-              for item, header in zip(originals, headers)]
+            quote = next((q for q in getattr(item, "quotes", ()) if q.message_id in forward_ids), None)
+            header = "[发起人的留言]\n"
+            if quote:
+                replied_to.add(quote.message_id)
+                header = f"[发起人的留言，回复转发消息 {quote.message_id}]\n"
+                if getattr(quote, "selection_offset", None) is not None:
+                    header = f"[回复转发消息 {quote.message_id}]\n"
+                    body = f"所选片段：{quote.text}\n[发起人的留言]\n{body}"
+        headers.append(header)
+        bodies.append(body)
     # Preserve attribution even for a hundred long messages. Shorten labels only
     # when keeping them in full would leave no space for their message bodies.
     fair_share = budget // len(headers)
