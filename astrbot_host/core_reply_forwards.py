@@ -162,8 +162,11 @@ def private_debounce_input(event: Any, *, collecting=None, target_key=None) -> t
             if not collecting(target_key, quoted_forward):
                 return None
             components = _message_components(event)
-            if any(component_kind(part) not in {"Plain", "Reply"} for part in components):
+            if any(component_kind(part) not in {"Plain", "Reply", "At"} for part in components):
                 return None
+            if any(component_kind(part) == "At" for part in components):
+                from companion_v2.adapters.astrbot.telegram_references import private_text_parts
+                components = private_text_parts(message_obj, components)
             text = "".join(part.text for part in components if component_kind(part) == "Plain")
             return (text, False) if text.strip() else None
     parts = _message_components(event)
