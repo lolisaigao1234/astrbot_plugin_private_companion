@@ -168,8 +168,13 @@ async def process_private_receipts(controller, event, target):
     refusals = ("不要", "不用", "不行", "不可以", "拒绝", "别转", "算了")
     account = _telegram_account(event, target)
     if account is None:
-        confirmed = any(word in text for word in approvals)
-        rejected = "不同意" in text or "不好" in text.replace("不好意思", "") or any(word in text for word in refusals)
+        answer = str(getattr(event, "message_str", "") or "").strip().rstrip("。！!.").strip()
+        # QQ accepts a polite preface. The remaining answer must itself grant permission.
+        answer = answer.removeprefix("不好意思").lstrip("，, ").removeprefix("刚看到").lstrip("，, ")
+        confirmed = answer in (*approvals, "可以的", "可以转告", "同意转告", "可以转发",
+                               "请转告", "请转发", "没什么不好，可以")
+        rejected = not confirmed and (answer == "不好" or any(word in answer for word in (
+            *refusals, "不同意", "勿转", "不要转发", "不好转告")))
         permission_tasks = await asyncio.to_thread(
             claim_private_receipts, controller.runtime, target_user_id, permission=True)
     else:
@@ -179,7 +184,7 @@ async def process_private_receipts(controller, event, target):
         text = _text(getattr(raw, "text", None) or getattr(raw, "caption", None))
         if not text:
             return
-        answer = _text(getattr(raw, "text", ""), 800).rstrip("。！!.").strip()
+        answer = str(getattr(raw, "text", "") or "").strip().rstrip("。！!.").strip()
         confirmed, rejected = answer in approvals, answer in (*refusals, "不同意", "不好")
         original = getattr(raw, "reply_to_message", None)
         reply_to = None

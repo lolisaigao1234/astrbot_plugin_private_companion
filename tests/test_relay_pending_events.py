@@ -148,7 +148,7 @@ class RelayPendingEventTests(unittest.IsolatedAsyncioTestCase):
         from astrbot_host.relay_pending import _read
 
         target = SimpleNamespace(participant_id="2002", platform_id="onebot", account_id="account")
-        for refusal in ("不同意", "我不同意转告", "不好"):
+        for refusal in ("不同意", "我不同意转告", "不好", "请勿转告"):
             with self.subTest(refusal=refusal):
                 task = add_task(self.runtime, {
                     "kind": "private_receipt", "state": "waiting_permission", "target_user_id": "2002",
@@ -158,6 +158,24 @@ class RelayPendingEventTests(unittest.IsolatedAsyncioTestCase):
                 await process_private_receipts(self.controller, self.event, target)
                 self.assertEqual(_read(self.runtime)["tasks"][task]["state"], "declined")
                 self.assertEqual(self.api.calls, [])
+
+    async def test_qq_ambiguous_words_do_not_release_private_answer(self):
+        from astrbot_host.relay_pending import _read
+
+        target = SimpleNamespace(participant_id="2002", platform_id="onebot", account_id="account")
+        task = add_task(self.runtime, {
+            "kind": "private_receipt", "state": "waiting_permission", "target_user_id": "2002",
+            "source_id": "1001", "reply_text": "private answer", "expires_at": time.time() + 60,
+        })
+        for answer in ("我还没想好", "可以转告吗？", "我说的不是「同意」"):
+            self.event.message_str = answer
+            await process_private_receipts(self.controller, self.event, target)
+            self.assertEqual(_read(self.runtime)["tasks"][task]["state"], "waiting_permission", answer)
+            self.assertEqual(self.api.calls, [])
+        self.event.message_str = "不好意思刚看到，同意转告。"
+        await process_private_receipts(self.controller, self.event, target)
+        self.assertEqual(_read(self.runtime)["tasks"][task]["state"], "reported")
+        self.assertEqual(len(self.api.calls), 1)
 
     async def test_cancelled_qq_receipt_reports_keep_failed_state(self):
         from asyncio import CancelledError
