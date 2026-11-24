@@ -2,6 +2,8 @@
 
 from tests import astrbot_data_root  # noqa: F401 - isolate SDK data before import
 
+import base64
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace as NS
@@ -178,6 +180,33 @@ class TelegramCaptureTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase
             captured = (await self.bridge.capture(self.event)).unwrap()
         self.assertEqual([image.descriptor.position for image in captured.images], [2])
         self.assertIn("album caption", captured.text)
+
+        # Exercise the managed reply entry and the SDK's serialized provider request.
+        from astrbot.core.astr_main_agent import collect_initial_request
+        from astrbot_host.telegram_request import protect_telegram_request
+
+        event = self.platform.create_event(self.event.message_obj)
+        event.created_at = self.clock.now().timestamp()
+        originals = [image_bytes("red"), image_bytes("blue")]
+        sdk_images = iter(originals)
+        async def download(url, dest):
+            Path(dest).write_bytes(next(sdk_images))
+        with patch("companion_v2.conversation.media.models.MAX_TURN_BYTES", budget), patch(
+                "astrbot_host.media.fetch_image", AsyncMock(side_effect=originals)), patch(
+                "astrbot.core.utils.media_utils.download_file", download), patch(
+                "astrbot.core.astr_main_agent._get_session_conv", AsyncMock(return_value=NS(history="[]"))):
+            plugin = self.started_plugin()
+            await plugin.receive_companion_message(event)
+            request, _ = await collect_initial_request(event, NS(), NS(provider_wake_prefix="", provider_settings={}))
+            protect_telegram_request(event, request)
+            message = await request.assemble_context()
+        serialized = json.dumps(message, ensure_ascii=False)
+        images = [base64.b64decode(part["image_url"]["url"].split(",", 1)[1])
+                  for part in message["content"] if part["type"] == "image_url"]
+        self.assertEqual(images, originals[:1])
+        self.assertIn("album caption", serialized)
+        self.assertIn("附件超过读取上限", serialized)
+        self.assertNotIn(self.platform.client.token, serialized)
 
     async def test_voice_and_music_from_converted_updates(self):
         temp = Path(get_astrbot_temp_path())
