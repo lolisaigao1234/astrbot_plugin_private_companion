@@ -166,6 +166,15 @@ def _without_leading_mentions(value: str) -> str:
     return value
 
 
+def telegram_forward_message(event):
+    """Return the native forwarded message when its words belong to another source."""
+    if getattr(getattr(event, "platform_meta", None), "name", None) != "telegram":
+        return None
+    update = getattr(getattr(event, "message_obj", None), "raw_message", None)
+    message = getattr(update, "message", None)
+    return message if getattr(message, "forward_origin", None) is not None else None
+
+
 def message_text(event: object) -> str:
     """The plain text of a message event, tolerating the shapes AstrBot ships.
 
@@ -179,6 +188,8 @@ def message_text(event: object) -> str:
     command" rather than as an error: a sticker or an image in a private chat is
     ordinary conversation, not a malformed command.
     """
+    if telegram_forward_message(event) is not None:
+        return ""
     value = getattr(event, "text", None)
     if isinstance(value, str) and value.strip():
         return _without_leading_mentions(value)

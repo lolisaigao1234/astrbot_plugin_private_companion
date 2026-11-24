@@ -209,6 +209,13 @@ class TelegramCaptureTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase
         self.assertNotIn(self.platform.client.token, serialized)
 
     async def test_captioned_album_preserves_photo_and_first_video_at_shared_limit(self):
+        await self.check_mixed_album(oversized_first=False)
+
+    async def test_mixed_album_keeps_later_videos_after_oversized_first(self):
+        await self.check_mixed_album(oversized_first=True)
+
+    async def check_mixed_album(self, *, oversized_first):
+        import re
         from hashlib import sha256
         from astrbot_host.media import inspect_image, load_native_image
         from companion_v2.conversation.media.video.models import CapturedVideo, VideoDescriptor, VideoFrameDescriptor
@@ -216,8 +223,14 @@ class TelegramCaptureTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase
 
         photo = image_bytes("red")
         frame = inspect_image(image_bytes("green"), 0)
-        video_bytes = b"synthetic video original"
+        originals = {f"https://example.org/v{n}.mp4": f"video-{n}".encode() for n in (1, 2, 3)}
+        video_size = len(originals["https://example.org/v1.mp4"])
+        count = 2 if oversized_first else 1
         async def video(locator):
+            if oversized_first and locator.position == 2:
+                from companion_v2.execution.models import TaskError
+                raise TaskError("host_video_limit", "oversized first video")
+            video_bytes = originals[locator.locator]
             descriptor = VideoDescriptor(locator.position, "video/mp4", len(video_bytes),
                 sha256(video_bytes).hexdigest(), 3, 2, 1, 1000, 0,
                 (VideoFrameDescriptor(0, 0, frame.descriptor),), "decoder_elapsed_ms", "ffmpeg:external")
@@ -227,35 +240,42 @@ class TelegramCaptureTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase
         self.bridge.video_type, self.bridge.video_loader = Video, video
         await self.convert(photo=[dict(file_id="photo", file_unique_id="p1", width=3, height=2)],
                            caption="mixed album", media_group_id="album")
-        self.event.message_obj.message.extend([Video(file="https://example.org/v1.mp4"),
-                                              Video(file="https://example.org/v2.mp4")])
-        budget = len(photo) + len(video_bytes) + frame.descriptor.retained_bytes
+        urls = list(originals)[:count + 1]
+        self.event.message_obj.message.extend(Video(file=url) for url in urls)
+        budget = len(photo) + count * (video_size + frame.descriptor.retained_bytes)
         with patch("astrbot_host.media.fetch_image", AsyncMock(return_value=photo)), patch(
                 "companion_v2.conversation.media.video.models.MAX_TURN_BYTES", budget):
             captured = (await self.bridge.capture(self.event)).unwrap()
         self.assertEqual([item.descriptor.position for item in captured.images], [0])
-        self.assertEqual([item.descriptor.position for item in captured.videos], [2])
+        self.assertEqual([item.descriptor.position for item in captured.videos], [3, 4] if oversized_first else [2])
         self.assertEqual(captured.text.count("附件超过读取上限"), 1)
         self.assertIn("mixed album", captured.text)
 
         # The SDK uses original video bytes for native providers, without decoding frames.
         async def fetch(url, *, maximum_bytes):
-            if len(video_bytes) > maximum_bytes:
+            if (oversized_first and url == urls[0]) or video_size > maximum_bytes:
                 from companion_v2.execution.models import TaskError
                 raise TaskError("host_image_limit", "synthetic transport byte limit")
-            return video_bytes
+            return originals[url]
 
         event = self.platform.create_event(self.event.message_obj)
         event.created_at = self.clock.now().timestamp()
         with patch("astrbot_host.media.fetch_image", AsyncMock(return_value=photo)), patch(
                 "astrbot_host.video.loader.fetch_attachment", fetch), patch(
-                "companion_v2.conversation.media.video.models.MAX_TURN_BYTES", len(photo)+len(video_bytes)):
+                "companion_v2.conversation.media.video.models.MAX_TURN_BYTES", len(photo) + count * video_size):
             await self.started_plugin().receive_companion_message(event)
-        kept_video, = [part for part in event.message_obj.message if isinstance(part, Video)]
-        self.assertEqual(base64.b64decode(kept_video.file.removeprefix("base64://")), video_bytes)
-        self.assertEqual(sum(isinstance(part, Image) for part in event.message_obj.message), 1)
-        self.assertIn("mixed album", event.message_str)
-        self.assertIn("附件超过读取上限", event.message_str)
+        from astrbot.core.astr_main_agent import collect_initial_request
+        with patch("astrbot.core.astr_main_agent._get_session_conv", AsyncMock(return_value=NS(history="[]"))):
+            request, _ = await collect_initial_request(event, NS(), NS(provider_wake_prefix="", provider_settings={}))
+        payload = await request.assemble_context()
+        text = "".join(part.get("text", "") for part in payload["content"])
+        paths = re.findall(r"\[Video Attachment: name [^\]]*?, path ([^\]]+)\]", text)
+        expected_urls = urls[1:] if oversized_first else urls[:1]
+        self.assertEqual([Path(path).read_bytes() for path in paths], [originals[url] for url in expected_urls])
+        self.assertIn("mixed album", text)
+        self.assertIn("附件超过读取上限", text)
+        self.assertEqual([base64.b64decode(part["image_url"]["url"].split(",")[1])
+                          for part in payload["content"] if part["type"] == "image_url"], [photo])
 
     async def test_voice_and_music_from_converted_updates(self):
         temp = Path(get_astrbot_temp_path())

@@ -30,7 +30,7 @@ class _ActiveReply:
     applied: int
     created: float
     session_key: str = ""
-    request_started: bool = False
+    accepting: bool = True
     expired: bool = False
 
 
@@ -105,7 +105,7 @@ class PrivateReplyFollowUps:
         active = self._active.get(key)
         if active is None:
             return None
-        if active.event is event or active.request_started:
+        if active.event is event or not active.accepting:
             return None
         waited = self._clock() - active.created
         if waited > self._request_deadline_seconds:
@@ -133,6 +133,12 @@ class PrivateReplyFollowUps:
         active.entries.append((event, body, getattr(event, "created_at", None)))
         return active
 
+    def seal(self, key):
+        """Retain already folded entries for the request that owns them."""
+        active = self._active.get(key)
+        if active is not None:
+            active.accepting = False
+
     def for_request(self, event):
         """Close the merge window and return entries not yet present in the request."""
         self._prune()
@@ -143,7 +149,7 @@ class PrivateReplyFollowUps:
                            if item.session_key == session_key), None)
         if active is None:
             return None
-        active.request_started = True
+        active.accepting = False
         pending = tuple(active.entries[active.applied:])
         active.applied = len(active.entries)
         return pending, tuple(active.entries)
