@@ -317,6 +317,26 @@ class TelegramCaptureTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase
                     self.assertEqual(fetch.await_args.kwargs["maximum_bytes"], expected)
                     self.assertTrue(any(isinstance(part, File) for part in event.message_obj.message))
 
+    async def test_managed_documents_share_window_timeout_within_album(self):
+        target = self.controller.settings.target("tg-owner")
+        await self.convert(document=dict(file_id="d", file_unique_id="d", file_name="first.txt"),
+                           caption="keep caption", media_group_id="docs")
+        event = self.platform.create_event(self.event.message_obj)
+        event.created_at = self.clock.now().timestamp()
+        event.message_obj.message.extend([File(name="second.txt", url="https://example.org/second"),
+                                         Record(file="base64://YWJj")])
+        settings = {"file_understanding_enabled": True, "file_understanding_timeout_seconds": 1}
+        async def read(*args, **kwargs):
+            await asyncio.sleep(0.65)
+            return b"text"
+        with patch.object(self.bridge, "file_settings", return_value=settings), patch(
+                "astrbot_host.media.fetch_attachment", read):
+            (await self.controller.session.prepare_core_reply(event, target)).unwrap()
+        self.assertEqual([p.name for p in event.message_obj.message if isinstance(p, File)], ["first.txt"])
+        self.assertIn("keep caption", event.message_str)
+        self.assertIn("超时", event.message_str)
+        self.assertIsInstance(event.message_obj.message[-1], Record)
+
     async def test_managed_records_and_files_share_the_read_budget(self):
         from companion_v2.execution.models import TaskError
 
