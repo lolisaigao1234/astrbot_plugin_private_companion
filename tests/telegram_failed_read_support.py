@@ -9,7 +9,7 @@ from astrbot.core.message.components import File, Image, Record, Video
 async def check_failed_reads(case, event, bridge, *, sdk=False):
     root = event.client.base_file_url + "/"
     event.message_obj.message.extend([
-        Image(file=root + "header"), Image(file=root + "broken"),
+        Image(file=root + "missing"), Image(file=root + "header"), Image(file=root + "broken"),
         Record(file=root + "voice"), Video(file=root + "video"),
         File(name="note.txt", url=root + "file"),
     ])
@@ -31,7 +31,7 @@ async def check_failed_reads(case, event, bridge, *, sdk=False):
             position += len(chunk)
             return chunk
         request = MagicMock()
-        request.__aenter__.return_value = SimpleNamespace(status=200, headers={},
+        request.__aenter__.return_value = SimpleNamespace(status=404 if name == "missing" else 200, headers={},
             content_length=100 if name == "header" else None, content=SimpleNamespace(read=read))
         return request
 

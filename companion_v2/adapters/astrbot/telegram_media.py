@@ -100,7 +100,8 @@ async def capture_turn_media(bridge, references, images, audios, videos, text_pa
                 consumed = getattr(error, "bytes_read", 0)
                 budget.debit(consumed)
                 limited = error.code == f"host_{kind}_limit"
-                if not (limited or consumed) or not (partial_media or quoted and any(descriptors.values())):
+                recoverable = limited or consumed or error.code == f"host_{kind}_fetch_failed"
+                if not recoverable or not (partial_media or quoted and any(descriptors.values())):
                     raise
                 if not quoted:
                     text_parts[locator.position] = "[附件超过读取上限，本轮未读取]" if limited else "[附件不可用]"
