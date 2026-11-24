@@ -548,6 +548,7 @@ class SessionTopology:
             if topics:
                 row = {"unified_msg_origin": event.unified_msg_origin, "account_id": login,
                        "telegram_chat_id": peer, "telegram_chat_title": title,
+                       "telegram_native_chat_title": platform_label(original.chat.title),
                        "telegram_message_id": original.message_id}
                 async with self._write_lock:
                     await asyncio.to_thread(self._store_observation, None, row, topics=topics)
@@ -573,6 +574,8 @@ class SessionTopology:
                 row["telegram_topic_rename"] = platform_label(getattr(original.forum_topic_edited, "name", None))
                 row["telegram_chat_id"] = str(original.chat.id)
                 row["telegram_chat_title"] = platform_label(original.new_chat_title or original.chat.title)
+                if original.new_chat_title:
+                    row["telegram_native_chat_title"] = platform_label(original.chat.title)
                 row["telegram_topic_name"] = platform_label(getattr(message, "_telegram_topic_name", None))
         else:
             nickname, _ = event_person_names(event)
@@ -626,12 +629,28 @@ class SessionTopology:
                 siblings = [item for item in siblings if item["unified_msg_origin"] in topics]
                 if not siblings:
                     return
+            # A topic-only installation may never have observed the parent.
+            # The native chat title can still identify the full legacy prefix.
+            native_title = row.pop("telegram_native_chat_title", None)
+            topic_hint = row.get("telegram_topic_name")
+            old_label = previous.get("group_name", "")
+            recovered_title = None
+            if topic_hint and not rename and old_label.endswith("-" + topic_hint):
+                recovered_title = old_label[:-(len(topic_hint) + 1)]
+            prefixes = sorted({title for title in (previous_title, recovered_title, native_title,
+                                                   row["telegram_chat_title"]) if title}, key=len, reverse=True)
             for item in siblings:
-                if "telegram_chat_id" not in item:
-                    item["telegram_chat_id"] = chat_id
-                    label = item.get("group_name") or ""
-                    if previous_title and label.startswith(previous_title + "-"):
-                        item["telegram_topic_name"] = label[len(previous_title) + 1:]
+                if "telegram_chat_id" in item:
+                    continue
+                label = item.get("group_name") or ""
+                prefix = next((title for title in prefixes if label.startswith(title + "-")), None)
+                if prefix:
+                    item["telegram_topic_name"] = label[len(prefix) + 1:]
+                elif label and label not in prefixes and item.get("unified_msg_origin") != chat_origin:
+                    # A rename may arrive before we have evidence of the old title.
+                    # Keep the combined label until its own topic supplies a name.
+                    continue
+                item["telegram_chat_id"] = chat_id
             row["telegram_topic_name"] = row["telegram_topic_name"] or previous.get("telegram_topic_name")
             title = row["telegram_chat_title"]
             title_id = message_id
@@ -639,9 +658,15 @@ class SessionTopology:
                 title, title_id = latest.get("telegram_chat_title", ""), latest.get("telegram_chat_title_id", 0)
             if title:
                 for sibling in (*siblings, row):
+                    if "telegram_chat_id" not in sibling:
+                        continue
                     sibling["telegram_chat_title"] = title
                     sibling["telegram_chat_title_id"] = title_id
                     sibling["group_name"] = "-".join(filter(None, (title, sibling.get("telegram_topic_name"))))
+            if (previous and "telegram_chat_id" not in previous and not row.get("telegram_topic_name")
+                    and previous.get("group_name") and previous["unified_msg_origin"] != chat_origin):
+                row["group_name"] = previous["group_name"]
+                row.pop("telegram_chat_id", None)
         if key is not None:
             rows[key] = row
         self.path.parent.mkdir(parents=True, exist_ok=True)
