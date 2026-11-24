@@ -186,6 +186,49 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
         self.assertFalse(native.telegram_burst)
         self.assertEqual([quote.message_id for quote in native.quotes], ["80"])
 
+    async def test_reply_to_any_forwarded_album_photo_joins_its_burst(self):
+        from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA
+        from tests.test_conversation_images import image_bytes
+
+        plugin = self.started_plugin()
+        data = base64.b64encode(image_bytes("green")).decode()
+        origin = {"type": "hidden_user", "sender_user_name": "Ada", "date": 1700000000}
+        photos = [Update.de_json({"update_id": number, "message": self.message(
+            number, text=None, media_group_id="album", forward_origin=origin, caption=caption,
+            photo=[dict(file_id=f"p{number}", file_unique_id=f"p{number}", width=2, height=2)])}, None)
+            for number, caption in ((80, "album-caption"), (81, None))]
+        with (patch.object(PhotoSize, "get_file", AsyncMock(return_value=NS(file_path="base64://" + data))),
+              patch.object(self.platform, "handle_msg", new_callable=AsyncMock) as handled):
+            self.platform.media_group_cache = {
+                "album": {"created_at": None, "items": [(item, NS(bot=self.platform.client)) for item in photos]}}
+            await self.platform.process_media_group("album")
+            message, = handled.await_args.args
+            album = TelegramPlatformEvent(message.message_str, message, self.platform.meta(), str(OWNER),
+                                          self.platform.client)
+            album.created_at = self.clock.now().timestamp()
+            comment, later = [await self.event(number, text=text, reply_to_message=photos[1].message.to_dict())
+                              for number, text in ((82, "my reply"), (83, "later"))]
+        manager = plugin._private_debounce_manager()
+        listening = asyncio.Event()
+        wait = manager.wait_for_event
+
+        async def waiting(*args):
+            listening.set()
+            return await wait(*args)
+
+        with patch.object(manager, "wait_for_event", side_effect=waiting) as waits, patch.object(
+                self.controller, "prepare_core_reply", wraps=self.controller.prepare_core_reply) as prepare:
+            reply = asyncio.create_task(plugin.receive_companion_message(comment))
+            await asyncio.wait_for(listening.wait(), 15)
+            await asyncio.gather(reply, plugin.receive_companion_message(album))
+            self.assertEqual(prepare.await_count, 1)
+            burst, = (event for event in (album, comment) if event.get_extra(CORE_REPLY_CONTEXT_EXTRA))
+            for text in ("album-caption", "my reply", "回复转发消息 80"):
+                self.assertEqual(burst.message_str.count(text), 1)
+            await plugin.receive_companion_message(later)
+            waits.assert_awaited_once()
+        self.assertTrue(later.get_extra(CORE_REPLY_CONTEXT_EXTRA))
+
     async def check_reply_to_forward(self, *, in_burst, partial=False, mention=False, photo=False, comment_first=False):
         from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA
 

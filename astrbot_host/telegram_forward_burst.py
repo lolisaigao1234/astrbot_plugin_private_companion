@@ -6,7 +6,7 @@ from astrbot.core.message.components import Plain
 
 from companion_v2.conversation.private_debounce import MAX_MERGED_CHARS
 
-from .core_reply_forwards import MAX_CORE_FORWARD_IMAGES, component_kind
+from .core_reply_forwards import MAX_CORE_FORWARD_IMAGES, component_kind, quoted_telegram_forward
 
 
 def _quoted_lines(text):
@@ -19,7 +19,8 @@ def _origin_label(name):
     return " ".join(name.splitlines()).replace("[", "［").replace("]", "］")
 
 
-def _bounded_sections(originals, budget=MAX_MERGED_CHARS):
+def _bounded_sections(originals, budget=MAX_MERGED_CHARS, replies=None):
+    replies = replies or {}
     forward_ids = {item.event_id for item in originals if item.forward_origin}
     replied_to = set()
     headers, bodies = [], []
@@ -29,15 +30,16 @@ def _bounded_sections(originals, budget=MAX_MERGED_CHARS):
             body = body.removeprefix(f"[转发消息，来源：{item.forward_origin}]\n")
             header = f"[转发消息，来源：{_origin_label(item.forward_origin)}]\n"
         else:
-            quote = next((q for q in getattr(item, "quotes", ()) if q.message_id in forward_ids), None)
+            quote = next(iter(getattr(item, "quotes", ())), None)
+            target = replies.get(item.event_id, quote.message_id) if quote else None
             header = "[发起人的留言]\n"
-            if quote:
-                replied_to.add(quote.message_id)
-                header = f"[发起人的留言，回复转发消息 {quote.message_id}]\n"
+            if target in forward_ids:
+                replied_to.add(target)
+                header = f"[发起人的留言，回复转发消息 {target}]\n"
                 if getattr(quote, "selection_offset", None) is not None:
                     allowance = max(12, budget // len(originals) - len(header) - 36)
                     selected = quote.text if len(quote.text) <= allowance else quote.text[:allowance-1] + "…"
-                    header = f"[回复转发消息 {quote.message_id}]\n所选片段：{_quoted_lines(selected)}\n[发起人的留言]\n"
+                    header = f"[回复转发消息 {target}]\n所选片段：{_quoted_lines(selected)}\n[发起人的留言]\n"
         headers.append(header)
         bodies.append(_quoted_lines(body))
     # Preserve attribution even for a hundred long messages. Shorten labels only
@@ -129,7 +131,11 @@ async def merge_forward_burst(event, target, plan, entries, prepare_context):
     note = f"\n[另有 {omitted} 个附件超过读取上限]" if omitted else ""
     if len(verified) < len(entries):
         note += f"\n[另有 {len(entries) - len(verified)} 条消息未通过核验，本轮未读取]"
-    for i, section in _bounded_sections(originals, MAX_MERGED_CHARS - len(note)):
+    # A reply may quote any photo of an album that AstrBot merged under its first message.
+    replies = {item.event_id: forward.event_id for item, source_event in verified if not item.forward_origin
+               if (matches := quoted_telegram_forward(source_event))
+               for forward, candidate in verified if matches(candidate)}
+    for i, section in _bounded_sections(originals, MAX_MERGED_CHARS - len(note), replies):
         if sections:
             section = "\n\n" + section
         sections.append(section)
