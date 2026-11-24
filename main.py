@@ -1188,6 +1188,13 @@ class PrivateCompanionV2StagingPlugin(Star):
         origin_key = self._origin_key_for_event(event)
         kind = getattr(getattr(getattr(event, "message_obj", None), "type", None), "value", None)
         channel = "private" if kind == "FriendMessage" else "group" if kind == "GroupMessage" else "unknown"
+        if channel == "group" and getattr(getattr(event, "platform_meta", None), "name", None) == "telegram":
+            raw = getattr(getattr(event.message_obj, "raw_message", None), "message", None)
+            if any(getattr(raw, field, None) is not None for field in
+                   ("forum_topic_created", "forum_topic_edited", "new_chat_title")):
+                self._observe_session(event)
+                suppress_default_reply(event)
+                return
         if channel != "unknown":
             # This turn belongs to a conversation the plugin serves, even when V2
             # later declines it and AstrBot's own pipeline writes the reply. The
