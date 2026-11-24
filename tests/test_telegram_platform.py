@@ -144,6 +144,25 @@ async def forum_reply_event(platform, *, topic_root):
 
 
 class TelegramGroupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_delayed_mention_redacts_httpx_membership_request(self):
+        from companion_v2.adapters.astrbot.telegram_wire import member_usernames
+
+        bot = telegram_bot()
+        transport = httpx.MockTransport(lambda request: httpx.Response(200))
+        async with httpx.AsyncClient(transport=transport) as http:
+            async def lookup(*, chat_id, user_id):
+                await http.post(f"https://telegram.invalid/bot{bot.token}/getChatMember")
+                return NS(user=User(user_id, "Synthetic", False, username="speaker"))
+
+            bot.get_chat_member = lookup
+            with self.assertLogs("httpx", "INFO") as logs:
+                names = await member_usernames(bot, "-100400#23", [str(OWNER)])
+
+        self.assertEqual(names, {str(OWNER): "speaker"})
+        record, = logs.records
+        self.assertIn("/bot[redacted]/getChatMember", record.getMessage())
+        self.assertNotIn(bot.token, repr(vars(record)))
+
     async def test_sdk_group_and_topic_routes(self):
         platform = TelegramPlatform()
         for kind, topic, window in (("group", None, "-400"), ("supergroup", None, "-400"),
