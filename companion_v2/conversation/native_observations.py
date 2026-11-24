@@ -149,13 +149,16 @@ def history_speaker(runtime, row, context, reference):
     return {"human_message": "user", "bot_message": "assistant", "observation": "observation"}[source_kind]
 
 
-def rows_for_context(runtime, context, *, start=None, end=None, limit=None):
+def rows_for_context(runtime, context, *, start=None, end=None, limit=None, include_references=True):
     if context.scope.kind is not ScopeKind.PRIVATE or not observations_available(runtime):
         return ()
     has_sends = table_exists(runtime, "conversation_native_sends")
     where = ["n.memory_owner = ?", "n.scope_kind = 'private'",
              "n.delivery_state IN ('input_observed', 'send_returned')"]
     values = [owner_key(context)]
+    if not include_references:
+        where.append("json_extract(n.source_json, '$.owner') != ?")
+        values.append(REFERENCE_OWNER)
     if start is not None:
         where.append("n.effective_at >= ?")
         values.append(start)

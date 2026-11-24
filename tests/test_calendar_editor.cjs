@@ -50,6 +50,27 @@ test("calendar empty state is grouped and only shows first-page navigation after
   editor.destroy();
 });
 
+test("Telegram calendar plans keep QQ wording out of the editor", () => {
+  const window = {};
+  vm.runInNewContext(source, {window, structuredClone, Intl, Date, JSON,
+    sessionStorage:{getItem:()=>null, setItem(){}, removeItem(){}}});
+  const editor = window.CompanionCalendarEditor.create({changed(){}, failed(){}, refresh:async()=>null, api:async()=>({})});
+  const item = {...data, id:"plan", presence:"看书", view_token:"edit"};
+  for (const telegram of [false, true]) {
+    editor.setScope({...scope, telegram});
+    editor.setStatus({create_token:"create", calendar:{items:[item]}});
+    for (const mode of ["create", "revise"]) {
+      editor.open(mode, 0);
+      const view = editor.markup({items:[{item, index:0}]});
+      assert.equal(view.includes("calendar-presence"), !telegram);
+      assert.equal(view.includes('data-state-edit="wording"'), !telegram);
+      assert.equal(view.includes("公开文案：看书"), !telegram);
+      assert.match(view, /data-calendar-edit="revise"/);
+      editor.discardIfPristine();
+    }
+  }
+});
+
 for (const [action, label, extra] of [
   ["create", "创建计划", {data}],
   ["revise", "修改日程", {data, sources:[]}],
