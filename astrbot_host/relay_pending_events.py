@@ -186,7 +186,8 @@ async def process_private_receipts(controller, event, target):
         answer = str(getattr(event, "message_str", "") or "").strip().rstrip("。！!.").strip()
         confirmed = _QQ_PERMISSION.fullmatch(answer) is not None
         rejected = not confirmed and any(word in answer for word in (
-            *refusals, "不同意", "不好", "勿转", "禁止", "不许", "不想", "不转"))
+            *refusals, "不同意", "不好", "勿", "禁止", "不许", "不想", "不转", "别说", "别告诉"))
+        unclear = not confirmed and any(word in answer for word in approvals)
         permission_tasks = await asyncio.to_thread(
             claim_private_receipts, controller.runtime, target_user_id, permission=True)
     else:
@@ -198,6 +199,7 @@ async def process_private_receipts(controller, event, target):
             return
         answer = str(getattr(raw, "text", "") or "").strip().rstrip("。！!.").strip()
         confirmed, rejected = answer in approvals, answer in (*refusals, "不同意", "不好")
+        unclear = False
         original = getattr(raw, "reply_to_message", None)
         reply_to = None
         if original is not None:
@@ -230,7 +232,7 @@ async def process_private_receipts(controller, event, target):
     try:
         for task in permission_tasks:
             task_id = task["id"]
-            if rejected or (account is None and not confirmed):
+            if rejected or unclear:
                 # QQ answers are unthreaded. After an unclear response, a later
                 # conversational "好的" cannot safely authorize this older report.
                 in_flight_permission = task_id

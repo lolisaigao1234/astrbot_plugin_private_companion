@@ -148,7 +148,7 @@ class RelayPendingEventTests(unittest.IsolatedAsyncioTestCase):
         from astrbot_host.relay_pending import _read
 
         target = SimpleNamespace(participant_id="2002", platform_id="onebot", account_id="account")
-        for refusal in ("不同意", "我不同意转告", "不好", "请勿转告", "禁止转告", "不许转发", "不想转告", "不转告"):
+        for refusal in ("不同意", "我不同意转告", "不好", "请勿转告", "禁止转告", "不许转发", "不想转告", "不转告", "别说出去"):
             with self.subTest(refusal=refusal):
                 task = add_task(self.runtime, {
                     "kind": "private_receipt", "state": "waiting_permission", "target_user_id": "2002",
