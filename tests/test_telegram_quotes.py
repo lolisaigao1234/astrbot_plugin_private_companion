@@ -245,6 +245,9 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
             self.assertEqual(outcome.failure.code, "quote_original_changed")
 
     async def test_replies_to_admitted_forwards_and_replies_verify_the_embedded_body(self):
+        from astrbot.core.utils.quoted_message.chain_parser import ReplyChainParser
+
+        parser = ReplyChainParser()
         session = self.controller.session
         target = self.controller.settings.target("tg-owner")
         origins = (
@@ -269,9 +272,10 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
                 self.assertIn(quote.forward_origin.attribution(str(OWNER)), evidence)
                 if selection:
                     self.assertNotIn("原文", evidence)
-                prompt = self.prompt(event, full, quote.text + "讨论")
-                self.assertIn(quote.forward_origin.attribution(str(OWNER)), prompt)
-                self.assertEqual(prompt.count(quote.text), 1)
+                sdk_quote = parser.extract_text_from_reply_component(parser.find_first_reply_component(event))
+                prompt = self.prompt(event, full, sdk_quote + event.message_str)
+                self.assertEqual(prompt, f"[引用消息 {number}，{quote.forward_origin.attribution(str(OWNER))}]\n"
+                                         + sdk_quote + event.message_str)
                 require(await session.receive(event, target))
             for seq, changes in enumerate((dict(text="其他"), dict(forward_origin=None),
                                           dict(forward_origin=dict(origin, date=1699990001))), 3):
