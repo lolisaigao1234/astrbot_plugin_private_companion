@@ -155,6 +155,20 @@ class TelegramGroupTests(unittest.IsolatedAsyncioTestCase):
                                  (window, window, str(OWNER)))
 
 
+    async def test_non_forum_supergroup_reply_thread_uses_chat_window(self):
+        platform = TelegramPlatform()
+        chat = Chat(-400, "supergroup", is_forum=False)
+        now = datetime.now(timezone.utc)
+        quoted = Message(5, date=now, chat=chat, from_user=User(platform.client.id, "Bot", True),
+                         text="上文")
+        message = Message(22, date=now, chat=chat, from_user=User(OWNER, "Synthetic", False),
+                          text="回复", message_thread_id=5, is_topic_message=False, reply_to_message=quoted)
+        native = await platform.convert_message(Update(12, message=message), NS(bot=platform.client))
+        event = platform.create_event(native)
+        route = group_event_route(event)
+        self.assertEqual((route.group_id, route.session_id), ("-400", "-400"))
+        self.assertTrue(group_trigger_facts(event, "tg-main")["quoted_bot"])
+
     async def test_sdk_addressing_uses_bot_username_and_original_reply_author(self):
         platform = TelegramPlatform()
         quote = Message(10, date=datetime.now(timezone.utc), chat=Chat(-400, "group"),
@@ -275,6 +289,76 @@ class TelegramHostFixture(MultiFixture):
 
 
 class TelegramIntakeLifecycleTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_queued_group_from_replaced_managed_client(self):
+        # Like the SDK bot, this fixture supports weak references.
+        class Bot(NS):
+            pass
+
+        self.platform.client = Bot(**vars(telegram_bot()))
+        self.controller.startup_readiness()
+        event = await group_event(self.platform, -400, "supergroup", 24)
+        for _ in range(2):
+            self.platform.client = Bot(**vars(telegram_bot()))
+            self.controller._connections_for().refresh()
+        await self.started_plugin().receive_companion_message(event)
+        self.assertTrue(event.call_llm)
+        event = await group_event(self.platform, -400, "supergroup", 24)
+        event.client = telegram_bot()
+        await self.started_plugin().receive_companion_message(event)
+        self.assertFalse(event.call_llm)
+
+    async def test_admin_group_window_selectors(self):
+        from astrbot_host.group_reply_api import GroupReplyWebAPI
+        config = self.controller.config
+        config["multi_host"]["group_targets"] = [
+            dict(target_id=name, platform_id="tg-main", account_id="tg-main",
+                 bot_id="bot-tg", group_id=window)
+            for name, window in (("all", "*"), ("topic", "-400#23"))]
+        self.controller = self.make_controller(config)
+        settings = self.controller.settings
+        topology = self.controller.session_topology
+        accounts = topology.accounts(settings)
+        configured = topology.configured(settings)
+        for window, managed in (("-400#23", True), ("-400#24", False)):
+            umo = f"tg-main:GroupMessage:{window}"
+            with self.subTest(selector="reply", window=window):
+                api = GroupReplyWebAPI(self.controller, "all", "role-tg", window)
+                if managed:
+                    self.assertEqual(api._selected_target(settings).target_id, "topic")
+                else:
+                    with self.assertRaises(TaskError):
+                        api._selected_target(settings)
+            with self.subTest(selector="directory", window=window):
+                with patch.object(topology, "services", AsyncMock(return_value={"persona_id": "original"})):
+                    rows = await topology._session_windows(umo, {"conversation_id": "tg-conversation"},
+                        accounts, configured, [vars(p) for p in settings.personas], {}, managed_only=True)
+                self.assertEqual(bool(rows), managed)
+            with self.subTest(selector="snapshot", window=window):
+                await topology._seed_configured_persona_snapshot(settings)
+                topology.update_persona_selection_snapshot(umo, "tg-main", "bot-tg", "original",
+                                                          "role-tg", "tg-conversation")
+                self.assertEqual(topology.persona_selection_snapshot(umo, "tg-main") is not None, managed)
+
+    def test_group_selector_platform_precedence(self):
+        from astrbot_host.group_reply_api import GroupReplyWebAPI
+        from tests.native_adapter_support import FakePlatform
+        config = self.controller.config
+        config["multi_host"]["group_targets"] = [dict(target_id="all", platform_id="tg-main",
+            account_id="tg-main", bot_id="bot-tg", group_id="*")]
+        self.controller = self.make_controller(config)
+        api = GroupReplyWebAPI(self.controller, "all", "role-tg", "-400#24")
+        for live, configured, exact_only in (
+                (None, "telegram", True), (FakePlatform("tg-main"), "telegram", False),
+                (self.platform, "aiocqhttp", True), (None, "aiocqhttp", False)):
+            with self.subTest(live=live, configured=configured):
+                self.native.platforms["tg-main"] = live
+                self.native.get_config = lambda: {"platform": [dict(id="tg-main", type=configured)]}
+                if exact_only:
+                    with self.assertRaises(TaskError):
+                        api._selected_target(self.controller.settings)
+                else:
+                    self.assertEqual(api._selected_target(self.controller.settings).group_id, "-400#24")
+
     async def test_refused_windows_during_startup_and_restart(self):
         config = self.controller.config
         config["multi_host"]["group_targets"] = [

@@ -30,6 +30,7 @@ from companion_v2.storage.runtime import StorageRuntime
 from companion_v2.proactive.search_settings import SearchSettingsStore
 from .multi_authority import HOST_ID, MANIFEST, MultiAuthority
 from .multi_session import MultiHostSession, persona_conversation
+from .display_names import configured_platform_families
 from .multi_settings import MultiHostSettings, find_persona_mapping
 from .bootstrap_provider import resolve_bootstrap_provider
 from .group_settings import GroupTarget
@@ -955,15 +956,7 @@ class AstrBotMultiController:
             return str(platform.meta().name)
         # AstrBot loads plugins before platforms. Until a Telegram channel is loaded its name
         # comes from AstrBot's own configuration, so its people are never taken for QQ numbers.
-        try:
-            matches = [row for row in self.context.get_config().get("platform", ())
-                       if row.get("id") == platform_id]
-            if len(matches) == 1 and matches[0].get("enable") is False:
-                return "telegram" if matches[0].get("type") == "telegram" else ""
-            return "telegram" if any(row.get("type") == "telegram" and row.get("enable") is True
-                                     for row in matches) else ""
-        except (AttributeError, TypeError):
-            return ""
+        return "telegram" if configured_platform_families(self.context).get(platform_id) == "telegram" else ""
 
     async def _open_async(self):
         if self.runtime is None:
@@ -1542,11 +1535,9 @@ class AstrBotMultiController:
                 or getattr(event.message_obj.type, "value", None) != "GroupMessage"):
             return False
         # The account registry exists before a session starts and between sessions.
-        # Polling may be restarting, but the event must still carry its current bot.
+        # A queued update can still carry a bot from an earlier polling generation.
         try:
-            lease = self._connections_for().acquire((meta.id, meta.id), connected=False)
-            if (lease.platform.meta().name != "telegram" or lease.client is None
-                    or lease.client is not event_native_client(lease.platform, event)):
+            if not self._connections_for().recognizes_telegram_client((meta.id, meta.id), event.client):
                 return False
         except (ValueError, AttributeError, TypeError, RuntimeError):
             return False
