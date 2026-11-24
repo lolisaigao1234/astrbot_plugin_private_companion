@@ -22,6 +22,13 @@ from astrbot_host.video.loader import load_native_video
 
 
 class TelegramGroupMediaTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_failed_reads_reduce_group_file_allowance(self):
+        from tests.telegram_failed_read_support import check_failed_reads
+
+        message = await self.platform.convert_message(self.update(11, text="caption"), NS(bot=self.platform.client))
+        event = self.platform.create_event(message)
+        await check_failed_reads(self, event, self.bridge)
+
     async def test_provider_photo_budget(self):
         from tests.telegram_provider_photo_support import check_provider_photo_budget
 
