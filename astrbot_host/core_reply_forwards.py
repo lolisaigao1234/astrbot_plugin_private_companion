@@ -141,7 +141,7 @@ def quoted_telegram_forward(event):
     return matches
 
 
-async def wait_for_quoted_forward(event, target, manager, prepare_context):
+async def wait_for_quoted_forward(event, target, manager, prepare_context, delivery_seen):
     """Telegram can finish converting a reply before the forward it addresses."""
     if not callable(prepare_context) or getattr(getattr(event, "platform_meta", None), "name", None) != "telegram":
         return
@@ -150,7 +150,7 @@ async def wait_for_quoted_forward(event, target, manager, prepare_context):
     if not getattr(original, "forward_origin", None) or telegram_private_forward(event):
         return
     matches = quoted_telegram_forward(event)
-    if matches is None or manager.collecting_event(target.target_id, matches):
+    if matches is None or delivery_seen((target.target_id, str(original.message_id))):
         return
     try:
         result = await prepare_context(event, target, group_admission=None)
@@ -159,7 +159,8 @@ async def wait_for_quoted_forward(event, target, manager, prepare_context):
     if result.failure is not None:
         return
     policy = result.unwrap().debounce
-    if policy and policy.enabled and (raw.date - original.date).total_seconds() <= policy.total_seconds:
+    if (policy and policy.enabled and (raw.date - original.date).total_seconds() <= policy.total_seconds
+            and not delivery_seen((target.target_id, str(original.message_id)))):
         await manager.wait_for_event(target.target_id, matches, policy.max_seconds)
 
 
