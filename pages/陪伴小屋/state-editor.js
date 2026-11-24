@@ -105,7 +105,7 @@ window.CompanionStateEditor = (() => {
       windowFields.has(name)?windowSelected():kind!=="settings"||!scope?.telegram);
     function setScope(value) {
       const key=JSON.stringify([value.installation_id,value.operator_id,value.path,value.window_selected===true]);
-      if(scope?.key===key&&scope.telegram===value.telegram)return;
+      if(scope?.key===key&&scope.telegram===value.telegram&&scope.unknownPlatform===value.unknownPlatform)return;
       scope={...value,key,storage:"companion-state-edit.v1:"+key};
       status=draft=null;pending=stored(scope.storage);busy=false;message="";error=false;
       pendingKind=storedOrigin(scope.storage,pending);
@@ -162,7 +162,7 @@ window.CompanionStateEditor = (() => {
         if(!maintenance?.canAlign(status))return;
         draft={kind,base:maintenance.snapshot(status),values:{applicability:"",day:status.state.cycle_timeline?.cycle_day??""},stale:false};
       } else {
-        const item=status.calendar?.items?.[index];if(scope.telegram||!usable(item))return;
+        const item=status.calendar?.items?.[index];if(scope.telegram||scope.unknownPlatform||!usable(item))return;
         draft={kind:"wording",base:structuredClone(item),values:{presence:item.presence||""},stale:false};
       }
       category=categoryOf(kind);
