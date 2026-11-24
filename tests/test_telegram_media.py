@@ -317,6 +317,49 @@ class TelegramCaptureTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase
                     self.assertEqual(fetch.await_args.kwargs["maximum_bytes"], expected)
                     self.assertTrue(any(isinstance(part, File) for part in event.message_obj.message))
 
+    async def test_album_documents_share_bytes_on_normal_provider_entry(self):
+        from astrbot.core.astr_main_agent import collect_initial_request
+        from astrbot_host.media import load_native_image
+        from astrbot_host.telegram_request import protect_telegram_request
+        from tests.test_conversation_images import image_bytes
+
+        await self.convert(photo=[dict(file_id="1", file_unique_id="1", width=3, height=2)],
+                           caption="album reading", media_group_id="album")
+        event = self.platform.create_event(self.event.message_obj)
+        event.created_at = self.clock.now().timestamp()
+        event.message_obj.message.extend(File(name=f"{n}.txt", url=f"https://example.org/{n}")
+                                         for n in ("first", "second", "third"))
+        calls = []
+
+        async def fetch(url, *, maximum_bytes):
+            calls.append((url, maximum_bytes))
+            return b"abc" if url.endswith("first") else b"de"
+
+        self.bridge.image_type, self.bridge.image_loader = Image, load_native_image
+        photo = image_bytes("red")
+        with patch("companion_v2.conversation.media.models.MAX_TURN_BYTES", len(photo) + 5), patch.object(
+                self.bridge, "file_settings", return_value={"file_understanding_enabled": True}), patch(
+                "astrbot_host.media.fetch_image", AsyncMock(return_value=photo)), patch(
+                "astrbot_host.media.fetch_attachment", fetch), patch(
+                "astrbot.core.astr_main_agent._get_session_conv", AsyncMock(return_value=NS(history="[]"))):
+            await self.started_plugin().receive_companion_message(event)
+            request, _ = await collect_initial_request(event, NS(), NS(provider_wake_prefix="", provider_settings={}))
+            protect_telegram_request(event, request)
+            content = (await request.assemble_context())["content"]
+        self.assertEqual(calls, [("https://example.org/first", 5), ("https://example.org/second", 2)])
+        text = " ".join(p.get("text", "") for p in content)
+        self.assertIn("album reading", text)
+        self.assertIn("超过读取上限", text)
+        self.assertNotIn("third.txt", text)
+        self.assertEqual([base64.b64decode(p["image_url"]["url"].split(",", 1)[1])
+                          for p in content if p["type"] == "image_url"], [photo])
+        files = [p for p in event.message_obj.message if isinstance(p, File)]
+        self.assertEqual([p.name for p in files], ["first.txt", "second.txt"])
+        for p, expected in zip(files, (b"abc", b"de")):
+            path = Path(await p.get_file())
+            self.assertIn(str(path), text)
+            self.assertEqual(path.read_bytes(), expected)
+
     async def test_managed_documents_share_window_timeout_within_album(self):
         target = self.controller.settings.target("tg-owner")
         await self.convert(document=dict(file_id="d", file_unique_id="d", file_name="first.txt"),

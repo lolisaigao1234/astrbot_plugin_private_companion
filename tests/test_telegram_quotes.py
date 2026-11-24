@@ -34,6 +34,14 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
 
         await check_provider_photo_budget(self, make_event, "tg-owner", 424242)
 
+    async def test_provider_quoted_documents_and_videos(self):
+        from tests.telegram_provider_photo_support import check_provider_quoted_attachments
+
+        async def make_event(fields, original):
+            return await self.event(**fields, reply_to_message=self.message(10, 424242, **original))
+
+        await check_provider_quoted_attachments(self, make_event, "tg-owner")
+
     async def asyncSetUp(self):
         self.platform.client.id = 424242
         self.platform.client.username = "synthetic_bot"
