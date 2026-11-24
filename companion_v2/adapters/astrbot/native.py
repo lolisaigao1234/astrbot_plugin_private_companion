@@ -979,8 +979,9 @@ class NativePrivateBridge:
             onebot = meta.name == "aiocqhttp"
             telegram = None
             if meta.name == "telegram":
-                from .telegram_references import private_references
+                from .telegram_references import private_references, private_text_parts
                 telegram = private_references(event)
+                parts = private_text_parts(message, parts)
             telegram_caption = meta.name == "telegram" and any(
                 getattr(part, "text", "").strip() for part in parts
                 if getattr(part.type, "value", part.type) == "Plain" and isinstance(part.text, str))
