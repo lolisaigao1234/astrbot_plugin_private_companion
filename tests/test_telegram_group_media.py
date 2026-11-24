@@ -15,6 +15,7 @@ from astrbot.core.message.components import File, Image, Record, Video
 from astrbot_host.audio.decoder import inspect_audio
 from astrbot_host.audio.loader import load_native_audio
 from astrbot_host.files.loader import load_native_file
+from astrbot_host.files.parsing import extract_document
 from astrbot_host.media import load_native_image
 from astrbot_host.video.decoder import inspect_video
 from astrbot_host.video.loader import load_native_video
@@ -54,6 +55,9 @@ class TelegramGroupMediaTests(TelegramHostFixture, unittest.IsolatedAsyncioTestC
             Path(path).parent.mkdir(parents=True, exist_ok=True)
             Path(path).write_bytes(audio_bytes())
 
+        async def decode_document(content, locator, **options):
+            return extract_document(content, locator.position, locator.name, **options)
+
         file = dict(file_id="fixture", file_unique_id="fixture1")
         cases = [
             (dict(photo=[dict(file, width=2, height=2)]), "images"),
@@ -67,6 +71,7 @@ class TelegramGroupMediaTests(TelegramHostFixture, unittest.IsolatedAsyncioTestC
               patch("astrbot_host.audio.loader.decode_audio", AsyncMock(side_effect=inspect_audio)),
               patch("astrbot_host.video.loader.decode_video", AsyncMock(side_effect=inspect_video)),
               patch("astrbot_host.video.loader.fetch_attachment", AsyncMock(return_value=video_bytes())),
+              patch("astrbot_host.files.loader.decode_document", decode_document),
               patch("astrbot_host.files.loader.fetch_attachment", AsyncMock(return_value=b"document body")),
               patch("astrbot.core.platform.sources.telegram.tg_adapter.download_file", download)):
             for i, (fields, expected) in enumerate(cases, 1):

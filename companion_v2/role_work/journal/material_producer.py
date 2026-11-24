@@ -135,14 +135,14 @@ class RoleConversationJournalMaterialProducer:
         return JournalMaterialPage(tuple(materials), page.next_cursor)
 
     def _native_page(self, context, target, *, limit, after_id=None):
-        from companion_v2.conversation.native_observations import observations_available, validate_observation
+        from companion_v2.conversation.native_observations import REFERENCE_OWNER, observations_available, validate_observation
         from companion_v2.memory.codec import source
 
         runtime = self.conversations.runtime
         self.conversations.authorize(context)
         if not observations_available(runtime):
             return JournalMaterialPage((), None)
-        values = [context.key]
+        values = [context.key, REFERENCE_OWNER]
         condition = ""
         if after_id is not None:
             cursor = runtime.read_one("""SELECT observed_at FROM conversation_native_observations
@@ -153,7 +153,8 @@ class RoleConversationJournalMaterialProducer:
             values.extend((cursor["observed_at"], cursor["observed_at"], after_id))
         values.append(limit)
         rows = runtime.read_all("""SELECT * FROM conversation_native_observations
-            WHERE context_key = ? AND kind = 'input' AND delivery_state = 'input_observed'""" + condition
+            WHERE context_key = ? AND kind = 'input' AND delivery_state = 'input_observed'
+              AND json_extract(source_json, '$.owner') != ?""" + condition
             + " ORDER BY observed_at, observation_id LIMIT ?", tuple(values))
         zone, materials = ZoneInfo(target.timezone), []
         for row in rows:

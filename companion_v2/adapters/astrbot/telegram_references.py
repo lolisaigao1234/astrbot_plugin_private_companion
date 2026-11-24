@@ -3,7 +3,7 @@
 from dataclasses import dataclass, replace
 
 from companion_v2.conversation.forwards.models import CapturedForward, CapturedForwardNode
-from companion_v2.conversation.quotes.models import TelegramQuote
+from companion_v2.conversation.quotes.models import TelegramForwardOrigin, TelegramQuote
 from companion_v2.execution.models import TaskError, digest
 
 from .quotes import image_locator
@@ -37,6 +37,25 @@ class TelegramReferences:
         return text
 
 
+def _origin(event, origin):
+    if not origin:
+        return None
+    source = "未知"
+    if origin.type == "user":
+        source = f"{origin.sender_user.full_name} ({origin.sender_user.id})"
+    elif origin.type == "hidden_user":
+        source = origin.sender_user_name
+    elif origin.type in ("chat", "channel"):
+        chat = origin.sender_chat if origin.type == "chat" else origin.chat
+        source = f"{chat.title} ({chat.id})"
+        if origin.type == "channel":
+            source += f"，原消息 {origin.message_id}"
+        if origin.author_signature:
+            source += f"，署名 {origin.author_signature}"
+    return TelegramForwardOrigin(str(origin.type), safe_text(event, source or "未知"), int(origin.date.timestamp()),
+                                 str(origin.sender_user.id) if origin.type == "user" else None)
+
+
 def private_references(event):
     message = event.message_obj
     raw = getattr(message.raw_message, "message", None)
@@ -51,24 +70,9 @@ def message_references(event):
     """Read references after the caller has authenticated the chat and speaker."""
     message = event.message_obj
     raw = message.raw_message.message
-    origin = raw.forward_origin
-    source = ""
-    if origin:
-        if origin.type == "user":
-            source = f"{origin.sender_user.full_name} ({origin.sender_user.id})"
-        elif origin.type == "hidden_user":
-            source = origin.sender_user_name
-        elif origin.type in ("chat", "channel"):
-            chat = origin.sender_chat if origin.type == "chat" else origin.chat
-            source = f"{chat.title} ({chat.id})"
-            if origin.type == "channel":
-                source += f"，原消息 {origin.message_id}"
-            if origin.author_signature:
-                source += f"，署名 {origin.author_signature}"
-        source = source or "未知"
-    forwarded_at = int(origin.date.timestamp()) if origin else None
-    references = TelegramReferences(forward_origin=safe_text(event, source), forwarded_at=forwarded_at,
-                                    forward_user_id=str(origin.sender_user.id) if origin and origin.type == "user" else None)
+    origin = _origin(event, raw.forward_origin)
+    references = TelegramReferences(forward_origin=origin.label, forwarded_at=origin.sent_at,
+                                    forward_user_id=origin.user_id) if origin else TelegramReferences()
     reply = next(((index, part) for index, part in enumerate(message.message)
                   if getattr(part.type, "value", part.type) == "Reply"), None)
     original = reply_original(raw)
@@ -87,7 +91,10 @@ def message_references(event):
     position, part = reply or (0, None)
     text = raw.quote.text if raw.quote else original.text or original.caption or ""
     images = ()
-    if original.photo and not raw.quote:
+    static_sticker = original.sticker and not (original.sticker.is_animated or original.sticker.is_video)
+    if (original.photo or static_sticker) and not raw.quote:
+        if static_sticker and original.sticker.emoji:
+            text = f"Sticker: {original.sticker.emoji}"
         text = "\n[图片 1]\n" + text
         if part and str(part.id) == str(original.message_id) and str(part.sender_id) == sender:
             images = tuple(freeze_attachment(event, image_locator(index, item.file, item.url))
@@ -103,5 +110,6 @@ def message_references(event):
                                   digest(suffix)))
     quote = TelegramQuote(position, str(original.message_id), sender, int(original.date.timestamp()),
                           safe_text(event, text) if text.strip() else "[附件]", companion_sender=sender == bot_id,
-                          selection_offset=raw.quote.position if raw.quote else None, link_suffixes=tuple(link_suffixes))
+                          selection_offset=raw.quote.position if raw.quote else None, link_suffixes=tuple(link_suffixes),
+                          forward_origin=_origin(event, original.forward_origin))
     return replace(references, quote=quote, images=images)

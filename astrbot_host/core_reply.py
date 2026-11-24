@@ -793,8 +793,12 @@ def inject_core_reply_prompt(event: Any, req: Any) -> None:
     prepared = state.get("prepared")
     original = prepared.get("native_input") if isinstance(prepared, Mapping) else None
     origin = getattr(original, "forward_origin", "")
-    if origin and isinstance(getattr(req, "prompt", None), str):
-        marker = f"[转发消息，来源：{origin}]\n"
+    markers = [f"[转发消息，来源：{origin}]"] if origin else []
+    for quote in getattr(original, "quotes", ()):
+        if getattr(quote, "forward_origin", None):
+            markers.append(f"[引用消息 {quote.message_id}，{quote.forward_origin.attribution(quote.sender_id)}]")
+    if markers and isinstance(getattr(req, "prompt", None), str):
+        marker = "\n".join(markers) + "\n"
         if not req.prompt.startswith(marker):
             req.prompt = marker + req.prompt
     system_prompt = getattr(req, "system_prompt", "") or ""
