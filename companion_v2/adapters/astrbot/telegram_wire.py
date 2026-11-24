@@ -45,7 +45,8 @@ def telegram_mentions(chain, usernames, *, kind=At):
         prefix = " ".join(mentions)
         for index, part in enumerate(result):
             if isinstance(part, Plain):
-                result[index] = Plain(text=f"{prefix} {part.text}")
+                separator = "\n" if part.text.lstrip(" ").startswith(("```", "~~~")) else " "
+                result[index] = Plain(text=prefix + separator + part.text)
                 break
         else:
             result.insert(0, Plain(text=prefix))
@@ -68,7 +69,7 @@ class _MentionFallbackClient:
         if self.mentions and not kwargs.get("parse_mode"):
             from telegram import MessageEntity
             prefix = " ".join(self.mentions)
-            if text == prefix or text.startswith(prefix + " "):
+            if text == prefix or text.startswith((prefix + " ", prefix + "\n")):
                 labels, entities, offset = [], [], 0
                 for mention in self.mentions:
                     label = mention
