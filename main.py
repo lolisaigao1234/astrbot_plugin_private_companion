@@ -1190,6 +1190,13 @@ class PrivateCompanionV2StagingPlugin(Star):
         origin_key = self._origin_key_for_event(event)
         kind = getattr(getattr(getattr(event, "message_obj", None), "type", None), "value", None)
         channel = "private" if kind == "FriendMessage" else "group" if kind == "GroupMessage" else "unknown"
+        if channel == "group" and getattr(getattr(event, "platform_meta", None), "name", None) == "telegram":
+            raw = getattr(getattr(event.message_obj, "raw_message", None), "message", None)
+            if any(getattr(raw, field, None) is not None for field in
+                   ("forum_topic_created", "forum_topic_edited", "new_chat_title")):
+                self._observe_session(event)
+                suppress_default_reply(event)
+                return
         if channel != "unknown":
             # This turn belongs to a conversation the plugin serves, even when V2
             # later declines it and AstrBot's own pipeline writes the reply. The
@@ -1293,7 +1300,8 @@ class PrivateCompanionV2StagingPlugin(Star):
         target_key = getattr(target, "target_id", None) if channel == "private" else None
         if target_key and not is_calendar_command:
             await wait_for_quoted_forward(event, target, self._private_debounce_manager(),
-                                          getattr(self.staging, "prepare_core_reply_context", None))
+                                          getattr(self.staging, "prepare_core_reply_context", None),
+                                          self._private_delivery_dedup().seen)
         debounce_input = (private_debounce_input(event, collecting=self._private_debounce_manager().collecting_event,
                                                   target_key=target_key)
                           if channel == "private" and not is_calendar_command else None)

@@ -861,6 +861,25 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
                 self.assertEqual(payload.get("reply_to_message_id"), source_id if quoted else None)
                 self.assertEqual(payload["text"].strip(), "甲 乙" + ending)
 
+    async def test_group_rename_service_messages_reach_directory_without_a_reply(self):
+        plugin = self.started_plugin()
+        directory = self.controller.session_topology
+        topic_key = ("tg-main", "tg-main", "-100400#23")
+        cases = (
+            (23, {"forum_topic_created": ForumTopicCreated("Books", 0)}, "Club-Books"),
+            (23, {"forum_topic_edited": ForumTopicEdited(name="Stories")}, "Club-Stories"),
+            (None, {"new_chat_title": "Reading"}, "Reading-Stories"),
+        )
+        with patch.object(self.controller, "prepare_core_reply", new_callable=AsyncMock) as prepare:
+            for number, (topic, fields, expected) in enumerate(cases, 30):
+                event = await group_event(self.platform, -100400, "supergroup", topic, text=None,
+                                          title="Club", message_id=number, **fields)
+                await plugin.receive_companion_message(event)
+                await asyncio.gather(*tuple(directory._pending))
+                self.assertEqual(directory.stored_group_names().get(topic_key), expected)
+            prepare.assert_not_awaited()
+        self.platform.client.send_message.assert_not_awaited()
+
     async def test_topic_directory_tracks_group_topic_and_member_renames(self):
         directory = self.controller.session_topology
         for number, (title, topic, member) in enumerate((("读书群", "小说", "阿青"), ("阅读群", "故事", "青")), 40):
