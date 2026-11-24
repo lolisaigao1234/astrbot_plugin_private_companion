@@ -624,6 +624,7 @@ class RelayToolPort:
             if lease.platform is not platform or lease.client is not client:
                 raise TaskError("relay_account_unavailable", "递话账号连接已变化")
             route.connection_lease = lease
+            route.connections = bridge.connections
             controller.session = SimpleNamespace(bridge=bridge)
         transport = prepare_relay_transport(controller, route)
         return controller, route, transport

@@ -46,7 +46,7 @@ class TelegramAdministrationTests(unittest.IsolatedAsyncioTestCase):
         port.bridge.platform_name = lambda scope: "telegram"
         port.bridge.platform = lambda scope: platform
         port.bridge.client = lambda scope: platform.client
-        port.bridge.connections = NS(acquire=lambda _: NS(client=platform.client, platform=platform),
+        port.bridge.connections = NS(acquire=lambda key: NS(account_key=key, client=platform.client, platform=platform),
                                      assert_current=lambda _: None)
 
         def window(name, **fields):

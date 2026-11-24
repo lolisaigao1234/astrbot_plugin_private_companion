@@ -517,6 +517,18 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
             self.platform.client.send_message.reset_mock()
         plugin.ticket_store.revoke.assert_called_once_with("tok-1")
 
+    async def test_group_event_invite_uses_requesters_private_chat(self):
+        from astrbot_host.native_extensions.together.rooms_methods import TogetherRoomsMethods
+
+        service = TogetherRoomsMethods()
+        service.controller = self.controller
+        event = await group_event(self.platform, -100400, "supergroup", 23)
+        self.assertTrue(await service._send_private_room_link(event, "synthetic invite"))
+        send = self.platform.client.send_message
+        send.assert_awaited_once()
+        self.assertEqual(send.await_args.kwargs["chat_id"], str(OWNER))
+        self.assertNotIn("message_thread_id", {k: v for k, v in send.await_args.kwargs.items() if v is not None})
+
     async def test_repeat_sends_the_configured_interruption_into_the_topic(self):
         from companion_v2.configuration.models import ConfigLayer, ConfigTarget
         from companion_v2.conversation.participation import (

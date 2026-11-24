@@ -201,7 +201,8 @@ def authenticate_notice_route(controller, event, kind, *, expected_post="notice"
             return None
         return NativeNoticeRoute(kind, group.platform_id, target.bot_id, group.account_id,
                                  group.sender_id, group.group_id, group.session_id, lease.client,
-                                 platform=lease.platform, platform_name="telegram", connection_lease=lease)
+                                 platform=lease.platform, platform_name="telegram", connection_lease=lease,
+                                 connections=session.bridge.connections)
     if meta.name == "telegram" and kind is ScopeKind.PRIVATE and expected_post == "message":
         return telegram_private_message_route(controller, event, configured_peer=True)
     if meta.name == "lark" and kind is ScopeKind.PRIVATE and expected_post == "message":

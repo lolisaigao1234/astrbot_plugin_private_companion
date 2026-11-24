@@ -65,7 +65,7 @@ class TogetherRoomsMethods:
             return None
         return NativeNoticeRoute(ScopeKind.PRIVATE, platform_id, target.bot_id, account,
             sender, sender, sender, lease.client, platform=lease.platform, platform_name="telegram",
-            connection_lease=lease)
+            connection_lease=lease, connections=bridge.connections)
 
     async def send_telegram_group_invite(self, route, message):
         from astrbot_host.private_notice import send_private_notice
