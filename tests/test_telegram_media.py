@@ -163,6 +163,15 @@ class TelegramCaptureTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase
             captured = (await self.bridge.capture(self.event)).unwrap()
         self.assertEqual([image.descriptor.position for image in captured.images], [0, 2])
         self.assertIn("album caption", captured.text)
+        # Each image fits alone. Only the latter crosses the shared byte limit.
+        budget = max(image.descriptor.retained_bytes for image in captured.images)
+        with patch("companion_v2.conversation.media.models.MAX_TURN_BYTES", budget), patch(
+                "astrbot_host.media.fetch_image", AsyncMock(side_effect=[image_bytes("red"), image_bytes("blue")])):
+            partial = (await self.bridge.capture(self.event)).unwrap()
+        self.assertEqual([image.descriptor.position for image in partial.images], [0])
+        self.assertEqual(partial.text.count("附件超过读取上限"), 1)
+        self.assertIn("album caption", partial.text)
+
         from companion_v2.execution.models import TaskError
         too_large = TaskError("host_image_limit", "oversized synthetic photo")
         with patch("astrbot_host.media.fetch_image", AsyncMock(side_effect=[too_large, image_bytes()])):
