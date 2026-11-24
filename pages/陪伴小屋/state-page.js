@@ -54,6 +54,7 @@ window.CompanionStatePage = (() => {
   function blank() { return {catalog:null,target:-1,role:-1,windowSelected:false,status:null,cursor:"",loading:false,error:false,notice:"",ready:false,
     pendingMaintenance:null,maintenanceSubmitting:false}; }
   function target() { return data?.catalog?.targets[data.target]; }
+  function unknownPlatform() { return target()?.platform_name === "unknown"; }
   function telegramTarget() {
     const row=target();
     return (row?.platform_name||row?.platform_id)==="telegram";
@@ -273,6 +274,7 @@ window.CompanionStatePage = (() => {
   };
   function openFeatureEditor(feature) {
     const kind=featureEditors[feature];
+    if(feature==="presentation" && unknownPlatform())return;
     if(kind && !(feature==="presentation" && telegramTarget() && !data.windowSelected))editor?.open(kind);
   }
   function dashboardItem(feature,label,value,icon,detail="",tone="") {
@@ -357,11 +359,11 @@ window.CompanionStatePage = (() => {
       {name:"weather",label:"天气",icon:"cloud-sun",value:settings.planning_weather_enabled?(location||"地点待配置"):"天气感知已关闭",help:"角色所在地 · 实况信息时效"},
       {name:"datetime",label:"时间与日期",icon:"calendar-clock",value:local({hour:"2-digit",minute:"2-digit",hourCycle:"h23"})+" · "+local({month:"long",day:"numeric",weekday:"long"}),help:zone+" · 日期背景"},
     ];
-    return `<nav class="state-extra-nav" aria-label="日程与环境状态设置">${cards.map(({name,label,icon,value,help,action})=>
+    return `<nav class="state-extra-nav" aria-label="日程与环境状态设置">${cards.filter(card=>card.name!=="presentation"||!unknownPlatform()).map(({name,label,icon,value,help,action})=>
       `<button type="button" id="state-extra-${name}" class="state-extra-card" ${action||`data-state-feature="${name}" aria-expanded="${activeFeature===name}" aria-controls="state-feature-detail"`}><i data-lucide="${icon}" aria-hidden="true"></i><span class="state-extra-copy"><strong>${label}</strong><span>${e(value)}</span><small>${e(help)}</small></span><i class="state-extra-arrow" data-lucide="chevron-right" aria-hidden="true"></i></button>`).join("")}</nav>`;
   }
   function featurePanelMarkup(status,feature=activeFeature) {
-    if(!feature||!featureInfo[feature])return "";
+    if(!feature||!featureInfo[feature]||(feature==="presentation"&&unknownPlatform()))return "";
     const telegramTyping=feature==="presentation"&&telegramTarget();
     const [title,icon]=telegramTyping?["Telegram 正在输入提示","radio-tower"]:featureInfo[feature];
     const values=status.state?.values||{},settings=status.settings||{};
@@ -444,7 +446,7 @@ window.CompanionStatePage = (() => {
      （打开表单是搜索落点的行为，见 openEditor）。 */
   function openFeature(feature) {
     if(!data?.status||data.loading||section!=="state"||!root?.isConnected||settingsOpen)return false;
-    if(!featureInfo[feature])return false;
+    if(!featureInfo[feature]||(feature==="presentation"&&unknownPlatform()))return false;
     if(editor&&!editor.discardIfPristine())return false;
     if(activeFeature===feature)return true;
     activeFeature=feature;
@@ -494,6 +496,7 @@ window.CompanionStatePage = (() => {
       return true;
     }
     pendingEditor=null;
+    if(targetKind==="settings" && unknownPlatform())return false;
     if(targetKind==="settings" && telegramTarget() && (!data.windowSelected || (field && !["typing_enabled","typing_refresh_seconds"].includes(field))))return false;
     if(editor&&!editor.discardIfPristine())return false;
     if(targetKind==="home"){
@@ -600,7 +603,7 @@ window.CompanionStatePage = (() => {
   function render() {
     if (!root?.isConnected || !data) return;
     const status=data.status,roleTarget=target(),contactView=section==="contact",weatherView=section==="weather",patrolView=section==="patrol";
-    if(role()?.state_api&&data.catalog)editor?.setScope({installation_id:data.catalog.installation_id,operator_id:data.catalog.operator_id,path:endpoint(),telegram:telegramTarget(),window_selected:data.windowSelected});
+    if(role()?.state_api&&data.catalog)editor?.setScope({installation_id:data.catalog.installation_id,operator_id:data.catalog.operator_id,path:endpoint(),telegram:telegramTarget(),unknownPlatform:unknownPlatform(),window_selected:data.windowSelected});
     else editor?.invalidate();
     editor?.setStatus(status,data.loading);
     if(!contactView&&editor?.requiredFeature) {

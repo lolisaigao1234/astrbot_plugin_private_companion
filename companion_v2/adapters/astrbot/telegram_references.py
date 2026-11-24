@@ -47,19 +47,22 @@ def _origin(event, origin):
     if not origin:
         return None
     source = "未知"
+    chat_fingerprint = None
     if origin.type == "user":
         source = f"{origin.sender_user.full_name} ({origin.sender_user.id})"
     elif origin.type == "hidden_user":
         source = origin.sender_user_name
     elif origin.type in ("chat", "channel"):
         chat = origin.sender_chat if origin.type == "chat" else origin.chat
+        chat_fingerprint = digest([origin.type, chat.id, chat.title, origin.author_signature,
+                                   getattr(origin, "message_id", None)])
         source = f"{chat.title} ({chat.id})"
         if origin.type == "channel":
             source += f"，原消息 {origin.message_id}"
         if origin.author_signature:
             source += f"，署名 {origin.author_signature}"
     return TelegramForwardOrigin(str(origin.type), safe_text(event, source or "未知"), int(origin.date.timestamp()),
-                                 str(origin.sender_user.id) if origin.type == "user" else None)
+                                 str(origin.sender_user.id) if origin.type == "user" else None, chat_fingerprint)
 
 
 def voice_caption_parts(raw, parts):
