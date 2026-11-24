@@ -578,17 +578,20 @@ class NativeTogetherProvider:
                            request["action"], operation.get("id"), state, operation.get("error"))
         return response
 
-    def _open_tokens(self, scope: str, *, for_close=False) -> set[str]:
-        closed = {
+    def _closed_tokens(self, scope: str) -> set[str]:
+        return {
             item["result"]["closed_ticket_token"]
             for item in self.store.latest(scope, "together.room.close")
             if item.get("state") == "succeeded" and isinstance(item.get("result"), dict)
             and item["result"].get("closed_ticket_token")
         }
+
+    def _open_tokens(self, scope: str) -> set[str]:
+        closed = self._closed_tokens(scope)
         return {
             item["result"]["room"]["ticket_token"]
             for item in self.store.latest(scope, "together.room.create")
-            if (item.get("state") == "succeeded" or (for_close and item.get("state") in {"unknown", "dispatching"}))
+            if item.get("state") == "succeeded"
             and isinstance(item.get("result"), dict) and isinstance(item["result"].get("room"), dict)
             and item["result"]["room"].get("ticket_token") not in closed
         }
@@ -886,9 +889,18 @@ class NativeTogetherProvider:
                         operation = self.store.update(scope, operation["id"], state="failed",
                                                       effect="not_committed", error=code)
                         return self._response(value, operation)
+                    native_scope = value["context"]["audience"]["scope"]
+                    if native_scope["kind"] == "group":
+                        resolve = getattr(self.plugin, "telegram_group_invite_route", None)
+                        if not callable(resolve) or resolve(native_scope, user_id) is None:
+                            raise NativeTogetherError("together_private_room_required")
                     self.store.update(scope, operation["id"], state="dispatching", effect="unknown")
                     result = await self._close_latest(scope, user_id)
-                    operation = self.store.update(scope, operation["id"], state="succeeded", effect="committed", result=result)
+                    if native_scope["kind"] == "group" and result.get("reason") == "no_provider_room":
+                        operation = self.store.update(scope, operation["id"], state="failed", effect="not_committed",
+                                                      error="no_provider_room")
+                    else:
+                        operation = self.store.update(scope, operation["id"], state="succeeded", effect="committed", result=result)
         except (Exception, asyncio.CancelledError) as exc:
             operation = self.store.get(scope, operation["id"])
             # A group notice runs after ticket revocation and its terminal receipt.
@@ -1051,39 +1063,39 @@ class NativeTogetherProvider:
         return self.store.update(scope, operation["id"], state="succeeded", effect="committed", result=result)
 
     async def _close_latest(self, scope: str, user_id: str) -> dict[str, Any]:
-        bound_rooms = {
-            str(getattr(room, "room_id", "")): room
-            for room in list(getattr(self.plugin, "rooms", {}).values())
-            + list(getattr(self.plugin, "detached_rooms", {}).values())
-            if getattr(room, "user_id", "") == user_id
-            and not getattr(room, "integration_closed", False)
-            and getattr(getattr(room, "native_v2", None), "scope_key", None) == scope
-        }
-        if bound_rooms:
-            room = max(bound_rooms.values(), key=lambda item: (float(getattr(item, "created_at", 0) or 0),
-                                                               str(getattr(item, "room_id", ""))))
+        closed = self._closed_tokens(scope)
+        owned_tokens: set[str] = set()
+        candidates: dict[str, tuple[float, Any]] = {}
+        store = self.plugin.ticket_store
+        for item in self.store.latest(scope, "together.room.create"):
+            data = (item.get("result") or {}).get("room") or {}
+            token = data.get("ticket_token")
+            if (item.get("state") not in {"succeeded", "unknown", "dispatching"}
+                    or data.get("user_id") != user_id or not token or token in closed):
+                continue
+            owned_tokens.add(token)
+            ticket = store.get(token)
+            if ticket is not None:
+                candidates[token] = (ticket.created_at, None)
+
+        # A consumed ticket can still identify an active or resumable room.
+        for room in list(self.plugin.rooms.values()) + list(self.plugin.detached_rooms.values()):
+            token = room.ticket_token
+            room_scope = getattr(getattr(room, "native_v2", None), "scope_key", None)
+            in_scope = room_scope == scope if room_scope else token in owned_tokens
+            if room.user_id != user_id or room.integration_closed or token in closed or not in_scope:
+                continue
+            candidates[token] = (room.created_at, room)
+
+        if not candidates:
+            return {"closed": False, "reason": "no_provider_room"}
+        token = max(candidates, key=lambda key: (candidates[key][0], key))
+        _, room = candidates[token]
+        if room is not None:
             await self.plugin.close_room(room)
             return {"closed": True, "room_id": str(room.room_id), "ticket_revoked": True,
-                    "closed_ticket_token": str(room.ticket_token)}
-        tokens = self._open_tokens(scope, for_close=True)
-        creates = [item for item in self.store.latest(scope, "together.room.create")
-                   if isinstance(room := (item.get("result") or {}).get("room"), dict)
-                   and room.get("user_id") == user_id and room.get("ticket_token") in tokens]
-        if not creates:
-            return {"closed": False, "reason": "no_provider_room"}
-        room_data = creates[0]["result"].get("room") or {}
-        token = str(room_data.get("ticket_token") or "")
-        if not token:
-            return {"closed": False, "reason": "no_provider_room"}
-        for room in list(getattr(self.plugin, "rooms", {}).values()) + list(getattr(self.plugin, "detached_rooms", {}).values()):
-            if getattr(room, "ticket_token", "") == token and getattr(room, "user_id", "") == user_id:
-                await self.plugin.close_room(room)
-                return {"closed": True, "room_id": str(getattr(room, "room_id", "")),
-                        "ticket_revoked": True, "closed_ticket_token": token}
-        store = getattr(self.plugin, "ticket_store", None)
-        revoke = getattr(store, "revoke", None)
-        if callable(revoke):
-            revoke(token)
+                    "closed_ticket_token": token}
+        store.revoke(token)
         return {"closed": False, "ticket_revoked": True, "reason": "room_not_active",
                 "closed_ticket_token": token}
 

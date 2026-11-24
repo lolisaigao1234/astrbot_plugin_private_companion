@@ -346,6 +346,18 @@ class NativeRealityTogetherTests(unittest.IsolatedAsyncioTestCase):
         first = await provider.execute(create, before_dispatch=lambda: True)
         self.assertEqual(first["state"], "unknown")
         token, = plugin.ticket_store.tickets
+        for field, value in (("installation_id", "other-install"), ("bot_id", "other-bot"),
+                             ("account_id", "other-account"), ("session_id", "-100#24")):
+            other = copy.deepcopy(identity)
+            other["audience"]["scope"][field] = value
+            denied = request(provider, "together.room.close", invocation="other-" + field, identity=other)
+            self.assertEqual((await provider.execute(denied, before_dispatch=lambda: True))["state"], "failed")
+            self.assertIsNotNone(plugin.ticket_store.get(token))
+        other = copy.deepcopy(identity)
+        other["role_binding"]["role_id"] = "other-role"
+        denied = request(provider, "together.room.close", invocation="other-role", identity=other)
+        self.assertEqual((await provider.execute(denied, before_dispatch=lambda: True))["state"], "failed")
+        self.assertIsNotNone(plugin.ticket_store.get(token))
         close = request(provider, "together.room.close", invocation="close-uncertain", identity=identity)
         receipt = await provider.execute(close, before_dispatch=lambda: True)
         self.assertIsNone(plugin.ticket_store.get(token))
@@ -353,6 +365,46 @@ class NativeRealityTogetherTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(token, json.dumps(receipt))
         self.assertEqual(await provider.execute(create, before_dispatch=lambda: True), first)
         plugin.send_telegram_group_invite.assert_awaited_once()
+
+    async def test_close_orders_uncertain_ticket_with_live_and_detached_rooms(self):
+        identity = context()
+        identity["audience"]["scope"].update(platform="tg-main", kind="group", session_id="-100#23")
+        for room_first in (True, False):
+            for detached in (True, False):
+                with self.subTest(room_first=room_first, detached=detached):
+                    plugin = FakeTogether()
+                    plugin.telegram_group_invite_route = Mock(return_value=object())
+                    plugin.send_telegram_group_invite = AsyncMock(return_value={"state": "unknown"})
+                    root = self.root / f"{room_first}-{detached}"
+                    provider = TOGETHER.NativeTogetherProvider(plugin, root, version=PRODUCT_VERSION)
+                    create = request(provider, "together.room.create", invocation="invite",
+                                     identity=identity, arguments={"mode": "call"})
+                    original = await provider.execute(create, before_dispatch=lambda: True)
+                    self.assertEqual(original["state"], "unknown")
+                    ticket, = plugin.ticket_store.tickets.values()
+                    room = SimpleNamespace(room_id="owned", ticket_token="bound-token", user_id="12345",
+                                           integration_closed=False, native_v2=SimpleNamespace(**ticket.native_v2),
+                                           created_at=ticket.created_at + (1 if room_first else -1))
+                    (plugin.detached_rooms if detached else plugin.rooms)["owned"] = room
+                    for name, user, scope in (("other-user", "67890", room.native_v2.scope_key),
+                                              ("other-scope", "12345", "different")):
+                        plugin.rooms[name] = SimpleNamespace(room_id=name, ticket_token=name, user_id=user,
+                            integration_closed=False, native_v2=SimpleNamespace(scope_key=scope), created_at=99)
+                    provider = TOGETHER.NativeTogetherProvider(plugin, root, version=PRODUCT_VERSION)
+                    for index, expect_room in enumerate((room_first, not room_first)):
+                        close = request(provider, "together.room.close", invocation=f"close-{index}", identity=identity)
+                        result = await provider.execute(close, before_dispatch=lambda: True)
+                        self.assertEqual(result["result"]["closed"], expect_room)
+                        self.assertTrue(result["result"]["ticket_revoked"])
+                        self.assertEqual(await provider.execute(close, before_dispatch=lambda: True), result)
+                        if index == 0:
+                            self.assertEqual(plugin.closed, ["owned"] if room_first else [])
+                            self.assertEqual(plugin.ticket_store.get(ticket.token) is not None, room_first)
+                    self.assertEqual(plugin.closed, ["owned"])
+                    self.assertEqual(set(plugin.rooms), {"other-user", "other-scope"})
+                    self.assertIsNone(plugin.ticket_store.get(ticket.token))
+                    self.assertEqual(await provider.lookup(create, before_dispatch=lambda: True), original)
+                    plugin.send_telegram_group_invite.assert_awaited_once()
 
     async def test_refused_group_invite_survives_notice_error_and_replay(self):
         identity = context()

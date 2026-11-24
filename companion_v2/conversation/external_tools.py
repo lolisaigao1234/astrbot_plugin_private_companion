@@ -54,6 +54,8 @@ _ADOPTION_WITHDRAWN = frozenset({
 })
 _TYPES = {"string": (str,), "integer": (int,), "number": (int, float),
           "boolean": (bool,), "null": (type(None),), "object": (dict,), "array": (list,)}
+GROUP_ROOM_ACTIONS = frozenset({"together.room.create", "together.room.close"})
+
 logger = logging.getLogger(__name__)
 
 
@@ -353,7 +355,7 @@ class ExternalToolExecutor:
         # 隐私能力不再按会话范围拦截：群聊和私聊使用同一份授权判定。
         if (context.scope.kind is ScopeKind.GROUP and action not in GROUP_IMAGE_ACTIONS
                 and not privacy and not core_group
-                and not (action == "together.room.create" and descriptor.package.extension_id == "together"
+                and not (action in GROUP_ROOM_ACTIONS and descriptor.package.extension_id == "together"
                          and self.group_room_available is not None and self.group_room_available(context))):
             raise TaskError("tool_not_available", "this external action is not exposed to a group conversation")
         provider, current = self._provider(descriptor)
@@ -447,7 +449,7 @@ class ExternalToolExecutor:
                 except TaskError as error:
                     reason = ("not_supported_for_group" if context.scope.kind is ScopeKind.GROUP
                               and action not in GROUP_IMAGE_ACTIONS
-                              and (action != "together.room.create" or error.code == "tool_not_available") else error.code)
+                              and (action not in GROUP_ROOM_ACTIONS or error.code == "tool_not_available") else error.code)
                     if type(reason) is not str or re.fullmatch(r"[a-z][a-z0-9_]{0,95}", reason) is None:
                         reason = "extension_unavailable_or_not_authorized"
                     filtered.append({"action": action, "reason": reason})

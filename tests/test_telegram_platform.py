@@ -1013,13 +1013,16 @@ class TelegramGroupRoomToolTests(TelegramHostFixture, unittest.IsolatedAsyncioTe
             issue_room_ticket = TogetherRoomsMethods.issue_room_ticket
 
         plugin = Plugin()
+        plugin.rooms = {}
+        plugin.detached_rooms = {}
         plugin.ticket_store = RoomTicketStore()
         provider = NativeTogetherProvider(plugin, self.root, version=PRODUCT_VERSION)
         lease = internal_lease(provider)
         config = self.controller.config
-        config["multi_host"]["group_targets"] = [dict(target_id="topic", platform_id="tg-main",
-            account_id="tg-main", bot_id="bot-tg", group_id="-100400#23")]
+        config["multi_host"]["group_targets"] = [dict(target_id=f"topic-{topic}", platform_id="tg-main",
+            account_id="tg-main", bot_id="bot-tg", group_id=f"-100400#{topic}") for topic in (23, 24)]
         self.window_personas["tg-main:GroupMessage:-100400#23"] = "original"
+        self.window_personas["tg-main:GroupMessage:-100400#24"] = "original"
         self.controller = plugin.controller = self.make_controller(config)
         with patch("astrbot_host.multi_controller.create_bundled_extensions", return_value=((lease,), ())):
             app = await self.start_host()
@@ -1034,22 +1037,24 @@ class TelegramGroupRoomToolTests(TelegramHostFixture, unittest.IsolatedAsyncioTe
         context = prepared["context"]
         repo = CapabilityRepository(app.runtime)
         create = "together.room.create"
+        close = "together.room.close"
         package = lease.manifest.package
         require(repo.acquire(extension_id="together", package_id=package.package_id,
             package_version=package.package_version, expected_revision=0, observed_at=self.clock.now()))
         require(repo.set_role_enabled(extension_id="together", role=context.role_binding.role,
             bot_id=context.scope.bot_id, enabled=True, expected_revision=0, observed_at=self.clock.now()))
         self.assertNotIn(create, {tool.action for tool in app.tools.catalog_for(context)})
+        self.assertNotIn(close, {tool.action for tool in app.tools.catalog_for(context)})
         for capability in package.capabilities:
             require(repo.set_authorization(extension_id="together", capability_id=capability,
                 subject=context.actor.subject, scope=context.scope, state=CapabilityAuthorizationState.ACTIVE,
                 expected_revision=0, observed_at=self.clock.now()))
         self.assertEqual({tool.action for tool in app.tools.catalog_for(context)
-                          if tool.action.startswith("together.")}, {create})
+                          if tool.action.startswith("together.")}, {create, close})
 
         groups = self.controller.session.bridge.groups
         with patch.dict(groups.platforms, {"tg-main": (self.native.platforms["qq-main"], None)}):
-            self.assertNotIn(create, {tool.action for tool in app.tools.catalog_for(context)})
+            self.assertFalse({create, close} & {tool.action for tool in app.tools.catalog_for(context)})
 
         async def authorize(state):
             return await self.controller.authorize_core_reply(event, state)
@@ -1108,6 +1113,58 @@ class TelegramGroupRoomToolTests(TelegramHostFixture, unittest.IsolatedAsyncioTe
         uncertain = private["text"].replace(chr(92), "").split("/join/")[1].split("?")[0]
         self.assertIsNotNone(plugin.ticket_store.get(uncertain))
         self.assertNotIn(uncertain, json.dumps(result))
+
+        async def close_from(source, offered, identifier):
+            close_name = native_tool_name(close)
+            call = ToolCall(id=identifier, function=ToolCall.FunctionBody(name=close_name, arguments="{}"))
+            wrapper = NS(context=NS(event=source), messages=[AgentMessage(role="assistant", tool_calls=[call])])
+            return json.loads(await offered.func_tool.get_tool(close_name).call(wrapper))
+
+        # Even with close permission, a different requester or topic cannot spend either link.
+        for index, (member, topic) in enumerate(((OWNER + 2, 23), (OWNER + 1, 24))):
+            other = await group_event(self.platform, -100400, "supergroup", topic, text="@synthetic_bot 关房",
+                                      message_id=30 + index, from_user=User(member, "Member", False),
+                                      entities=[MessageEntity("mention", 0, 14)])
+            other.created_at = self.clock.now().timestamp()
+            admission = require(await self.controller.group_reply_candidate(other))
+            turn = require(await self.controller.prepare_core_reply(other, group_admission=admission))
+            other_context = turn["context"]
+            require(repo.set_authorization(extension_id="together", capability_id=close,
+                subject=other_context.actor.subject, scope=other_context.scope, state=CapabilityAuthorizationState.ACTIVE,
+                expected_revision=0, observed_at=self.clock.now()))
+            prepare_core_reply_event(other, turn, authorize=lambda state: self.controller.authorize_core_reply(other, state))
+            offered = NS(func_tool=None, system_prompt="")
+            inject_core_reply_tools(other, offered, application=app)
+            denied = await close_from(other, offered, f"foreign-close-{index}")
+            self.assertEqual(denied["state"], "failed", denied)
+            self.assertIsNotNone(plugin.ticket_store.get(uncertain))
+            self.assertIsNotNone(plugin.ticket_store.get(token))
+
+        for _ in range(2):
+            closed = await close_from(event, request, "close-uncertain")
+            self.assertEqual(closed["state"], "succeeded", closed)
+            result = json.loads(closed["payload"])["native"]["result"]
+            self.assertTrue(result["ticket_revoked"])
+            self.assertNotIn(uncertain, json.dumps(closed))
+            self.assertNotIn("/join/", json.dumps(closed))
+            self.assertIsNone(plugin.ticket_store.get(uncertain))
+            self.assertIsNotNone(plugin.ticket_store.get(token))
+        self.assertEqual((await invoke("uncertain-room-call", mode="watch"))["state"], "unknown")
+        self.platform.client.send_message.assert_awaited_once()
+
+        # Redeeming the older delivered ticket makes its room the next close target.
+        redeemed = plugin.ticket_store.consume(token)
+        room = NS(room_id="redeemed-room", ticket_token=token, user_id=redeemed.user_id,
+                  integration_closed=False, native_v2=redeemed.native_v2, created_at=redeemed.created_at)
+        plugin.rooms[room.room_id] = room
+        plugin.close_room = AsyncMock()
+        for _ in range(2):
+            closed = await close_from(event, request, "close-redeemed")
+            self.assertEqual(closed["state"], "succeeded", closed)
+            self.assertEqual(json.loads(closed["payload"])["native"]["result"]["room_id"], room.room_id)
+            self.assertNotIn(token, json.dumps(closed))
+        plugin.close_room.assert_awaited_once_with(room)
+
 
 
 class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
