@@ -60,17 +60,24 @@ def _origin(event, origin):
                                  str(origin.sender_user.id) if origin.type == "user" else None)
 
 
+def voice_caption_parts(raw, parts):
+    # AstrBot converts a voice note to Record without its Telegram caption.
+    kinds = [getattr(part.type, "value", part.type) for part in parts]
+    if not raw.voice or not raw.caption or kinds not in (["Record"], ["Reply", "Record"]):
+        return parts
+    caption = raw.caption.encode("utf-16-le")
+    for entity in reversed(raw.caption_entities or ()):
+        if entity.type == "text_link" and entity.url:
+            end = 2 * (entity.offset + entity.length)
+            caption = caption[:end] + f" ({entity.url})".encode("utf-16-le") + caption[end:]
+    return (*parts, SimpleNamespace(type="Plain", text=caption.decode("utf-16-le")))
+
+
 def private_text_parts(message, parts):
     """Recover Telegram text only for matching converted component shapes."""
     raw = message.raw_message.message
-    # The SDK emits only Record for voice, even when Telegram supplied a caption.
-    if raw.voice and raw.caption and len(parts) == 1 and getattr(parts[0].type, "value", parts[0].type) == "Record":
-        caption = raw.caption.encode("utf-16-le")
-        for entity in reversed(raw.caption_entities or ()):
-            if entity.type == "text_link" and entity.url:
-                end = 2 * (entity.offset + entity.length)
-                caption = caption[:end] + f" ({entity.url})".encode("utf-16-le") + caption[end:]
-        return (*parts, SimpleNamespace(type="Plain", text=caption.decode("utf-16-le")))
+    if raw.voice:
+        return voice_caption_parts(raw, parts)
     if not raw.text or not any(entity.type == "mention" for entity in raw.entities):
         return parts
     # Text messages have optional Reply, ordered At components, then optional Plain.

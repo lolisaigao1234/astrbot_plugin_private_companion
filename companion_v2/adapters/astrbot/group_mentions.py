@@ -137,7 +137,10 @@ def _telegram_mentioned_text(body, entities, parse, bot_name):
 
 
 def _telegram_parts(event, parts):
+    from .telegram_references import voice_caption_parts
+
     original = event.message_obj.raw_message.message
+    parts = voice_caption_parts(original, parts)
     body = original.text or original.caption or ""
     entities = original.entities if original.text else original.caption_entities
     parse = original.parse_entity if original.text else original.parse_caption_entity
