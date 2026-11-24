@@ -593,8 +593,8 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
             self.assertIn("回答", payload["text"])
             self.assertNotIn("None", payload["text"])
 
-    async def test_streamed_reply_uses_topic_headers_when_requested(self):
-        from astrbot.core.message.message_event_result import MessageChain, MessageEventResult, ResultContentType
+    async def prepare_topic_stream(self, **outbound_settings):
+        from astrbot.core.message.message_event_result import MessageEventResult, ResultContentType
         from astrbot_host.core_reply import activate_core_reply_delivery_guard, prepare_core_reply_event
         from astrbot_host.core_reply_outbound import prepare_core_reply_outbound_message
         from astrbot_host.core_reply_segmentation import prepare_core_reply_segmentation, uses_managed_group_stream
@@ -612,10 +612,17 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
                                  prepare_send=decorate)
         prepare_core_reply_segmentation(event)
         self.assertFalse(uses_managed_group_stream(event))
-        settings.update(reply_quote_enabled=True, reply_mention_speaker_enabled=True)
+        settings.update(outbound_settings)
         self.assertTrue(uses_managed_group_stream(event))
         event.set_result(MessageEventResult().set_result_content_type(ResultContentType.STREAMING_RESULT))
         activate_core_reply_delivery_guard(event)
+
+        return event, native.event_id
+
+    async def test_streamed_reply_uses_topic_headers_when_requested(self):
+        from astrbot.core.message.message_event_result import MessageChain
+
+        event, source_id = await self.prepare_topic_stream(reply_quote_enabled=True, reply_mention_speaker_enabled=True)
 
         async def chunks():
             for word in ("一段", "回答"):
@@ -626,13 +633,37 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
         self.assertEqual(self.platform.client.send_message.await_count, 2)
         payload = self.platform.client.send_message.await_args.kwargs
         self.assertEqual((payload["chat_id"], payload["message_thread_id"], payload["reply_to_message_id"]),
-                         ("-100400", "23", native.event_id))
+                         ("-100400", "23", source_id))
         self.assertTrue(payload["allow_sending_without_reply"])
         entity, = payload["entities"]
         self.assertEqual((entity.type, entity.offset, entity.length, entity.url),
                          ("text_link", 0, 2, f"tg://user?id={OWNER}"))
         self.assertTrue(payload["text"].startswith("成员 "))
         self.assertIn("一段回答", payload["text"])
+
+    async def test_stream_quote_threshold_applies_to_completed_topic_reply(self):
+        from astrbot.core.message.message_event_result import MessageChain
+
+        for ending, quoted in (("", False), ("丙", True)):
+            with self.subTest(ending=ending):
+                event, source_id = await self.prepare_topic_stream(reply_quote_enabled=True, reply_quote_skip_chars=2)
+                send = self.platform.client.send_message
+                send.reset_mock()
+                self.platform.client.edit_message_text = AsyncMock()
+
+                async def chunks():
+                    yield MessageChain(chain=[Plain("甲 乙")])
+                    send.assert_not_awaited()
+                    if ending:
+                        yield MessageChain(chain=[Plain(ending)])
+
+                await event.send_streaming(chunks())
+                send.assert_awaited_once()
+                self.platform.client.edit_message_text.assert_not_awaited()
+                payload = send.await_args.kwargs
+                self.assertEqual((payload["chat_id"], payload["message_thread_id"]), ("-100400", "23"))
+                self.assertEqual(payload.get("reply_to_message_id"), source_id if quoted else None)
+                self.assertEqual(payload["text"].strip(), "甲 乙" + ending)
 
     async def test_topic_directory_tracks_group_topic_and_member_renames(self):
         directory = self.controller.session_topology
