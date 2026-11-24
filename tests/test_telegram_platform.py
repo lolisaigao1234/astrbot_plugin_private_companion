@@ -599,7 +599,7 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
         from companion_v2.foundation.outcome import Outcome
 
         event = await group_event(self.platform, -100400, "supergroup", 23,
-                                  from_user=User(OWNER, "Member", False, username="synthetic_member"))
+                                  from_user=User(OWNER, "Member", False, username=None))
         native = require(await self.controller.session.bridge.groups.capture(event))
         settings = {}
         prepared = dict(native_input=native, event_id=native.event_id, channel="group",
@@ -619,13 +619,17 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
             for word in ("一段", "回答"):
                 yield MessageChain(chain=[Plain(word)])
 
+        self.platform.client.send_message.side_effect = [BadRequest("synthetic Markdown refusal"), None]
         await event.send_streaming(chunks())
-        self.platform.client.send_message.assert_awaited_once()
+        self.assertEqual(self.platform.client.send_message.await_count, 2)
         payload = self.platform.client.send_message.await_args.kwargs
         self.assertEqual((payload["chat_id"], payload["message_thread_id"], payload["reply_to_message_id"]),
                          ("-100400", "23", native.event_id))
         self.assertTrue(payload["allow_sending_without_reply"])
-        self.assertIn("@synthetic_member", payload["text"].replace(chr(92), ""))
+        entity, = payload["entities"]
+        self.assertEqual((entity.type, entity.offset, entity.length, entity.url),
+                         ("text_link", 0, 2, f"tg://user?id={OWNER}"))
+        self.assertTrue(payload["text"].startswith("成员 "))
         self.assertIn("一段回答", payload["text"])
 
     async def test_topic_directory_tracks_group_topic_and_member_renames(self):

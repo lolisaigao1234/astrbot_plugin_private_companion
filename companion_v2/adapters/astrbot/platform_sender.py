@@ -255,11 +255,12 @@ class AstrBotPlatformSender:
             chain = self._chain(component_plan, platform_name=platform_name)
 
             telegram_quote = ""
+            mention_prefix = ()
             if platform_name == "telegram":
                 from .telegram_wire import member_usernames, send_optional_reply, telegram_visible, telegram_mentions
                 if scope.kind is ScopeKind.GROUP and envelope.plan:
                     usernames = await member_usernames(lease.client, scope.native_scope_id, envelope.plan.mentions)
-                    chain.chain = telegram_mentions(chain.chain, usernames)
+                    chain.chain, mention_prefix = telegram_mentions(chain.chain, usernames)
                     telegram_quote = envelope.plan.quote
                     if telegram_quote:
                         chain.chain.insert(0, Reply(id=telegram_quote))
@@ -281,8 +282,9 @@ class AstrBotPlatformSender:
             stage = "platform_send"
             try:
                 with redact_telegram_token(lease.client if platform_name == "telegram" else None):
-                    if telegram_quote:
-                        accepted = await send_optional_reply(lease.client, chain, session.session_id)
+                    if telegram_quote or mention_prefix:
+                        accepted = await send_optional_reply(lease.client, chain, session.session_id,
+                            mentions=mention_prefix, optional_reply=bool(telegram_quote))
                     elif platform_name == "telegram" and scope.kind is ScopeKind.PRIVATE:
                         accepted = await send_private_session(platform, session, chain)
                     else:

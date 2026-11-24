@@ -49,7 +49,40 @@ def telegram_mentions(chain, usernames, *, kind=At):
                 break
         else:
             result.insert(0, Plain(text=prefix))
-    return result
+    return result, mentions
+
+
+class _MentionFallbackClient:
+    """Keep planned ID mentions clickable if the SDK retries as plain text."""
+
+    def __init__(self, bot, mentions):
+        self.bot = bot
+        self.mentions = mentions
+
+    def __getattr__(self, name):
+        return getattr(self.bot, name)
+
+    async def send_message(self, *, text, **kwargs):
+        # Only the first Plain carries the generated prefix. Consume it after
+        # a successful send so later chunks remain the SDK's original text.
+        if self.mentions and not kwargs.get("parse_mode"):
+            from telegram import MessageEntity
+            prefix = " ".join(self.mentions)
+            if text == prefix or text.startswith(prefix + " "):
+                labels, entities, offset = [], [], 0
+                for mention in self.mentions:
+                    label = mention
+                    if mention.startswith("[成员]("):
+                        label = "成员"
+                        entities.append(MessageEntity("text_link", offset, 2, url=mention.removeprefix("[成员](").removesuffix(")")))
+                    labels.append(label)
+                    offset += len(label.encode("utf-16-le")) // 2 + 1
+                if entities:
+                    kwargs["entities"] = entities
+                    text = " ".join(labels) + text[len(prefix):]
+        sent = await self.bot.send_message(text=text, **kwargs)
+        self.mentions = ()
+        return sent
 
 
 class _OptionalReplyClient:
@@ -65,9 +98,13 @@ class _OptionalReplyClient:
         return method
 
 
-async def send_optional_reply(client, chain, window):
+async def send_optional_reply(client, chain, window, *, mentions=(), optional_reply=True):
     from astrbot.core.platform.sources.telegram.tg_event import TelegramPlatformEvent
-    await TelegramPlatformEvent.send_with_client(_OptionalReplyClient(client), chain, window)
+    if mentions:
+        client = _MentionFallbackClient(client, mentions)
+    if optional_reply:
+        client = _OptionalReplyClient(client)
+    return await TelegramPlatformEvent.send_with_client(client, chain, window)
 
 
 class _OptionalReply(Reply):
@@ -89,7 +126,9 @@ def decorate_event_headers(event, chain, mentions, quote):
             if members:
                 # Only translate headers selected by this plugin.
                 from astrbot.core.message.message_event_result import MessageChain
-                message = MessageChain(chain=telegram_mentions(message.chain, members, kind=_MemberMention))
+                parts, prefix = telegram_mentions(message.chain, members, kind=_MemberMention)
+                message = MessageChain(chain=parts)
+                client = _MentionFallbackClient(client, prefix)
             if any(isinstance(part, _OptionalReply) for part in message.chain):
                 client = _OptionalReplyClient(client)
             await original(client, message, window)
