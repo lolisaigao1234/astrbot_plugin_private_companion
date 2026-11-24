@@ -170,6 +170,23 @@ class TelegramPresenceTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
         self.action = self.platform.client.send_chat_action = AsyncMock(return_value=True)
         self.presence = self.app.presence
 
+    async def test_typing_redacts_httpx_request(self):
+        self.enable_typing()
+        bot = self.platform.client
+        transport = httpx.MockTransport(lambda request: httpx.Response(200))
+        async with httpx.AsyncClient(transport=transport) as http:
+            async def chat_action(**kwargs):
+                await http.post(f"https://telegram.invalid/bot{bot.token}/sendChatAction")
+                return True
+
+            self.action.side_effect = chat_action
+            with self.assertLogs("httpx", "INFO") as logs:
+                result = await self.presence.port.typing(self.context)
+        self.assertEqual(result["state"], "accepted")
+        record, = logs.records
+        self.assertIn("/bot[redacted]/sendChatAction", record.getMessage())
+        self.assertNotIn(bot.token, repr(vars(record)))
+
     def enable_typing(self, interval=1):
         from astrbot_host.management_identity import dashboard_operator
         from companion_v2.role_work.state.management import StateManagement
