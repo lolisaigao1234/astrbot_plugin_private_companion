@@ -48,12 +48,9 @@ def event_person_names(event):
         if str(getattr(author, "id", "") or "") != peer:
             return "", ""
 
-        def part(field):
-            value = _name(getattr(author, field, None))
-            return "" if telegram_placeholder(value) else value
-
-        full_name = " ".join(filter(None, (part("first_name"), part("last_name"))))
-        return _name(full_name) or part("username"), ""
+        first, last, username = (_name(getattr(author, field, None)) for field in ("first_name", "last_name", "username"))
+        full_name = _name(" ".join(filter(None, (first, last))))
+        return next((name for name in (full_name, username) if name and not telegram_placeholder(name)), ""), ""
     if getattr(getattr(event, "platform_meta", None), "name", "") in {"qq_official", "qq_official_webhook"}:
         payload = raw if isinstance(raw, Mapping) else getattr(raw, "raw_data", None)
         author = (payload.get("author") if isinstance(payload, Mapping) else None) or getattr(raw, "author", None)
