@@ -186,8 +186,8 @@ class PlatformDisplayNames:
                         families[instance] = meta.name
                 except (AttributeError, TypeError, ValueError):
                     pass
-        return [dict(row, platform_name=families[row[platform_key]])
-                if row.get(platform_key) in families else dict(row) for row in rows]
+        return [dict(row, platform_name=families.get(row.get(platform_key)) or row.get("platform_name") or "unknown")
+                for row in rows]
 
     async def targets(self, targets, *, cached_only=False):
         async def enrich(row):
