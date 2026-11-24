@@ -239,7 +239,10 @@ class TelegramCaptureTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase
     async def test_mixed_album_keeps_later_videos_after_oversized_first(self):
         await self.check_mixed_album(oversized_first=True)
 
-    async def check_mixed_album(self, *, oversized_first):
+    async def test_uncaptioned_mixed_album_keeps_accepted_media(self):
+        await self.check_mixed_album(oversized_first=False, caption=None)
+
+    async def check_mixed_album(self, *, oversized_first, caption="mixed album"):
         import re
         from hashlib import sha256
         from astrbot_host.media import inspect_image, load_native_image
@@ -267,7 +270,7 @@ class TelegramCaptureTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase
         self.bridge.image_type, self.bridge.image_loader = Image, load_native_image
         self.bridge.video_type, self.bridge.video_loader = Video, video
         await self.convert(photo=[dict(file_id="photo", file_unique_id="p1", width=3, height=2)],
-                           caption="mixed album", media_group_id="album")
+                           caption=caption, media_group_id="album")
         urls = list(originals)[:count + 1]
         self.event.message_obj.message.extend(Video(file=url) for url in urls)
         budget = len(photo) + count * (video_size + frame.descriptor.retained_bytes)
@@ -277,9 +280,13 @@ class TelegramCaptureTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase
         unit = video_size + frame.descriptor.retained_bytes
         self.assertEqual(video_limits, [2 * unit, 2 * unit, unit] if oversized_first else [unit])
         self.assertEqual([item.descriptor.position for item in captured.images], [0])
-        self.assertEqual([item.descriptor.position for item in captured.videos], [3, 4] if oversized_first else [2])
+        expected_positions = [3, 4] if oversized_first else [2]
+        if caption is None:
+            expected_positions = [position - 1 for position in expected_positions]
+        self.assertEqual([item.descriptor.position for item in captured.videos], expected_positions)
         self.assertEqual(captured.text.count("附件超过读取上限"), 1)
-        self.assertIn("mixed album", captured.text)
+        if caption:
+            self.assertIn(caption, captured.text)
 
         # The SDK uses original video bytes for native providers, without decoding frames.
         async def fetch(url, *, maximum_bytes):
@@ -302,7 +309,8 @@ class TelegramCaptureTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase
         paths = re.findall(r"\[Video Attachment: name [^\]]*?, path ([^\]]+)\]", text)
         expected_urls = urls[1:] if oversized_first else urls[:1]
         self.assertEqual([Path(path).read_bytes() for path in paths], [originals[url] for url in expected_urls])
-        self.assertIn("mixed album", text)
+        if caption:
+            self.assertIn(caption, text)
         self.assertIn("附件超过读取上限", text)
         self.assertEqual([base64.b64decode(part["image_url"]["url"].split(",")[1])
                           for part in payload["content"] if part["type"] == "image_url"], [photo])
