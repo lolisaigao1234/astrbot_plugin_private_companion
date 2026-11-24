@@ -46,10 +46,7 @@ def _failure_reason(failure, fallback="程序没有完成该操作"):
 
 async def receive_reset_command(controller, event, *, target=None):
     """Return None when this is not the handled private reset command."""
-    text = message_text(event)
-    if getattr(getattr(event, "platform_meta", None), "name", None) == "telegram" and text.strip() == "全部重置":
-        text = "陪伴 全部重置"
-    command = parse_reset_command(text)
+    command = parse_reset_command(message_text(event))
     if command is None:
         return None
     prepare = getattr(controller, "prepare_core_reply_context", None)
