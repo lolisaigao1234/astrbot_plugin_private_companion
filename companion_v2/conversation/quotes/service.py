@@ -1,5 +1,7 @@
 """Publish quoted text separately; reuse image originals and source dependencies."""
 
+from dataclasses import replace
+
 from companion_v2.conversation.foreground import ContextContribution, ContributionState
 from companion_v2.execution.models import TaskError, digest, encode, require
 from companion_v2.foundation.refs import SourceRef, VersionRef
@@ -7,7 +9,8 @@ from companion_v2.sources.dependencies import link
 from companion_v2.sources.models import SourceRecord
 from companion_v2.conversation.forwards.service import prepare_forward
 
-from .models import CapturedQuote, QuoteDescriptor, QuoteImageEvent, OWNER
+from .models import (CapturedQuote, QuoteDescriptor, QuoteImageEvent, TelegramQuote, TelegramQuoteDescriptor,
+                     TelegramLinkedQuoteDescriptor, TelegramForwardedQuoteDescriptor, OWNER)
 from .forward_models import (ForwardQuoteDescriptor, ForwardQuoteMediaDescriptor, QuoteMediaDescriptor,
                              QuotedForwardEvent)
 from .originals import original_sources
@@ -31,6 +34,9 @@ def prepare_quote(sources, parent, audience, captured):
         original_hash = digest([original_hash, forwards])
     if audios or videos:
         original_hash = digest([original_hash, audios, videos])
+    origin = getattr(captured, "forward_origin", None)
+    if origin:
+        original_hash = digest([original_hash, origin])
     record = sources.prepare_message(SourceRecord(quote_reference(parent, captured.position), audience, original_hash, captured.text))
     kind = (ForwardQuoteMediaDescriptor if forwards and (audios or videos) else ForwardQuoteDescriptor if forwards
             else QuoteMediaDescriptor if audios or videos else QuoteDescriptor)
@@ -39,6 +45,16 @@ def prepare_quote(sources, parent, audience, captured):
     extra = {"forwards": forwards} if forwards else {}
     if audios or videos:
         extra.update(audios=audios, videos=videos)
+    if isinstance(captured, TelegramQuote):
+        if origin:
+            label = sources.prepare_message(replace(record, payload=origin.label)).payload
+            return TelegramForwardedQuoteDescriptor(*values, selection_offset=captured.selection_offset,
+                link_suffixes=captured.link_suffixes, forward_origin=replace(origin, label=label),
+                origin_resource_hash=origin.resource_hash(captured.message_id)), record
+        if captured.link_suffixes:
+            return TelegramLinkedQuoteDescriptor(*values, selection_offset=captured.selection_offset,
+                                                 link_suffixes=captured.link_suffixes), record
+        return TelegramQuoteDescriptor(*values, selection_offset=captured.selection_offset), record
     descriptor = kind(*values, **extra)
     return descriptor, record
 
@@ -51,7 +67,7 @@ class ConversationQuotes:
     def image_event(event, quote):
         return QuoteImageEvent(event.event_id, event.principal, event.scope, quote_reference(event.source, quote.position),
             event.capability, quote.content_hash, event.received_at, event.runtime_scope,
-            quote.images, quote.sender_id, quote.message_id)
+            quote.images, quote.sender_id, quote.message_id, getattr(quote, "forward_origin", None))
 
     @staticmethod
     def forward_event(event, quote):
@@ -77,10 +93,12 @@ class ConversationQuotes:
 
     @staticmethod
     def metadata(event, quote, text):
+        origin = getattr(quote, "forward_origin", None)
         return encode({"text": text, "original_message_id": quote.message_id, "sender": quote.sender_id,
             "sent_at_unix": quote.sent_at, "quoted_by": event.principal.native_account_id,
             "quoting_source_id": event.source.source_id, "position": quote.position,
-            "attribution": "sending_account_only", "original_author": "unknown"})
+            "attribution": "sending_account_only", "original_author": "unknown",
+            **({"forwarded_by": quote.sender_id, "telegram_forward_origin": origin} if origin else {})})
 
     def _parent(self, context, event, at):
         self.messages.authorize(context, at)

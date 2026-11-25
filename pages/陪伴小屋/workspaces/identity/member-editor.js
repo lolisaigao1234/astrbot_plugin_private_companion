@@ -1545,7 +1545,7 @@
     for (const item of history.records) {
       const row = element("article", undefined, "member-linked-record");
       if (item.delivery_scope) row.append(element("small", `实际发送：${item.delivery_scope.platform} · ${item.delivery_scope.native_scope_id}（下方保留原记录归属）`));
-      row.append(element("small", `${item.scope.platform} · ${item.scope.native_scope_id} · ${item.speaker === "user" ? "用户" : "角色"} · ${item.at}`), element("p", item.text)); box.append(row);
+      row.append(element("small", `${item.scope.platform} · ${item.scope.native_scope_id} · ${item.speaker === "user" ? "用户" : item.speaker === "observation" ? "引用或转发" : "角色"} · ${item.at}`), element("p", item.text)); box.append(row);
     }
     if (history.cursor) {
       const more = element("button", "读取更早记录", "secondary"); more.type = "button"; more.disabled = history.busy;

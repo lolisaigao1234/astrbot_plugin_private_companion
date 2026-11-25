@@ -99,6 +99,13 @@ def core_decision_facts(event, prepared, application, *, at):
     native, context = prepared.get("native_input"), prepared.get("context")
     scope = getattr(context, "scope", None)
     account = str(getattr(scope, "account_id", "") or "")
+    telegram = getattr(getattr(event, "platform_meta", None), "name", None) == "telegram"
+    if telegram:
+        # AstrBot's instance key can be numeric and match an unrelated participant.
+        try:
+            account = str(getattr(getattr(event, "client", None), "id", None) or "")
+        except RuntimeError:  # python-telegram-bot has not initialized the bot user.
+            account = ""
     sender = str(getattr(getattr(native, "principal", None), "native_account_id", "") or "")
     text = str(prepared.get("text", getattr(native, "text", getattr(event, "message_str", ""))) or "")
     text = getattr(native, "group_message_text", None) or text
@@ -114,17 +121,18 @@ def core_decision_facts(event, prepared, application, *, at):
     def quotes_bot(value, depth=0):
         if depth > 4:
             return False
-        if account and str(getattr(value, "sender_id", "")) == account:
+        if getattr(value, "companion_sender", False) or (account and str(getattr(value, "sender_id", "")) == account):
             return True
         return any(quotes_bot(child, depth + 1) for name in ("quotes", "forwards", "nodes")
                    for child in (getattr(value, name, ()) or ()))
 
+    private_telegram = telegram and prepared.get("channel") == "private"
     facts = {
         "scope_kind": prepared.get("channel"),
         "message_kind": "text" if text else "image" if has_image else "audio" if has_audio else "video" if has_video else "text",
         "user_text": text[:12000], "speaker_id": sender, "bot_account_id": account,
         "is_bot_message": bool(account and sender == account),
-        "quoted_bot_message": trigger["quoted_bot"] or any(quotes_bot(item) for name in ("quotes", "forwards")
+        "quoted_bot_message": (not private_telegram and trigger["quoted_bot"]) or any(quotes_bot(item) for name in ("quotes", "forwards")
             for item in (getattr(native, name, ()) or ())),
         "mentioned": trigger["mentioned"], "native_wakeup": trigger["native_wakeup"],
         "mentions_others": trigger["mentions_others"], "has_image": has_image,

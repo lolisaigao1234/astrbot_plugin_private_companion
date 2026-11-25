@@ -60,6 +60,7 @@ from .astrbot_host.core_reply_tool_guard import (
     close_core_reply_tool_guard, install_core_reply_tool_guard, mark_managed_turn,
 )
 from .astrbot_host.core_reply_mentions import prepare_bare_mention_request
+from .astrbot_host.binding import telegram_forward_message
 from .astrbot_host.core_reply_forwards import (
     apply_debounced_private_merge,
     await_event_forwards_parsed,
@@ -77,7 +78,8 @@ from .astrbot_host.core_reply_forwards import (
     merge_followup_forwards,
     parse_event_forwards,
     prepare_forward_only_request,
-    private_debounce_input,
+    forward_album_key, private_debounce_input, wait_for_quoted_forward,
+    telegram_private_forward,
     resolve_forward_intake_policy,
 )
 from .astrbot_host.core_reply_native_send import inject_core_reply_send_tool
@@ -471,6 +473,9 @@ class PrivateCompanionV2StagingPlugin(Star):
         if message_id is None or message_id == "":
             return False
         key = (str(getattr(target, "target_id", "") or ""), str(message_id))
+        album = forward_album_key(key[0], telegram_forward_message(event))
+        if album:  # Replies to any of its photos can tell that the album has already arrived.
+            self._private_delivery_dedup().duplicate(album)
         return self._private_delivery_dedup().duplicate(key)
 
     def _private_reply_followups(self):
@@ -558,6 +563,9 @@ class PrivateCompanionV2StagingPlugin(Star):
         active_window = self._private_reply_followups().active_for(target_key)
         if active_window is None:
             return False
+        # A comment arriving after a forward belongs to the newer collecting turn.
+        if self._private_debounce_manager().collecting_event(target_key, telegram_private_forward):
+            return False
         guard = getattr(self, "_core_followup_guard", None)
         if guard is not None and guard.has_pending_media_barrier(
                 event, owner_event=active_window.event):
@@ -589,8 +597,14 @@ class PrivateCompanionV2StagingPlugin(Star):
         extra_text = "\n".join(str(item[1]).strip() for item in pending if str(item[1]).strip())
         if not extra_text and not forwards_updated:
             return
+        prepared = prepared_state.get("prepared") if isinstance(prepared_state, dict) else None
         if extra_text:
             prompt = getattr(request, "prompt", None)
+            query_text = extra_text
+            original = prepared.get("native_input") if isinstance(prepared, dict) else None
+            if getattr(original, "forward_origin", "") or getattr(original, "telegram_burst", ()):
+                from .astrbot_host.telegram_forward_burst import sender_section
+                prompt, extra_text = sender_section(original, prompt, extra_text)
             if isinstance(prompt, str) and prompt.strip():
                 request.prompt = prompt.rstrip() + "\n" + extra_text
             else:
@@ -598,10 +612,9 @@ class PrivateCompanionV2StagingPlugin(Star):
             if hasattr(request, "retrieval_query"):
                 current_query = getattr(request, "retrieval_query", None)
                 if isinstance(current_query, str) and current_query.strip():
-                    request.retrieval_query = current_query.rstrip() + "\n" + extra_text
+                    request.retrieval_query = current_query.rstrip() + "\n" + query_text
                 else:
                     request.retrieval_query = request.prompt
-        prepared = prepared_state.get("prepared") if isinstance(prepared_state, dict) else None
         if isinstance(prepared, dict):
             base = str(prepared.get("text") or "").rstrip()
             if forwards_updated:
@@ -634,6 +647,8 @@ class PrivateCompanionV2StagingPlugin(Star):
                                           *, reason="private_debounce_merged"):
         if manager.superseded_by_same_event(reservation, event):
             return False
+        from .astrbot_host.telegram_forward_burst import keep_burst_files
+        keep_burst_files(event, reservation.pending.owner)
         self._suppress_merged_private_event(event, target, event_ref, reason=reason)
         return True
 
@@ -1215,7 +1230,10 @@ class PrivateCompanionV2StagingPlugin(Star):
                 # 名单在决策页管理；命中后本条不再进入模型或记忆。
                 suppress_default_reply(event)
                 return
-        if channel == "private" and getattr(target, "participant_id", None):
+        forwarded = channel == "private" and telegram_private_forward(event)
+        if forwarded:
+            self._private_reply_followups().seal(target.target_id)
+        elif channel == "private" and getattr(target, "participant_id", None):
             processor = getattr(self.staging, "process_private_relay_receipts", None)
             if callable(processor):
                 await processor(event, target)
@@ -1249,7 +1267,7 @@ class PrivateCompanionV2StagingPlugin(Star):
                 self._record_no_reply(event, "group_llm_blocked", origin_key=origin_key,
                                       channel=channel, event_ref=event_ref, stage="admission")
                 return
-        if channel == "private":
+        if channel == "private" and not forwarded:
             phone_command = await receive_phone_confirmation(self.staging, event, target=target)
             if phone_command is not None:
                 suppress_default_reply(event)
@@ -1272,18 +1290,27 @@ class PrivateCompanionV2StagingPlugin(Star):
                 else:
                     logger.info("[CompanionV2] 全部重置由专用流程处理 event_ref=%s", event_ref)
                 return
-        is_calendar_command = (channel == "private"
+        is_calendar_command = (channel == "private" and not forwarded
                                and parse_calendar_command(str(getattr(event, "message_str", "") or "")))
-        debounce_input = (private_debounce_input(event)
+        target_key = getattr(target, "target_id", None) if channel == "private" else None
+        if target_key and not is_calendar_command:
+            await wait_for_quoted_forward(event, target, self._private_debounce_manager(),
+                                          getattr(self.staging, "prepare_core_reply_context", None),
+                                          self._private_delivery_dedup().seen)
+        debounce_input = (private_debounce_input(event, collecting=self._private_debounce_manager().collecting_event,
+                                                  target_key=target_key)
                           if channel == "private" and not is_calendar_command else None)
         plain_text = debounce_input[0] if debounce_input is not None else None
         event_has_forward = (debounce_input[1] if debounce_input is not None
                              else event_has_top_level_forwards(event))
         forward_policy = (resolve_forward_intake_policy(self.staging)
                           if event_has_forward else None)
-        target_key = getattr(target, "target_id", None) if channel == "private" else None
-        if (plain_text is not None and isinstance(target_key, str) and target_key
-                and self._private_reply_followups().active_for(target_key) is not None):
+        followups = self._private_reply_followups() if plain_text is not None and target_key else None
+        earlier_reply = followups.active_for(target_key) if followups is not None else None
+        # Telegram can send the requester's comment before the forwarded updates.
+        # Let the private debounce window settle before assigning it to an older turn.
+        defer_followup = earlier_reply is not None and getattr(getattr(event, "platform_meta", None), "name", None) == "telegram"
+        if earlier_reply is not None and not forwarded and not defer_followup:
             if event_has_forward:
                 await parse_event_forwards(
                     event, policy=forward_policy,
@@ -1298,7 +1325,7 @@ class PrivateCompanionV2StagingPlugin(Star):
             debounce_manager = self._private_debounce_manager()
             debounce_pending = debounce_manager.reserve(target_key, event, plain_text)
         forward_parse_task = None
-        if event_has_forward:
+        if event_has_forward and not forwarded:
             if debounce_pending is not None:
                 forward_parse_task = ensure_event_forwards_parsed(
                     event, policy=forward_policy,
@@ -1467,7 +1494,7 @@ class PrivateCompanionV2StagingPlugin(Star):
                 else:
                     policy = None
                 burst_has_forwards = event_has_forward or any(
-                    event_has_top_level_forwards(item[0])
+                    event_has_top_level_forwards(item[0]) or telegram_private_forward(item[0])
                     for item in debounce_pending.pending.entries
                 )
                 effective_policy = forward_burst_debounce_policy(
@@ -1481,8 +1508,18 @@ class PrivateCompanionV2StagingPlugin(Star):
                         debounced_entries = await debounce_manager.finish(debounce_pending, event)
                         if debounced_entries is None:
                             status = "superseded"
-                    if status == "ready" and debounced_entries:
+                    telegram_burst = debounced_entries and any(
+                        telegram_private_forward(entry[0]) for entry in debounced_entries)
+                    if status == "ready" and telegram_burst:
+                        if len(debounced_entries) > 1 and core_reply_plan is not None:
+                            from .astrbot_host.telegram_forward_burst import merge_forward_burst
+                            core_reply_plan = await merge_forward_burst(
+                                event, target, core_reply_plan, debounced_entries, prepare_context)
+                    elif status == "ready" and debounced_entries:
                         merged_text = debounce_manager.combined(debounce_pending, debounced_entries)
+                        if (defer_followup and followups.active_for(target_key) is earlier_reply
+                                and self._fold_private_follow_up(event, target, event_ref, merged_text)):
+                            return
                         aggregated_forwards = await coalesce_debounced_forwards(
                             event, debounced_entries,
                             policy=forward_policy or resolve_forward_intake_policy(self.staging),
@@ -1499,6 +1536,9 @@ class PrivateCompanionV2StagingPlugin(Star):
                         if core_reply_plan is not None:
                             plan_text = combine_text_and_forward_summary(merged_text, aggregated_forwards)
                             core_reply_plan = self._core_reply_plan_with_text(core_reply_plan, plan_text)
+                if (status == "bypass" and defer_followup and followups.active_for(target_key) is earlier_reply
+                        and self._fold_private_follow_up(event, target, event_ref, plain_text)):
+                    return
                 if status == "bypass" and forward_parse_task is not None:
                     parsed = await await_event_forwards_parsed(
                         event, policy=forward_policy,

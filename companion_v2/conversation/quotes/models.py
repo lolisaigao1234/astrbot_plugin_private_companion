@@ -7,7 +7,7 @@ from companion_v2.conversation.media.models import (
     CapturedImage, ImageConversationEvent, ImageDescriptor, check_manifest, fits_budget,
 )
 from companion_v2.conversation.media.codec import image_descriptor
-from companion_v2.execution.models import TaskError
+from companion_v2.execution.models import TaskError, digest
 
 
 OWNER = "conversation.quote"
@@ -72,6 +72,47 @@ class CapturedQuote:
         check_quote(self.position, self.message_id, self.sender_id, self.sent_at, tuple(i.descriptor for i in self.images))
 
 
+def prompt_label(label):
+    """Keep a platform-supplied name from forging another prompt section."""
+    return " ".join(label.splitlines()).strip().replace("[", "［").replace("]", "］")
+
+
+@dataclass(frozen=True)
+class TelegramForwardOrigin:
+    kind: str
+    label: str
+    sent_at: int
+    user_id: str | None
+    chat_fingerprint: str | None = None
+
+    def resource_hash(self, message_id):
+        fields = ["telegram-forward", message_id, self.label, self.sent_at]
+        # Existing user-origin nodes separately prove the original Telegram user ID.
+        if self.user_id is None:
+            fields.append(self.kind)
+        if self.chat_fingerprint:
+            fields.append(self.chat_fingerprint)
+        return digest(fields)
+
+    def attribution(self, sender):
+        return f"转发者 {sender}，转发来源 {self.kind}：{prompt_label(self.label) or '未知'}，来源时间 {self.sent_at}"
+
+
+@dataclass(frozen=True)
+class TelegramQuote(CapturedQuote):
+    companion_sender: bool = False
+    selection_offset: int | None = None
+
+    link_suffixes: tuple = ()
+
+    forward_origin: TelegramForwardOrigin | None = None
+
+    def observation_text(self):
+        sender = f"伙伴 ({self.sender_id})" if self.companion_sender else self.sender_id
+        attribution = self.forward_origin.attribution(sender) if self.forward_origin else f"原发送者 {sender}"
+        return f"[引用消息 {self.message_id}，{attribution}，时间 {self.sent_at}]\n{self.text}"
+
+
 @dataclass(frozen=True)
 class QuoteDescriptor:
     position: int
@@ -89,6 +130,15 @@ class QuoteDescriptor:
 
     @classmethod
     def restore(cls, data):
+        if "selection_offset" in data:
+            fields = {**data, "images": tuple(image_descriptor(i) for i in data["images"])}
+            if "link_suffixes" in fields:
+                fields["link_suffixes"] = tuple(tuple(item) for item in fields["link_suffixes"])
+                if "forward_origin" in fields:
+                    fields["forward_origin"] = TelegramForwardOrigin(**fields["forward_origin"])
+                    return TelegramForwardedQuoteDescriptor(**fields)
+                return TelegramLinkedQuoteDescriptor(**fields)
+            return TelegramQuoteDescriptor(**fields)
         if "forwards" in data:
             from .forward_models import ForwardQuoteDescriptor
             return ForwardQuoteDescriptor.restore(data)
@@ -96,6 +146,22 @@ class QuoteDescriptor:
             from .forward_models import QuoteMediaDescriptor
             return QuoteMediaDescriptor.restore(data)
         return cls(**{**data, "images": tuple(image_descriptor(i) for i in data["images"])})
+
+
+@dataclass(frozen=True)
+class TelegramQuoteDescriptor(QuoteDescriptor):
+    selection_offset: int | None = None
+
+
+@dataclass(frozen=True)
+class TelegramLinkedQuoteDescriptor(TelegramQuoteDescriptor):
+    link_suffixes: tuple = ()
+
+
+@dataclass(frozen=True, kw_only=True)
+class TelegramForwardedQuoteDescriptor(TelegramLinkedQuoteDescriptor):
+    forward_origin: TelegramForwardOrigin
+    origin_resource_hash: str
 
 
 def event_forwards(event):
@@ -146,8 +212,11 @@ class QuoteImageEvent(ImageConversationEvent):
 
     original_sender: str = ""
     original_message_id: str = ""
+    forward_origin: TelegramForwardOrigin | None = None
 
     @property
     def image_attribution(self):
         return {"sender": self.original_sender, "quoted_by": self.principal.native_account_id,
-                "original_message_id": self.original_message_id}
+                "original_message_id": self.original_message_id,
+                **({"forwarded_by": self.original_sender, "telegram_forward_origin": self.forward_origin}
+                   if self.forward_origin else {})}

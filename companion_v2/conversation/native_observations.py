@@ -32,11 +32,12 @@ from .recalls import CONSUMER as RECALL_CONSUMER, MessageRecall
 
 INPUT_OWNER = "conversation.native_input"
 ASSISTANT_OWNER = "conversation.native_assistant"
+REFERENCE_OWNER = "conversation.native_reference"
 TOGETHER_INPUT_OWNER = "conversation.together_input"
 TOGETHER_ASSISTANT_OWNER = "conversation.together_assistant"
 TOGETHER_OWNERS = frozenset({TOGETHER_INPUT_OWNER, TOGETHER_ASSISTANT_OWNER})
 REALITY_ASSISTANT_OWNER = "conversation.reality_assistant"
-NATIVE_OWNERS = frozenset({INPUT_OWNER, ASSISTANT_OWNER, REALITY_ASSISTANT_OWNER}) | TOGETHER_OWNERS
+NATIVE_OWNERS = frozenset({INPUT_OWNER, REFERENCE_OWNER, ASSISTANT_OWNER, REALITY_ASSISTANT_OWNER}) | TOGETHER_OWNERS
 NATIVE_FEEDS = frozenset({"native_human", "native_reply"})
 logger = logging.getLogger(__name__)
 
@@ -66,8 +67,9 @@ def input_rows_for_context(runtime, context, *, start=None, end=None, after_sequ
     """Original member inputs in the exact current private window or group binding."""
     if not observations_available(runtime):
         return ()
-    clauses = ["n.kind = 'input'", "n.delivery_state = 'input_observed'"]
-    values = []
+    clauses = ["n.kind = 'input'", "n.delivery_state = 'input_observed'",
+               "json_extract(n.source_json, '$.owner') IS NOT ?"]
+    values = [REFERENCE_OWNER]
     if context.scope.kind is ScopeKind.PRIVATE:
         clauses.append("n.context_key = ?")
         values.append(context.key)
@@ -135,18 +137,28 @@ def validate_observation(runtime, row, context, reference, *, original=None, rec
             ) is not None
         if is_recalled:
             raise TaskError("message_withdrawn", "the native input was withdrawn")
+        if reference.owner == REFERENCE_OWNER:
+            return None, "observation"
         return original.actor.subject.subject_id, "human_message"
     return (original.role_binding.role.subject_id,
             "bot_message" if row["delivery_state"] == "send_returned" else "observation")
 
 
-def rows_for_context(runtime, context, *, start=None, end=None, limit=None):
+def history_speaker(runtime, row, context, reference):
+    _, source_kind = validate_observation(runtime, row, context, reference)
+    return {"human_message": "user", "bot_message": "assistant", "observation": "observation"}[source_kind]
+
+
+def rows_for_context(runtime, context, *, start=None, end=None, limit=None, include_references=True):
     if context.scope.kind is not ScopeKind.PRIVATE or not observations_available(runtime):
         return ()
     has_sends = table_exists(runtime, "conversation_native_sends")
     where = ["n.memory_owner = ?", "n.scope_kind = 'private'",
              "n.delivery_state IN ('input_observed', 'send_returned')"]
     values = [owner_key(context)]
+    if not include_references:
+        where.append("json_extract(n.source_json, '$.owner') IS NOT ?")
+        values.append(REFERENCE_OWNER)
     if start is not None:
         where.append("n.effective_at >= ?")
         values.append(start)
@@ -202,24 +214,42 @@ class NativeConversationObservations:
         return min(64, len(accounts))
 
     def capture_input(self, context, native_input, *, turn_id):
+        from .native_turns import NativeConversationTurns
+        inputs = getattr(native_input, "telegram_burst", ()) or (native_input,)
+        own = reference = None
+        with self.runtime.transaction():
+            for original in inputs:
+                reference = self._capture_input_source(context, original, turn_id) or reference
+                if reference is not None and reference.owner != REFERENCE_OWNER:
+                    own = reference
+            # Forwarded and quoted words are never the turn's authenticated input.
+            NativeConversationTurns(self.runtime).admit(context, native_input, turn_id, own)
+        return own or reference
+
+    def _capture_input_source(self, context, native_input, turn_id):
         if (context.scope != native_input.route.scope or context.actor.principal != native_input.principal
                 or context.role_binding.role != native_input.role or context.audience != native_input.recipients):
             raise TaskError("native_observation_context_changed", "native input must keep its verified identity and route")
         self.messages.recalls.check(context.scope, native_input.event_id,
                                    context.actor.principal.native_account_id)
-        from .native_turns import NativeConversationTurns
-        if not native_input.text.strip():
-            NativeConversationTurns(self.runtime).admit(context, native_input, turn_id, None)
-            return None
+        text = native_input.text
+        from .quotes.models import TelegramQuote
+        references = [q.observation_text() for q in getattr(native_input, "quotes", ()) if isinstance(q, TelegramQuote)]
+        forwarded = bool(getattr(native_input, "forward_origin", ""))
         identifier = "core-input-" + digest([context.scope, context.role_binding.role,
                                              context.actor.subject, native_input.event_id])
-        reference = self._record(context, identifier, turn_id, native_input.event_id, native_input.text,
-                                 native_input.at, kind="input", state="input_observed",
-                                 awareness_enabled=self._awareness_enabled(context),
-                                 peer_count=self._peer_count(context, native_input.at),
-                                 quote_sender_ids=tuple(
-                                     quote.sender_id for quote in getattr(native_input, "quotes", ())))
-        NativeConversationTurns(self.runtime).admit(context, native_input, turn_id, reference)
+        reference = None
+        if references:
+            reference = self._record(context, identifier + "-quote", turn_id, native_input.event_id,
+                "\n".join(references), native_input.at, kind="input", state="input_observed",
+                source_owner=REFERENCE_OWNER)
+        if text.strip():
+            reference = self._record(context, identifier, turn_id, native_input.event_id, text,
+                native_input.at, kind="input", state="input_observed",
+                source_owner=REFERENCE_OWNER if forwarded else INPUT_OWNER,
+                awareness_enabled=self._awareness_enabled(context),
+                peer_count=self._peer_count(context, native_input.at),
+                quote_sender_ids=tuple(q.sender_id for q in getattr(native_input, "quotes", ())))
         return reference
 
     def capture_output(self, context, *, turn_id, event_id, text, at, state="output_observed"):
@@ -300,7 +330,7 @@ class NativeConversationObservations:
                     VALUES (?, ?, ?, ?)""", (conversation_owner(context),
                     "native_human" if kind == "input" else "native_reply", identifier,
                     digest([reference, state, record.content_hash])))
-            if kind == "input" and existing is None:
+            if kind == "input" and existing is None and owner != REFERENCE_OWNER:
                 self._observe_input(connection, context, inbound_event({
                     "event_id": event_id, "context_json": encode(context), "source_json": encode(reference),
                     "content_hash": record.content_hash, "observed_at": stamp(issued_at)}), record.payload,

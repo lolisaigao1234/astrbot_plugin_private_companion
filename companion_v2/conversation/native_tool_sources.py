@@ -6,21 +6,23 @@ from datetime import datetime
 from companion_v2.execution.models import TaskContext, TaskError, digest, encode, require
 
 from .messages import source_from_document
-from .native_observations import observations_available, validate_observation
+from .native_observations import REFERENCE_OWNER, observations_available, validate_observation
 
 
 def native_turn(turn_id):
     return isinstance(turn_id, str) and turn_id.startswith("core-reply:")
 
 
-def input_row(messages, context, turn_id):
+def input_row(messages, context, turn_id, *, references=False):
+    """The sender's latest own words in this turn; quoted and forwarded words only count as presence."""
     require(messages.tasks.check_context_access(context, action="conversation.reply", observed_at=messages.tasks.now()))
     if not observations_available(messages.runtime):
         raise TaskError("native_tool_source_unavailable", "the native message observation is unavailable")
     row = messages.runtime.read_one("""SELECT * FROM conversation_native_observations
-        WHERE turn_id = ? AND context_key = ? AND kind = 'input' AND delivery_state = 'input_observed'""",
-        (turn_id, context.key))
-    if row is None:
+        WHERE turn_id = ? AND context_key = ? AND kind = 'input' AND delivery_state = 'input_observed'
+        ORDER BY json_extract(source_json, '$.owner') IS ?, rowid DESC LIMIT 1""",
+        (turn_id, context.key, REFERENCE_OWNER))
+    if row is None or not references and json.loads(row["source_json"])["owner"] == REFERENCE_OWNER:
         raise TaskError("native_tool_source_unavailable", "this native tool turn has no authenticated input")
     reference = source_from_document(json.loads(row["source_json"]))
     validate_observation(messages.runtime, row, context, reference)
@@ -31,7 +33,7 @@ def input_row(messages, context, turn_id):
 def validate_tool_turn(messages, context, turn_id, *, evidence=True):
     if native_turn(turn_id):
         if evidence:
-            return input_row(messages, context, turn_id)
+            return input_row(messages, context, turn_id, references=True)
         return require(messages.tasks.check_context_access(context, action="conversation.reply",
                                                           observed_at=messages.tasks.now()))
     return messages.owned(context, turn_id)

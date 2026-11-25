@@ -97,7 +97,8 @@ async def execute_core_authoring(session, wrapper, call_id, action, arguments):
                 or row["generation_state"] not in ("prepared", "running")):
             raise TaskError("content_authoring_request_mismatch", "the original native writing turn changed")
         event = input_event(app.messages, row, app.tasks.now())
-        if event.event_id != native_input.event_id:
+        originals = getattr(native_input, "telegram_burst", ()) or (native_input,)
+        if event.event_id not in [item.event_id for item in originals]:
             raise TaskError("content_authoring_request_mismatch", "the native writing input changed")
         return event
 

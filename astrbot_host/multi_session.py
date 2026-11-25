@@ -153,7 +153,7 @@ class MultiPrivateBridge(NativePrivateBridge):
         return super().client(scope)
 
     @staticmethod
-    def _core_reply_non_forward_text(event) -> str:
+    def _core_reply_non_forward_text(event, *, parts=None) -> str:
         """Extract private baseline text (Plain, stickers, Face/Mface, trusted STT) without forwards."""
         from companion_v2.adapters.astrbot.voice_stt import VOICE_TRANSCRIPT_PREFIX, trusted_stt_transcript
 
@@ -161,7 +161,7 @@ class MultiPrivateBridge(NativePrivateBridge):
         stt_text = trusted_stt_transcript(event)
         stt_used = False
         pieces = []
-        for part in getattr(message, "message", ()):
+        for part in parts if parts is not None else getattr(message, "message", ()):
             kind = getattr(getattr(part, "type", None), "value", getattr(part, "type", None))
             if kind == "Plain" and isinstance(getattr(part, "text", None), str):
                 if stt_text and part.text.strip() == "[语音消息]" and not stt_used:
@@ -212,6 +212,16 @@ class MultiPrivateBridge(NativePrivateBridge):
                     or not native_client_connected(platform, login)):
                 raise TaskError("host_client_mismatch", "private event did not originate from the connected account client")
 
+            telegram = None
+            parts = None
+            if meta.name == "telegram":
+                from companion_v2.adapters.astrbot.telegram_references import private_references, private_text_parts
+                telegram = private_references(event)
+                parts = private_text_parts(message, message.message)
+                if telegram.unavailable:
+                    # AstrBot also reads Reply chains when collecting provider attachments and text.
+                    message.message = [part for part in message.message
+                                       if getattr(part.type, "value", part.type) != "Reply"]
             connection_lease = self.connections.acquire(account)
             event_id = native_id(message.message_id)
             at = datetime.fromtimestamp(event.created_at, timezone.utc)
@@ -230,10 +240,16 @@ class MultiPrivateBridge(NativePrivateBridge):
             recipients = AudienceRef(scope, (actor.subject,))
             from .core_reply_forwards import combine_text_and_forward_summary, get_parsed_forwards
             text = combine_text_and_forward_summary(
-                self._core_reply_non_forward_text(event), get_parsed_forwards(event))
+                self._core_reply_non_forward_text(event, parts=parts), get_parsed_forwards(event))
+            if telegram:
+                text = telegram.quote_availability(text)
+                if telegram.forward_origin:
+                    text = f"{telegram.forward_marker}\n{text}"
             return Outcome.success(NativeConversationInput(
                 event_id, principal, ConversationRoute(scope, user=actor.subject), recipients,
                 text, at, role, instruction,
+                quotes=(telegram.quote,) if telegram and telegram.quote else (),
+                forward_origin=telegram.forward_origin if telegram else "",
             ))
         except TaskError as error:
             return Outcome.failed(error.code, str(error))

@@ -68,6 +68,7 @@ class PrivateDebounce:
                                     if resolution_timeout is not None and resolution_timeout > 0 else None)
         self._pending: dict[str, Pending] = {}
         self._lock = asyncio.Lock()
+        self._arrival_waiters = {}
         self._sequence = 0
         self._closed = False
 
@@ -110,6 +111,27 @@ class PrivateDebounce:
                 timing_text=self._timing(pending),
             )
 
+    def collecting_event(self, key, predicate):
+        pending = self._pending.get(key)
+        return (pending is not None and pending.state in {"collecting", "active"}
+                and any(predicate(event) for event, _, _ in pending.entries))
+
+    async def wait_for_event(self, key, predicate, timeout):
+        """Wait for the specific quoted update while its native collection window is open."""
+        if self._closed or self.collecting_event(key, predicate):
+            return
+        waiter = asyncio.get_running_loop().create_future()
+        waiting = self._arrival_waiters.setdefault(key, {})
+        waiting[waiter] = predicate
+        try:
+            await asyncio.wait_for(waiter, timeout)
+        except asyncio.TimeoutError:
+            pass
+        finally:
+            waiting.pop(waiter, None)
+            if not waiting:
+                self._arrival_waiters.pop(key, None)
+
     def reserve(self, key, event, text, *, received_at=None):
         """Register an event before the handler's first await.
 
@@ -120,6 +142,9 @@ class PrivateDebounce:
             return None
         if self.policy is not None and not self.policy.enabled:
             return None
+        for waiter, predicate in self._arrival_waiters.get(key, {}).items():
+            if not waiter.done() and predicate(event):
+                waiter.set_result(None)
         self._sequence += 1
         ticket = self._sequence
         received = self._clock() if received_at is None else received_at
@@ -411,6 +436,10 @@ class PrivateDebounce:
     async def close(self):
         async with self._lock:
             self._closed = True
+            for waiting in self._arrival_waiters.values():
+                for waiter in waiting:
+                    if not waiter.done():
+                        waiter.set_result(None)
             pending = tuple(self._pending.values())
             self._pending.clear()
             for item in pending:
@@ -438,6 +467,11 @@ class PrivateDeliveryDedup:
         self.limit = limit
         self._clock = clock
         self._seen: dict[tuple[str, str], float] = {}
+
+    def seen(self, key: tuple[str, str]) -> bool:
+        """Check a previous delivery without extending its lifetime."""
+        previous = self._seen.get(key)
+        return previous is not None and self._clock() - previous < self.ttl_seconds
 
     def duplicate(self, key: tuple[str, str]) -> bool:
         """Record one delivery and report whether it is already in the window."""

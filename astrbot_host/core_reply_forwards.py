@@ -34,6 +34,7 @@ from urllib.parse import urlsplit
 
 from companion_v2.conversation.forwards.models import ForwardIntakePolicy
 
+from .binding import telegram_forward_message
 from .core_reply_mentions import _resolve_session_conversation
 
 
@@ -121,7 +122,61 @@ def event_will_enter_astrbot_llm(event: Any) -> bool:
     return event_has_media_or_reply(event)
 
 
-def private_debounce_input(event: Any) -> tuple[str, bool] | None:
+def telegram_private_forward(event):
+    raw = telegram_forward_message(event)
+    return getattr(getattr(raw, "chat", None), "type", "") == "private"
+
+
+def quoted_telegram_forward(event):
+    raw = getattr(getattr(event.message_obj, "raw_message", None), "message", None)
+    original = getattr(raw, "reply_to_message", None)
+    if (not original or getattr(raw, "external_reply", None) or not (raw.text or raw.caption)
+            or original.chat.id != raw.chat.id):
+        return None
+
+    def matches(candidate):
+        forward = telegram_forward_message(candidate)
+        # AstrBot merges an album into one event that carries its first message.
+        return (forward is not None and candidate.client is event.client and forward.chat.id == raw.chat.id
+                and (forward.message_id == original.message_id
+                     or original.media_group_id is not None and forward.media_group_id == original.media_group_id))
+    return matches
+
+
+def forward_album_key(target_id, message):
+    """Delivery key shared by every message of one forwarded album."""
+    album = getattr(message, "media_group_id", None)
+    return (str(target_id), f"album:{album}") if album else None
+
+
+async def wait_for_quoted_forward(event, target, manager, prepare_context, delivery_seen):
+    """Telegram can finish converting a reply before the forward it addresses."""
+    if not callable(prepare_context) or getattr(getattr(event, "platform_meta", None), "name", None) != "telegram":
+        return
+    raw = getattr(getattr(event.message_obj, "raw_message", None), "message", None)
+    original = getattr(raw, "reply_to_message", None)
+    if not getattr(original, "forward_origin", None) or telegram_private_forward(event):
+        return
+    matches = quoted_telegram_forward(event)
+
+    def finished():
+        album = forward_album_key(target.target_id, original)
+        return delivery_seen((target.target_id, str(original.message_id))) or (album and delivery_seen(album))
+    if matches is None or finished():
+        return
+    try:
+        result = await prepare_context(event, target, group_admission=None)
+    except Exception:
+        return  # The ordinary quote path will authenticate the event before dispatch.
+    if result.failure is not None:
+        return
+    policy = result.unwrap().debounce
+    if (policy and policy.enabled and (raw.date - original.date).total_seconds() <= policy.total_seconds
+            and not finished()):
+        await manager.wait_for_event(target.target_id, matches, policy.max_seconds)
+
+
+def private_debounce_input(event: Any, *, collecting=None, target_key=None) -> tuple[str, bool] | None:
     """Extract ``(plain_text, has_forward)`` for private-debounce-eligible messages.
 
     Accepts private messages made solely of ``Plain``, top-level
@@ -135,6 +190,30 @@ def private_debounce_input(event: Any) -> tuple[str, bool] | None:
                        getattr(message_obj, "type", None))
     if msg_type != "FriendMessage":
         return None
+    if telegram_private_forward(event):
+        # Native text belongs to the original speaker, never the owner's comment.
+        return "", True
+    if getattr(getattr(event, "platform_meta", None), "name", None) == "telegram":
+        raw = getattr(getattr(message_obj, "raw_message", None), "message", None)
+        if getattr(raw, "external_reply", None):
+            return None
+        original = getattr(raw, "reply_to_message", None)
+        if original is not None or getattr(raw, "quote", None):
+            matches = quoted_telegram_forward(event)
+            if not matches or not collecting or not target_key or not collecting(target_key, matches):
+                return None
+            components = _message_components(event)
+            allowed = {"Plain", "Reply", "At"}
+            if raw.caption:
+                allowed.update(("Image", "Record", "Video", "File"))
+            if any(component_kind(part) not in allowed for part in components):
+                return None
+            if any(component_kind(part) == "At" for part in components):
+                from companion_v2.adapters.astrbot.telegram_references import private_text_parts
+                components = private_text_parts(message_obj, components)
+            text = "".join(part.text for part in components if component_kind(part) == "Plain")
+            text = text or raw.caption or ""
+            return (text, False) if text.strip() else None
     parts = _message_components(event)
     if not parts:
         return None
