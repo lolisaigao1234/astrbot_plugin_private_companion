@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from types import SimpleNamespace
 
 from companion_v2.foundation.refs import ScopeKind
@@ -14,20 +13,6 @@ from .relay_pending import (claim_expired, claim_group, claim_private_receipts, 
                             mark_waiting_permission, release_unprocessed_telegram_claim, requeue)
 
 
-# Match the complete QQ answer, including common courtesies around an affirmative
-# clause. An approval verb inside a question, quotation or refusal grants nothing.
-_QQ_PAUSE = r"[，,。.!！、 ]*"
-_QQ_ASSENT = (r"(?:我(?:当然)?同意|(?:当然)?(?:可以|同意|好|行|没问题))"
-              r"(?:的|滴|哒|嘞)?(?:呀|啊|哦|吧|啦|呢|(?<=可以)了|(?<=同意)了)?")
-_QQ_SHARE = (r"(?:请|麻烦)?(?:你(?:可以)?)?(?:帮我)?"
-             r"(?:(?:转告|转发|带回去|告诉[他她])(?:给?[他她]|给对方)?|[跟和](?:[他她]|对方)说)(?:一[下声])?(?:吧)?")
-_QQ_PERMISSION = re.compile(
-    rf"(?:不好意思(?:{_QQ_PAUSE}刚看到)?|刚看到|嗯嗯?|没问题|没什么不好|没事|那|是的?|对的?)?{_QQ_PAUSE}"
-    rf"(?:{_QQ_ASSENT}(?:{_QQ_PAUSE}{_QQ_ASSENT}){{0,2}}(?:{_QQ_PAUSE}{_QQ_SHARE})?|{_QQ_SHARE})"
-    rf"(?:{_QQ_PAUSE}(?:谢谢你?|麻烦你了|辛苦了|没关系))?[。！!.~～]*"
-)
-
-
 def _text(value, limit=800):
     return " ".join(str(value or "").split())[:limit]
 
@@ -36,6 +21,14 @@ def _telegram_account(event, target):
     if getattr(getattr(event, "platform_meta", None), "name", "") == "telegram":
         return [target.platform_id, target.account_id]
     return None
+
+
+def _settled(result, telegram_account, delivered):
+    """Only Telegram keeps an unknown outcome; other platforms record it as failed."""
+    state = result.get("state") if isinstance(result, dict) else None
+    if state == "delivered":
+        return delivered
+    return "unknown" if state == "unknown" and telegram_account is not None else "failed"
 
 
 def _platform_for(controller, platform_id):
@@ -95,8 +88,9 @@ async def _send_group(controller, event, *, platform_id, login, peer, text, ment
 async def process_group_presence(controller, event, target, context):
     """Deliver delayed relays when their target member speaks in the group."""
     target_user_id = str(context.actor.principal.native_account_id)
+    account = _telegram_account(event, target)
     tasks = await asyncio.to_thread(claim_group, controller.runtime, str(target.group_id), target_user_id,
-                                    telegram_account=_telegram_account(event, target))
+                                    telegram_account=account)
     settled: set[str] = set()
     in_flight: str | None = None
     in_flight_state = "failed"
@@ -104,13 +98,12 @@ async def process_group_presence(controller, event, target, context):
         for task in tasks:
             task_id = task["id"]
             in_flight = task_id
-            in_flight_state = "unknown" if task.get("telegram_account") else "failed"
+            in_flight_state = "unknown" if account is not None else "failed"
             try:
                 result = await _send_group(controller, event, platform_id=target.platform_id,
                     login=target.account_id, peer=target.group_id,
                     text=_text(task.get("text")), mention_id=str(task.get("mention_id") or ""))
-                state = result.get("state") if isinstance(result, dict) else None
-                in_flight_state = {"delivered": "sent", "unknown": "unknown"}.get(state, "failed")
+                in_flight_state = _settled(result, account, "sent")
             except Exception:
                 in_flight_state = "failed"
             await asyncio.to_thread(finish, controller.runtime, task_id, in_flight_state)
@@ -131,7 +124,7 @@ async def process_group_presence(controller, event, target, context):
     # 带话一直没等到目标成员出现时，告诉发起窗口“已经撤回”，
     # 而不是让那条委托在队列里无声过期。
     expired = await asyncio.to_thread(claim_expired, controller.runtime, str(target.group_id),
-                                      telegram_account=_telegram_account(event, target))
+                                      telegram_account=account)
     for task in expired:
         source_kind = str(task.get("source_kind") or "private")
         source_id = str(task.get("source_id") or task.get("source_user") or "")
@@ -162,7 +155,7 @@ async def _report_receipt(controller, event, target, task, reply_text):
     else:
         result = await _send_private(controller, event, platform_id=target.platform_id,
             login=target.account_id, peer=source_id, text=report)
-    return {"delivered": "reported", "unknown": "unknown"}.get(result.get("state"), "failed")
+    return _settled(result, _telegram_account(event, target), "reported")
 
 
 async def _ask_permission(controller, event, target, task):
@@ -179,15 +172,12 @@ async def process_private_receipts(controller, event, target):
         return
     target_user_id = str(target.participant_id)
     text = _text(getattr(event, "message_str", ""), 800)
-    approvals = ("可以", "同意", "好", "好的", "行", "转告", "带回去", "转发")
+    approvals = ("可以", "同意", "好", "行", "转告", "带回去", "转发")
     refusals = ("不要", "不用", "不行", "不可以", "拒绝", "别转", "算了")
     account = _telegram_account(event, target)
     if account is None:
-        answer = str(getattr(event, "message_str", "") or "").strip().rstrip("。！!.").strip()
-        confirmed = _QQ_PERMISSION.fullmatch(answer) is not None
-        rejected = not confirmed and any(word in answer for word in (
-            *refusals, "不同意", "不好", "勿", "禁止", "不许", "不想", "不转", "别说", "别告诉"))
-        unclear = not confirmed and any(word in answer for word in approvals)
+        confirmed = any(token in text for token in approvals)
+        rejected = any(token in text for token in refusals)
         permission_tasks = await asyncio.to_thread(
             claim_private_receipts, controller.runtime, target_user_id, permission=True)
     else:
@@ -198,8 +188,7 @@ async def process_private_receipts(controller, event, target):
         if not text:
             return
         answer = str(getattr(raw, "text", "") or "").strip().rstrip("。！!.").strip()
-        confirmed, rejected = answer in approvals, answer in (*refusals, "不同意", "不好")
-        unclear = False
+        confirmed, rejected = answer in (*approvals, "好的"), answer in (*refusals, "不同意", "不好")
         original = getattr(raw, "reply_to_message", None)
         reply_to = None
         if original is not None:
@@ -232,12 +221,10 @@ async def process_private_receipts(controller, event, target):
     try:
         for task in permission_tasks:
             task_id = task["id"]
-            if rejected or unclear:
-                # QQ answers are unthreaded. After an unclear response, a later
-                # conversational "好的" cannot safely authorize this older report.
+            if rejected:
                 in_flight_permission = task_id
-                in_flight_permission_state = "declined" if rejected else "unconfirmed"
-                await asyncio.to_thread(finish, controller.runtime, task_id, in_flight_permission_state)
+                in_flight_permission_state = "declined"
+                await asyncio.to_thread(finish, controller.runtime, task_id, "declined")
             elif confirmed:
                 in_flight_permission = task_id
                 in_flight_permission_state = interrupted_report_state
@@ -265,8 +252,6 @@ async def process_private_receipts(controller, event, target):
                 pass
 
     if account is None:
-        if permission_tasks:
-            return  # The same answer cannot also be reported to another requester.
         reply_tasks = await asyncio.to_thread(claim_private_receipts, controller.runtime, target_user_id)
     settled_reply: set[str] = set()
     in_flight_report: str | None = None
@@ -283,7 +268,7 @@ async def process_private_receipts(controller, event, target):
                     asked = await _ask_permission(controller, event, target, task)
                 except Exception:
                     asked = {"state": "failed"}
-                if asked.get("state") == "unknown":
+                if asked.get("state") == "unknown" and account is not None:
                     await asyncio.to_thread(finish, controller.runtime, task_id, "unknown")
                 elif asked.get("state") == "delivered":
                     in_flight_report = None

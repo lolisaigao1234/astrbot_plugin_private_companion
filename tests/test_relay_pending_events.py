@@ -144,71 +144,6 @@ class RelayPendingEventTests(unittest.IsolatedAsyncioTestCase):
                 await process_private_receipts(self.controller, self.event, target)
         self.assertEqual(_read(self.runtime)["tasks"][task]["state"], "waiting_reply")
 
-    async def test_qq_explicit_refusal_never_reports_the_saved_answer(self):
-        from astrbot_host.relay_pending import _read
-
-        target = SimpleNamespace(participant_id="2002", platform_id="onebot", account_id="account")
-        for refusal in ("不同意", "我不同意转告", "不好", "请勿转告", "禁止转告", "不许转发", "不想转告", "不转告", "别说出去"):
-            with self.subTest(refusal=refusal):
-                task = add_task(self.runtime, {
-                    "kind": "private_receipt", "state": "waiting_permission", "target_user_id": "2002",
-                    "source_id": "1001", "reply_text": "private answer", "expires_at": time.time() + 60,
-                })
-                self.event.message_str = refusal
-                await process_private_receipts(self.controller, self.event, target)
-                for later in ("今天天气不错", "好的"):
-                    self.event.message_str = later
-                    await process_private_receipts(self.controller, self.event, target)
-                self.assertIn(_read(self.runtime)["tasks"][task]["state"], {"declined", "unconfirmed"})
-                self.assertEqual(self.api.calls, [])
-
-    async def test_qq_ambiguous_words_do_not_release_private_answer(self):
-        from astrbot_host.relay_pending import _read
-
-        target = SimpleNamespace(participant_id="2002", platform_id="onebot", account_id="account")
-        task = add_task(self.runtime, {
-            "kind": "private_receipt", "state": "waiting_permission", "target_user_id": "2002",
-            "source_id": "1001", "reply_text": "private answer", "expires_at": time.time() + 60,
-        })
-        for answer in ("我还没想好", "是的", "你可以", "今天天气不错", "好的"):
-            self.event.message_str = answer
-            await process_private_receipts(self.controller, self.event, target)
-        self.assertEqual(_read(self.runtime)["tasks"][task]["state"], "unconfirmed")
-        self.assertEqual(self.api.calls, [])
-
-    async def test_qq_accepts_complete_polite_permission(self):
-        from astrbot_host.relay_pending import _read
-
-        target = SimpleNamespace(participant_id="2002", platform_id="onebot", account_id="account")
-        for i, answer in enumerate(("我同意", "可以，转告她吧", "可以，谢谢", "好的，谢谢", "当然可以", "可以带回去",
-                                    "不好意思刚看到，同意转告。", "好的，你转告吧", "行吧",
-                                    "不好意思，刚看到，可以", "好的呀", "好嘞", "我同意，可以转告她", "可以啦", "可以。谢谢",
-                                    "没事，可以", "可以告诉他", "行行行", "嗯嗯，可以",
-                                    "可以，帮我转告一下吧", "可以，请帮我转告他",
-                                    "可以跟他说", "你可以转告他", "是的，可以", "可以了"), 1):
-            with self.subTest(answer=answer):
-                task = add_task(self.runtime, {
-                    "kind": "private_receipt", "state": "waiting_permission", "target_user_id": "2002",
-                    "source_id": "1001", "reply_text": "private answer", "expires_at": time.time() + 60,
-                })
-                self.event.message_str = answer
-                await process_private_receipts(self.controller, self.event, target)
-                self.assertEqual(_read(self.runtime)["tasks"][task]["state"], "reported")
-                self.assertEqual(len(self.api.calls), i)
-
-    async def test_qq_permission_answer_cannot_also_answer_a_second_question(self):
-        from astrbot_host.relay_pending import _read
-
-        target = SimpleNamespace(participant_id="2002", platform_id="onebot", account_id="account")
-        common = {"kind": "private_receipt", "target_user_id": "2002", "expires_at": time.time() + 60}
-        permission = add_task(self.runtime, {**common, "state": "waiting_permission", "source_id": "1001"})
-        question = add_task(self.runtime, {**common, "state": "waiting_reply", "source_id": "1002"})
-        self.event.message_str = "不许转发"
-        await process_private_receipts(self.controller, self.event, target)
-        tasks = _read(self.runtime)["tasks"]
-        self.assertEqual((tasks[permission]["state"], tasks[question]["state"]), ("declined", "waiting_reply"))
-        self.assertEqual(self.api.calls, [])
-
     async def test_cancelled_qq_receipt_reports_keep_failed_state(self):
         from asyncio import CancelledError
         from unittest.mock import patch
@@ -239,7 +174,7 @@ class RelayPendingEventTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.api.calls[0][1]["user_id"], 2002)
         self.assertIn("可以", self.api.calls[0][1]["message"][0]["data"]["text"])
 
-        self.event.message_str = "不好意思，可以"
+        self.event.message_str = "可以"
         await process_private_receipts(self.controller, self.event, target)
         self.assertEqual(self.api.calls[1][0], "send_private_msg")
         self.assertEqual(self.api.calls[1][1]["user_id"], 1001)

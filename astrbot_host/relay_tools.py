@@ -534,7 +534,7 @@ class RelayToolPort:
         if receipt.state is OperationState.COMPLETED:
             outbox = require(OperationRepository(self.application.runtime).outbox(
                 operation_id, self._part_id(plan)))
-            state = self._completed_state(outbox)
+            state = self._completed_state(outbox, self._is_telegram(invocation.context))
             return self._response(invocation, {"state": state, "operation_id": operation_id,
                                                "receipt_ref": outbox.receipt_ref})
         if receipt.state is not OperationState.ACCEPTED:
@@ -568,14 +568,14 @@ class RelayToolPort:
         normalized = text.strip().rstrip("。！？!?；;").strip()
         return normalized in _CONFIRMATIONS
 
-    def _completed_state(self, outbox):
+    def _completed_state(self, outbox, telegram):
         if outbox.state == "accepted" and outbox.receipt_ref:
-            if outbox.receipt_ref.startswith("relay-scheduled:"):
+            if telegram and outbox.receipt_ref.startswith("relay-scheduled:"):
                 return scheduled_state(self._app().runtime, outbox.receipt_ref.split(":", 1)[1])
             return "already_sent"
         if outbox.state == "cancelled":
             return "failed" if self._refusal_code(outbox) else "expired"
-        return "unknown"
+        return "unknown" if telegram else "unresolved"
 
     @staticmethod
     def _refusal_code(outbox):
@@ -681,13 +681,16 @@ class RelayToolPort:
                 datetime.fromisoformat(row["observed_at"]) <= receipt.created_at):
             return self._confirmation_refused(invocation, operation_id)
         part_id = self._part_id(plan)
+        telegram = self._is_telegram(invocation.context)
         if receipt.state is OperationState.COMPLETED:
             outbox = require(operations.outbox(operation_id, part_id))
-            state = self._completed_state(outbox)
+            state = self._completed_state(outbox, telegram)
             if state in {"scheduled", "already_sent"}:
                 return self._response(invocation, {"state": state, "operation_id": operation_id,
                     "receipt_ref": outbox.receipt_ref, "audit": plan.audit}, state="succeeded",
                     effect="committed", operation_id=operation_id, receipt_ref=outbox.receipt_ref)
+            if not telegram:
+                raise TaskError("relay_operation_unresolved", "递话操作已结束但没有成功发送回执")
             if state in {"failed", "expired"}:
                 code = self._refusal_code(outbox)
                 return self._response(invocation, {}, state="failed", effect="not_committed",
@@ -695,18 +698,20 @@ class RelayToolPort:
                         else "relay-" + state + ":" + operation_id),
                     error_code=code or "relay_delivery_" + state)
         if receipt.state is not OperationState.ACCEPTED:
+            if not telegram:
+                raise TaskError("relay_result_unknown", "上次发送结果未知；不会再次发送")
             return self._response(invocation, {}, state="unknown", effect="unknown",
                                   operation_id=operation_id, error_code="relay_delivery_unknown")
         outbox = require(operations.outbox(operation_id, part_id))
         if outbox.state != "pending":
             raise TaskError("relay_result_unknown", "递话 outbox 已不在待发送状态；不会再次发送")
         scope = invocation.context.scope
-        telegram_account = [scope.platform, scope.account_id] if self._is_telegram(invocation.context) else None
+        telegram_account = [scope.platform, scope.account_id] if telegram else None
         if plan.delay_until_seen:
             if plan.destination_kind != "group" or not plan.mention_id:
                 raise TaskError("relay_delay_invalid", "延迟转述只支持群聊，并需要指定目标群友")
             runtime = self._app().runtime
-            if invocation.before_dispatch is not None:
+            if telegram and invocation.before_dispatch is not None:
                 invocation.before_dispatch()
             signature = digest(["relay-group-wait", invocation.context.key,
                                 plan.destination_id, plan.mention_id, plan.text])

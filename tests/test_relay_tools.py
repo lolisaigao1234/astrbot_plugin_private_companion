@@ -242,8 +242,9 @@ class RelayToolPortTests(unittest.IsolatedAsyncioTestCase):
         with patch("astrbot_host.relay_tools.add_task", side_effect=RuntimeError("receipt insert failed")):
             with self.assertRaisesRegex(RuntimeError, "receipt insert failed"):
                 await self.port._send(self.invocation(SEND_ACTION, arguments, "receipt-send"), arguments)
-        replay = await self.port._send(self.invocation(SEND_ACTION, arguments, "receipt-send"), arguments)
-        self.assertEqual(replay.state, "unknown")
+        with self.assertRaises(TaskError) as raised:
+            await self.port._send(self.invocation(SEND_ACTION, arguments, "receipt-send"), arguments)
+        self.assertEqual(raised.exception.code, "relay_result_unknown")
         self.assertEqual(len(self.api.calls), 1)
         self.assertEqual(claim_private_receipts(self.runtime, "2002"), [])
 
@@ -313,8 +314,9 @@ class RelayToolPortTests(unittest.IsolatedAsyncioTestCase):
             self.operation_id, "private:2002").unwrap()
         self.assertEqual((outbox.state, outbox.receipt_ref), ("unknown", None))
 
-        replay = await self.send()
-        self.assertEqual((replay.state, replay.effect), ("unknown", "unknown"))
+        with self.assertRaises(TaskError) as raised:
+            await self.send()
+        self.assertEqual(raised.exception.code, "relay_result_unknown")
         self.assertEqual(len(self.api.calls), 1)
 
 
