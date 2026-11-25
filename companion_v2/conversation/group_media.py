@@ -19,7 +19,7 @@ def _forward_history(materials):
             for root_id, payload in roots.items()]
 
 
-def input_media(messages, context, event, record, at):
+def input_media(messages, context, event, record, at, *, include_quoted_media=True):
     images, quotes, forwards = (getattr(event, "images", ()), getattr(event, "quotes", ()),
                                 getattr(event, "forwards", ()))
     expected = digest([record.payload, images]) if images else digest(record.payload)
@@ -49,7 +49,8 @@ def input_media(messages, context, event, record, at):
                                 "view": "historical_metadata_only"})
             sources.append(video.source)
             sources.extend(frame.source for frame in video.frames)
-    if quotes:
+    # An embedded Telegram reply exposes only the replying member's own message.
+    if quotes and include_quoted_media:
         materials, originals, _, _, _ = messages.quotes.read_all(context, event, at)
         for material in materials:
             if material.source is not None:

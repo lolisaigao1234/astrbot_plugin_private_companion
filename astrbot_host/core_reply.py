@@ -13,7 +13,6 @@ from typing import Any
 from companion_v2.adapters.astrbot.telegram_logging import redact_event_error, redact_event_token
 from companion_v2.execution.models import TaskContext, TaskError, encode, require
 from companion_v2.foundation.outcome import Outcome
-from companion_v2.sources.privacy import redact_text
 
 
 CORE_REPLY_CONTEXT_EXTRA = "_companion_v2_core_reply_context"
@@ -796,21 +795,10 @@ def inject_core_reply_prompt(event: Any, req: Any) -> None:
 
     prepared = state.get("prepared")
     original = prepared.get("native_input") if isinstance(prepared, Mapping) else None
-    origin = getattr(original, "forward_origin", "")
-    markers = [f"[转发消息，来源：{origin}]"] if origin else []
-    for quote in getattr(original, "quotes", ()):
-        raw = getattr(getattr(getattr(event, "message_obj", None), "raw_message", None), "message", None)
-        # Capture keeps the original label so a later check can prove it unchanged.
-        if getattr(raw, "voice", None) and not any(
-                getattr(part.type, "value", part.type) == "Reply" for part in event.message_obj.message):
-            markers.append(redact_text(quote.observation_text()))
-        elif getattr(quote, "forward_origin", None):
-            attribution = redact_text(quote.forward_origin.attribution(quote.sender_id))
-            markers.append(f"[引用消息 {quote.message_id}，{attribution}]")
-    if markers and isinstance(getattr(req, "prompt", None), str):
-        marker = "\n".join(markers) + "\n"
-        if not req.prompt.startswith(marker):
-            req.prompt = marker + req.prompt
+    from .core_reply_mentions import telegram_reference_prefix
+    marker = telegram_reference_prefix(event, original)
+    if marker and isinstance(getattr(req, "prompt", None), str) and not req.prompt.startswith(marker):
+        req.prompt = marker + req.prompt
     system_prompt = getattr(req, "system_prompt", "") or ""
     # AstrBot already constructs the selected persona and its example dialogs.
     # The captured native instruction is only an authorization fingerprint.

@@ -82,10 +82,17 @@ def frozen_image_locators(event):
     """Freeze current attachments and quotes, in AstrBot's attachment order."""
     images, quotes = [], []
     telegram = None
-    if (getattr(getattr(event, "platform_meta", None), "name", None) == "telegram"
-            and getattr(event.message_obj.type, "value", None) == "FriendMessage"):
+    telegram_window = None
+    if getattr(getattr(event, "platform_meta", None), "name", None) == "telegram":
         from companion_v2.adapters.astrbot.telegram_references import private_references
-        telegram = private_references(event)
+        if getattr(event.message_obj.type, "value", None) == "GroupMessage":
+            from companion_v2.adapters.astrbot.group import group_event_route
+            from companion_v2.adapters.astrbot.telegram_references import message_references
+            telegram_window = group_event_route(event).group_id
+            telegram = message_references(event)
+        else:
+            telegram = private_references(event)
+            telegram_window = str(event.message_obj.sender.user_id)
     for position, part in enumerate(getattr(getattr(event, "message_obj", None), "message", ())):
         if type(part) is Image:
             images.append(freeze_attachment(event, image_locator(position, part.file, part.url)))
@@ -94,7 +101,7 @@ def frozen_image_locators(event):
                 quote = telegram.quote
                 if quote and quote.position == position and telegram.images:
                     quotes.append(_QuotedImages(position, quote.message_id, quote.sender_id, quote.sent_at,
-                        telegram.images, event, None, str(event.message_obj.sender.user_id), str(event.client.id), quote.forward_origin))
+                        telegram.images, event, None, telegram_window, str(event.client.id), quote.forward_origin))
                 continue
             identifier = _identifier(part.id)
             if identifier is None:
@@ -128,7 +135,7 @@ async def _resolve_quoted_images(quote, context, check):
     sender, sent_at, images = quote.sender_id, quote.sent_at, quote.images
     resolve_from_original = not images or quote.needs_resolved_images
     if quote.telegram_peer is not None:
-        if context.scope.kind is not ScopeKind.PRIVATE or quote.telegram_peer != context.scope.native_scope_id:
+        if quote.telegram_peer != context.scope.native_scope_id:
             raise TaskError("host_quote_scope_mismatch", "Telegram quote belongs to another chat")
     elif quote.needs_lookup:
         await check()

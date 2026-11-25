@@ -10,7 +10,8 @@ from companion_v2.sources.models import SourceRecord
 from companion_v2.conversation.forwards.service import prepare_forward
 
 from .models import (CapturedQuote, QuoteDescriptor, QuoteImageEvent, TelegramQuote, TelegramQuoteDescriptor,
-                     TelegramLinkedQuoteDescriptor, TelegramForwardedQuoteDescriptor, TelegramAttachmentDescriptor, OWNER)
+                     TelegramLinkedQuoteDescriptor, TelegramMentionQuoteDescriptor, TelegramForwardedQuoteDescriptor,
+                     TelegramAttachmentDescriptor, TelegramMentionedAttachmentDescriptor, TelegramMentionedForwardDescriptor, OWNER)
 from .forward_models import (ForwardQuoteDescriptor, ForwardQuoteMediaDescriptor, QuoteMediaDescriptor,
                              QuotedForwardEvent)
 from .originals import original_sources
@@ -51,12 +52,19 @@ def prepare_quote(sources, parent, audience, captured):
             label = sources.prepare_message(replace(record, payload=origin.label)).payload
             provenance = dict(forward_origin=replace(origin, label=label),
                 origin_resource_hash=origin.resource_hash(captured.message_id))
+        if captured.self_mentions:
+            provenance["self_mentions"] = captured.self_mentions
         if captured.attachment:
-            return TelegramAttachmentDescriptor(*values, selection_offset=captured.selection_offset,
+            kind = TelegramMentionedAttachmentDescriptor if captured.self_mentions else TelegramAttachmentDescriptor
+            return kind(*values, selection_offset=captured.selection_offset,
                 link_suffixes=captured.link_suffixes, attachment=captured.attachment, **provenance), record
         if origin:
-            return TelegramForwardedQuoteDescriptor(*values, selection_offset=captured.selection_offset,
+            kind = TelegramMentionedForwardDescriptor if captured.self_mentions else TelegramForwardedQuoteDescriptor
+            return kind(*values, selection_offset=captured.selection_offset,
                 link_suffixes=captured.link_suffixes, **provenance), record
+        if captured.self_mentions:
+            return TelegramMentionQuoteDescriptor(*values, selection_offset=captured.selection_offset,
+                link_suffixes=captured.link_suffixes, self_mentions=captured.self_mentions), record
         if captured.link_suffixes:
             return TelegramLinkedQuoteDescriptor(*values, selection_offset=captured.selection_offset,
                                                  link_suffixes=captured.link_suffixes), record

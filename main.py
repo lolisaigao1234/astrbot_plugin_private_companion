@@ -115,7 +115,7 @@ from companion_v2.conversation.group_timing import SELF_MENTION
 from companion_v2.conversation import debounce_log
 from .astrbot_host.private_debounce import PrivateDebounce, PrivateDeliveryDedup
 from .astrbot_host.group_debounce import GroupDebounce, group_plain_text, replace_group_plain_text
-from companion_v2.adapters.astrbot.group import group_event_route
+from companion_v2.adapters.astrbot.group import group_event_route, telegram_rename_message
 from companion_v2.adapters.astrbot.voice_stt import has_external_stt_extra, read_stt_extra
 from .astrbot_host.private_reply_followup import PrivateReplyFollowUps
 from .astrbot_host.core_reply_followup_guard import CoreReplyFollowUpGuard
@@ -1157,6 +1157,8 @@ class PrivateCompanionV2StagingPlugin(Star):
         if not self.staging.claims(event):
             declines_group = getattr(self.staging, "declines_telegram_group", None)
             if callable(declines_group) and declines_group(event):
+                if telegram_rename_message(event) is not None:
+                    self.staging.session_topology.schedule_observe(event, rename=True)
                 suppress_default_reply(event)
                 return
             # 不是本插件的目标：这条消息从来没有进入它的预期范围，回复与否都不是
@@ -1202,6 +1204,11 @@ class PrivateCompanionV2StagingPlugin(Star):
         origin_key = self._origin_key_for_event(event)
         kind = getattr(getattr(getattr(event, "message_obj", None), "type", None), "value", None)
         channel = "private" if kind == "FriendMessage" else "group" if kind == "GroupMessage" else "unknown"
+        if channel == "group" and getattr(getattr(event, "platform_meta", None), "name", None) == "telegram":
+            if telegram_rename_message(event) is not None:
+                self._observe_session(event)
+                suppress_default_reply(event)
+                return
         if channel != "unknown":
             # This turn belongs to a conversation the plugin serves, even when V2
             # later declines it and AstrBot's own pipeline writes the reply. The

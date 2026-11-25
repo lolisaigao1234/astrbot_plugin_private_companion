@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import httpx
 
 from telegram.error import BadRequest, Forbidden, InvalidToken, NetworkError, RetryAfter, TimedOut
-from telegram import Chat, ForumTopicCreated, Message, MessageEntity, Update, User
+from telegram import Chat, ForumTopicCreated, ForumTopicEdited, Message, MessageEntity, TextQuote, Update, User
 from astrbot.core.message.components import Plain, Reply
 from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
 from astrbot.core.platform.message_type import MessageType
@@ -127,7 +127,7 @@ class TelegramPlatformTests(unittest.TestCase):
 
 
 async def group_event(platform, chat_id=-400, kind="group", topic=None, text="你好", message_id=22, **fields):
-    chat = Chat(chat_id, kind, is_forum=True if topic else None)
+    chat = Chat(chat_id, kind, title=fields.pop("title", None), is_forum=True if topic else None)
     message = Message(message_id, date=datetime.now(timezone.utc), chat=chat, text=text,
                       from_user=fields.pop("from_user", User(OWNER, "Synthetic", False)),
                       message_thread_id=topic, is_topic_message=bool(topic), **fields)
@@ -146,6 +146,77 @@ async def forum_reply_event(platform, *, topic_root):
 
 
 class TelegramGroupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_refused_quoted_group_text_preserves_delivery_certainty(self):
+        from astrbot.core.message.components import Reply
+        from astrbot.core.message.message_event_result import MessageChain
+        from companion_v2.adapters.astrbot.platform_sender import _telegram_refusal
+        from companion_v2.adapters.astrbot.telegram_wire import send_optional_reply
+
+        for text, responses, expected in (
+            ("短消息", [Forbidden("forbidden")], "telegram_forbidden"),
+            ("a" * 4100, [None, Forbidden("forbidden")], None),
+        ):
+            with self.subTest(length=len(text)):
+                client = NS(send_message=AsyncMock(side_effect=responses), send_chat_action=AsyncMock())
+                chain = MessageChain(chain=[Reply(id="22"), Plain(text)])
+                with self.assertRaises(Forbidden) as refused:
+                    await send_optional_reply(client, chain, "-400#23")
+                self.assertEqual(_telegram_refusal(refused.exception, chain), expected)
+                self.assertEqual(client.send_message.await_count, len(responses))
+
+    async def test_delayed_mention_keeps_entity_on_plain_retry(self):
+        from astrbot.core.message.components import At, Reply
+        from astrbot.core.message.message_event_result import MessageChain
+        from companion_v2.adapters.astrbot.telegram_wire import send_optional_reply, telegram_mentions
+
+        client = NS(send_message=AsyncMock(side_effect=[BadRequest("synthetic Markdown refusal"), None]),
+                    send_chat_action=AsyncMock())
+        parts, mentions = telegram_mentions([Reply(id="22"), At(qq=str(OWNER)), Plain("稍后回复")], {})
+        await send_optional_reply(client, MessageChain(chain=parts), "-400#23", mentions=mentions)
+        self.assertEqual(client.send_message.await_count, 2)
+        payload = client.send_message.await_args.kwargs
+        self.assertEqual((payload["chat_id"], payload["message_thread_id"], str(payload["reply_to_message_id"])),
+                         ("-400", "23", "22"))
+        entity, = payload["entities"]
+        self.assertEqual((entity.offset, entity.length, entity.url), (0, 2, f"tg://user?id={OWNER}"))
+        self.assertTrue(payload["allow_sending_without_reply"])
+        self.assertIn("成员 稍后回复", payload["text"])
+
+    async def test_mention_preserves_leading_fenced_code_in_markdown_and_plain_retry(self):
+        from astrbot.core.message.components import At
+        from astrbot.core.message.message_event_result import MessageChain
+        from companion_v2.adapters.astrbot.telegram_wire import send_optional_reply, telegram_mentions
+
+        body = "```python\nprint(42)\n```"
+        parts, mentions = telegram_mentions([At(qq=str(OWNER)), Plain(body)], {})
+        client = NS(send_message=AsyncMock(side_effect=[BadRequest("synthetic Markdown refusal"), None]),
+                    send_chat_action=AsyncMock())
+        await send_optional_reply(client, MessageChain(chain=parts), "-400#23", mentions=mentions)
+        markdown, plain = [call.kwargs for call in client.send_message.await_args_list]
+        self.assertIn("\n```python\nprint(42)", markdown["text"])
+        self.assertEqual(plain["text"].strip(), "成员\n" + body)
+        entity, = plain["entities"]
+        self.assertEqual((entity.offset, entity.length, entity.url), (0, 2, f"tg://user?id={OWNER}"))
+
+    async def test_delayed_mention_redacts_httpx_membership_request(self):
+        from companion_v2.adapters.astrbot.telegram_wire import member_usernames
+
+        bot = telegram_bot()
+        transport = httpx.MockTransport(lambda request: httpx.Response(200))
+        async with httpx.AsyncClient(transport=transport) as http:
+            async def lookup(*, chat_id, user_id):
+                await http.post(f"https://telegram.invalid/bot{bot.token}/getChatMember")
+                return NS(user=User(user_id, "Synthetic", False, username="speaker"))
+
+            bot.get_chat_member = lookup
+            with self.assertLogs("httpx", "INFO") as logs:
+                names = await member_usernames(bot, "-100400#23", [str(OWNER)])
+
+        self.assertEqual(names, {str(OWNER): "speaker"})
+        record, = logs.records
+        self.assertIn("/bot[redacted]/getChatMember", record.getMessage())
+        self.assertNotIn(bot.token, repr(vars(record)))
+
     async def test_sdk_group_and_topic_routes(self):
         platform = TelegramPlatform()
         for kind, topic, window in (("group", None, "-400"), ("supergroup", None, "-400"),
@@ -210,6 +281,16 @@ class TelegramGroupTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(any(isinstance(part, Reply) for part in event.message_obj.message), not topic_root)
                 self.assertEqual(group_trigger_facts(event, "tg-main")["quoted_bot"], not topic_root)
                 self.assertEqual(group_message_text(event, "tg-main"), "/ 原文")
+
+    async def test_only_genuine_same_topic_reply_captures_a_quote(self):
+        from companion_v2.adapters.astrbot.telegram_references import message_references
+
+        platform = TelegramPlatform()
+        root = message_references(await forum_reply_event(platform, topic_root=True))
+        self.assertIsNone(root.quote)
+        self.assertFalse(root.unavailable)
+        reply = message_references(await forum_reply_event(platform, topic_root=False))
+        self.assertEqual((reply.quote.message_id, reply.quote.text), ("11", "之前"))
 
     async def test_reply_to_member_whose_id_matches_the_instance_is_unaddressed(self):
         platform = TelegramPlatform()
@@ -291,6 +372,36 @@ class TelegramHostFixture(MultiFixture):
 
 
 class TelegramIntakeLifecycleTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_parent_rename_updates_only_configured_topics_without_claiming_chat(self):
+        config = self.controller.config
+        config["multi_host"]["group_targets"] = [dict(target_id="topic", platform_id="tg-main",
+            account_id="tg-main", bot_id="bot-tg", group_id="-100400#23")]
+        self.window_personas["tg-main:GroupMessage:-100400#23"] = "original"
+        self.controller = self.make_controller(config)
+        await self.start_host()
+        plugin = self.started_plugin()
+        directory = self.controller.session_topology
+        for topic, name in ((23, "Books"), (24, "Other")):
+            await directory.observe(await group_event(self.platform, -100400, "supergroup", topic,
+                title="Club", text=None, message_id=30, forum_topic_created=ForumTopicCreated(name, 0)))
+        parent = ("tg-main", "tg-main", "-100400")
+        with patch.object(self.controller, "prepare_core_reply", new_callable=AsyncMock) as prepare:
+            for number, title, foreign, expected in ((41, "Reading", False, "Reading"),
+                                                     (40, "Earlier", False, "Reading"),
+                                                     (42, "Foreign", True, "Reading")):
+                event = await group_event(self.platform, -100400, "supergroup", title=title, text=None,
+                                          message_id=number, new_chat_title=title)
+                if foreign:
+                    event.client = telegram_bot()
+                self.assertFalse(self.controller.claims(event))
+                await plugin.receive_companion_message(event)
+                await asyncio.gather(*tuple(directory._pending))
+                names = directory.stored_group_names()
+                self.assertEqual(names[(*parent[:2], "-100400#23")], expected + "-Books")
+                self.assertEqual(names[(*parent[:2], "-100400#24")], "Club-Other")
+                self.assertNotIn(parent, names)
+            prepare.assert_not_awaited()
+
     async def test_queued_group_from_replaced_managed_client(self):
         # Like the SDK bot, this fixture supports weak references.
         class Bot(NS):
@@ -668,6 +779,411 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
         self.platform.client.send_chat_action = AsyncMock()
         self.platform.client.send_message = AsyncMock()
 
+    async def test_outgoing_mentions_and_optional_quote_use_the_original_topic(self):
+        from astrbot_host.core_reply_outbound import prepare_core_reply_outbound_message
+        from astrbot.core.message.message_event_result import MessageChain
+
+        for username in ("synthetic_member", None):
+            event = await group_event(self.platform, -100400, "supergroup", 23,
+                                      from_user=User(OWNER, "Member", False, username=username))
+            native = require(await self.controller.session.bridge.groups.capture(event))
+            prepared = dict(native_input=native, event_id="22", channel="group",
+                            outbound_settings=dict(reply_quote_enabled=True, reply_mention_speaker_enabled=True))
+            message = prepare_core_reply_outbound_message(event, prepared, MessageChain(chain=[Plain("回答")]))
+            async def send_message(**payload):
+                if not payload.get("allow_sending_without_reply"):
+                    raise BadRequest("Message to be replied not found")
+            self.platform.client.send_message.side_effect = send_message
+            await event.send(message)
+            payload = self.platform.client.send_message.await_args.kwargs
+            self.assertEqual((payload["chat_id"], payload["message_thread_id"], payload["reply_to_message_id"]),
+                             ("-100400", "23", "22"))
+            mention = "@synthetic_member" if username else f"tg://user?id={OWNER}"
+            self.assertIn(mention, payload["text"].replace(chr(92), ""))
+            self.assertIn("回答", payload["text"])
+            self.assertNotIn("None", payload["text"])
+
+    async def prepare_topic_stream(self, **outbound_settings):
+        from astrbot.core.message.message_event_result import MessageEventResult, ResultContentType
+        from astrbot_host.core_reply import activate_core_reply_delivery_guard, prepare_core_reply_event
+        from astrbot_host.core_reply_outbound import prepare_core_reply_outbound_message
+        from astrbot_host.core_reply_segmentation import prepare_core_reply_segmentation, uses_managed_group_stream
+        from companion_v2.foundation.outcome import Outcome
+
+        event = await group_event(self.platform, -100400, "supergroup", 23,
+                                  from_user=User(OWNER, "Member", False, username=None))
+        native = require(await self.controller.session.bridge.groups.capture(event))
+        settings = {}
+        prepared = dict(native_input=native, event_id=native.event_id, channel="group",
+                        segmentation_settings={"enabled": False}, outbound_settings=settings)
+        def decorate(current, message, authorize, index, count):
+            return prepare_core_reply_outbound_message(event, current, message, segment_index=index)
+        prepare_core_reply_event(event, prepared, authorize=AsyncMock(return_value=Outcome.success(True)),
+                                 prepare_send=decorate)
+        prepare_core_reply_segmentation(event)
+        self.assertFalse(uses_managed_group_stream(event))
+        settings.update(outbound_settings)
+        self.assertTrue(uses_managed_group_stream(event))
+        event.set_result(MessageEventResult().set_result_content_type(ResultContentType.STREAMING_RESULT))
+        activate_core_reply_delivery_guard(event)
+
+        return event, native.event_id
+
+    async def test_streamed_reply_uses_topic_headers_when_requested(self):
+        from astrbot.core.message.message_event_result import MessageChain
+
+        event, source_id = await self.prepare_topic_stream(reply_quote_enabled=True, reply_mention_speaker_enabled=True)
+
+        async def chunks():
+            for word in ("一段", "回答"):
+                yield MessageChain(chain=[Plain(word)])
+
+        self.platform.client.send_message.side_effect = [BadRequest("synthetic Markdown refusal"), None]
+        await event.send_streaming(chunks())
+        self.assertEqual(self.platform.client.send_message.await_count, 2)
+        payload = self.platform.client.send_message.await_args.kwargs
+        self.assertEqual((payload["chat_id"], payload["message_thread_id"], payload["reply_to_message_id"]),
+                         ("-100400", "23", source_id))
+        self.assertTrue(payload["allow_sending_without_reply"])
+        entity, = payload["entities"]
+        self.assertEqual((entity.type, entity.offset, entity.length, entity.url),
+                         ("text_link", 0, 2, f"tg://user?id={OWNER}"))
+        self.assertTrue(payload["text"].startswith("成员 "))
+        self.assertIn("一段回答", payload["text"])
+
+    async def test_stream_quote_threshold_applies_to_completed_topic_reply(self):
+        from astrbot.core.message.message_event_result import MessageChain
+
+        for ending, quoted in (("", False), ("丙", True)):
+            with self.subTest(ending=ending):
+                event, source_id = await self.prepare_topic_stream(reply_quote_enabled=True, reply_quote_skip_chars=2)
+                send = self.platform.client.send_message
+                send.reset_mock()
+                self.platform.client.edit_message_text = AsyncMock()
+
+                async def chunks():
+                    yield MessageChain(chain=[Plain("甲 乙")])
+                    send.assert_not_awaited()
+                    if ending:
+                        yield MessageChain(chain=[Plain(ending)])
+
+                await event.send_streaming(chunks())
+                send.assert_awaited_once()
+                self.platform.client.edit_message_text.assert_not_awaited()
+                payload = send.await_args.kwargs
+                self.assertEqual((payload["chat_id"], payload["message_thread_id"]), ("-100400", "23"))
+                self.assertEqual(payload.get("reply_to_message_id"), source_id if quoted else None)
+                self.assertEqual(payload["text"].strip(), "甲 乙" + ending)
+
+    async def test_group_rename_service_messages_reach_directory_without_a_reply(self):
+        plugin = self.started_plugin()
+        directory = self.controller.session_topology
+        topic_key = ("tg-main", "tg-main", "-100400#23")
+        cases = (
+            (23, {"forum_topic_created": ForumTopicCreated("Books", 0)}, "Club-Books"),
+            (23, {"forum_topic_edited": ForumTopicEdited(name="Stories")}, "Club-Stories"),
+            (None, {"new_chat_title": "Reading"}, "Reading-Stories"),
+        )
+        with patch.object(self.controller, "prepare_core_reply", new_callable=AsyncMock) as prepare:
+            for number, (topic, fields, expected) in enumerate(cases, 30):
+                event = await group_event(self.platform, -100400, "supergroup", topic, text=None,
+                                          title="Club", message_id=number, **fields)
+                await plugin.receive_companion_message(event)
+                await asyncio.gather(*tuple(directory._pending))
+                self.assertEqual(directory.stored_group_names().get(topic_key), expected)
+            prepare.assert_not_awaited()
+        self.platform.client.send_message.assert_not_awaited()
+
+    async def test_renames_without_a_member_sender_update_configured_windows(self):
+        plugin = self.started_plugin()
+        directory = self.controller.session_topology
+        keys = [("tg-main", "tg-main", peer) for peer in ("-100400", "-100400#23")]
+        await directory.observe(await group_event(self.platform, -100400, "supergroup", 23, text=None,
+            title="Club", message_id=30, forum_topic_created=ForumTopicCreated("Books", 0)))
+        anonymous = dict(from_user=User(1087968824, "Group", True, username="GroupAnonymousBot"),
+                         sender_chat=Chat(-100400, "supergroup", title="Club", is_forum=True))
+        for number, sender in ((31, anonymous), (33, dict(from_user=User(777, "Manager", True)))):
+            for offset, topic, fields in ((0, 23, {"forum_topic_edited": ForumTopicEdited(name=f"Topic {number}")}),
+                                          (1, None, {"new_chat_title": f"Club {number}"})):
+                event = await group_event(self.platform, -100400, "supergroup", topic, text=None, title="Club",
+                                          message_id=number + offset, **fields, **sender)
+                self.assertFalse(self.controller.claims(event))
+                await plugin.receive_companion_message(event)
+                await asyncio.gather(*tuple(directory._pending))
+            names = directory.stored_group_names()
+            self.assertEqual([names.get(key) for key in keys],
+                             [f"Club {number}", f"Club {number}-Topic {number}"])
+        ordinary = await group_event(self.platform, -100400, "supergroup", 23, message_id=40, **anonymous)
+        for rename in (False, True):
+            with self.assertRaises(TaskError):
+                group_event_route(ordinary, rename=rename)
+        foreign = await group_event(self.platform, -100400, "supergroup", 23, text=None, message_id=41,
+                                    forum_topic_edited=ForumTopicEdited(name="Foreign"), **anonymous)
+        foreign.client = telegram_bot()
+        await plugin.receive_companion_message(foreign)
+        await asyncio.gather(*tuple(directory._pending))
+        self.assertEqual(directory.stored_group_names()[keys[1]], "Club 33-Topic 33")
+        self.platform.client.send_message.assert_not_awaited()
+
+    async def test_topic_directory_tracks_group_topic_and_member_renames(self):
+        directory = self.controller.session_topology
+        for number, (title, topic, member) in enumerate((("读书群", "小说", "阿青"), ("阅读群", "故事", "青")), 40):
+            event = await group_event(self.platform, -100400, "supergroup", 23, text=None,
+                                      title=title, message_id=number, forum_topic_edited=ForumTopicEdited(name=topic),
+                                      from_user=User(OWNER, member, False))
+            await directory.observe(event)
+            self.assertEqual(directory.stored_group_names()[("tg-main", "tg-main", "-100400#23")],
+                             f"{title}-{topic}")
+            self.assertEqual(event_person_names(event), (member, ""))
+        await directory.observe(await group_event(self.platform, -100400, "supergroup", text=None,
+                                                 title="新群名", new_chat_title="新群名", message_id=44))
+        await directory.observe(await group_event(self.platform, -100400, "supergroup", 24, text="迟到",
+                                                 title="阅读群", message_id=43))
+        self.assertEqual(directory.stored_group_names()[("tg-main", "tg-main", "-100400#24")], "新群名")
+        self.assertEqual(directory.stored_group_names()[("tg-main", "tg-main", "-100400#23")],
+                         "新群名-故事")
+
+    async def test_topic_only_legacy_labels_survive_observation_and_parent_rename(self):
+        directory = self.controller.session_topology
+        for peer, name in (("-100400#23", "Books"), ("-100400#24", "Science-Fiction")):
+            origin = f"tg-main:GroupMessage:{peer}"
+            directory._store_observation(digest(["tg-main", "tg-main", origin]), {
+                "unified_msg_origin": origin, "account_id": "tg-main", "group_name": f"Book-Club-{name}",
+            })
+        await directory.observe(await group_event(self.platform, -100400, "supergroup", 23, title="Book-Club"))
+        key = ("tg-main", "tg-main", "-100400#24")
+        self.assertEqual(directory.stored_group_names()[key], "Book-Club-Science-Fiction")
+        await directory.observe(await group_event(self.platform, -100400, "supergroup",
+            title="Library", new_chat_title="Library", text=None, message_id=44))
+        self.assertEqual(directory.stored_group_names()[key], "Library-Science-Fiction")
+
+    async def test_first_parent_rename_preserves_the_full_legacy_topic_suffix(self):
+        directory = self.controller.session_topology
+        peer = "-100400#23"
+        origin = f"tg-main:GroupMessage:{peer}"
+        directory._store_observation(digest(["tg-main", "tg-main", origin]), {
+            "unified_msg_origin": origin, "account_id": "tg-main", "group_name": "Book-Club-Science-Fiction",
+        })
+        await directory.observe(await group_event(self.platform, -100400, "supergroup", text=None,
+            title="Book-Club", new_chat_title="Library", message_id=44))
+        self.assertEqual(directory.stored_group_names()[("tg-main", "tg-main", peer)], "Library-Science-Fiction")
+
+    async def test_parent_rename_uses_legacy_title_and_defers_unknown_boundary(self):
+        directory = self.controller.session_topology
+        for chat, known_parent in ((-100400, "Book"), (-100401, None)):
+            peer = f"{chat}#23"
+            for route, label in ((str(chat), known_parent), (peer, "Book-Club-Science-Fiction")):
+                if label:
+                    origin = f"tg-main:GroupMessage:{route}"
+                    directory._store_observation(digest(["tg-main", "tg-main", origin]), {
+                        "unified_msg_origin": origin, "account_id": "tg-main", "group_name": label,
+                    })
+            for message_id, title in enumerate(("Book-Club" if known_parent else "Book", "Library"), 44):
+                await directory.observe(await group_event(self.platform, chat, "supergroup", text=None,
+                    title=title, new_chat_title=title, message_id=message_id))
+            key = ("tg-main", "tg-main", peer)
+            expected = "Library-Club-Science-Fiction" if known_parent else "Book-Club-Science-Fiction"
+            self.assertEqual(directory.stored_group_names()[key], expected)
+            if not known_parent:
+                event = await group_event(self.platform, chat, "supergroup", 23, title="Library", text=None,
+                    forum_topic_created=ForumTopicCreated("Science-Fiction", 0), message_id=46)
+                await directory.observe(event)
+                self.assertEqual(directory.stored_group_names()[key], "Library-Science-Fiction")
+
+    async def test_legacy_topic_label_wins_over_the_cached_creation_name(self):
+        directory = self.controller.session_topology
+        for peer, label in (("-100400", "Book-Club"), ("-100400#23", "Book-Club-Stories")):
+            origin = "tg-main:GroupMessage:" + peer
+            directory._store_observation(digest(["tg-main", "tg-main", origin]), {
+                "unified_msg_origin": origin, "account_id": "tg-main", "group_name": label,
+            })
+        event = await group_event(self.platform, -100400, "supergroup", 23, title="Book-Club", message_id=44)
+        event.message_obj._telegram_topic_name = "Creation"
+        await directory.observe(event)
+        await directory.observe(await group_event(self.platform, -100400, "supergroup", text=None,
+            title="Book", new_chat_title="Book", message_id=45))
+        names = directory.stored_group_names()
+        self.assertEqual(names[("tg-main", "tg-main", "-100400#23")], "Book-Stories")
+        self.assertEqual(names[("tg-main", "tg-main", "-100400")], "Book")
+
+    async def test_legacy_parent_title_is_not_split_into_a_topic(self):
+        directory = self.controller.session_topology
+        origin = "tg-main:GroupMessage:-100400"
+        directory._store_observation(digest(["tg-main", "tg-main", origin]), {
+            "unified_msg_origin": origin, "account_id": "tg-main", "group_name": "Book-Club",
+        })
+        await directory.observe(await group_event(self.platform, -100400, "supergroup", title="Book", message_id=44))
+        self.assertEqual(directory.stored_group_names()[("tg-main", "tg-main", "-100400")], "Book")
+
+    async def test_chat_rename_updates_legacy_topics_on_the_same_account(self):
+        directory = self.controller.session_topology
+        for peer, label in (("-100400", "旧-群名"), ("-100400#23", "旧-群名-故事"),
+                            ("-100400#24", "旧-群名"), ("-1004000#23", "其他群")):
+            directory._store_observation(peer, {
+                "unified_msg_origin": "tg-main:GroupMessage:" + peer,
+                "account_id": "tg-main", "group_name": label,
+            })
+        await directory.observe(await group_event(self.platform, -100400, "supergroup", title="新群名",
+                                                  new_chat_title="新群名", message_id=44))
+        names = directory.stored_group_names()
+        for peer, label in (("-100400#23", "新群名-故事"), ("-100400#24", "新群名"), ("-1004000#23", "其他群")):
+            self.assertEqual(names[("tg-main", "tg-main", peer)], label)
+
+    async def test_topic_directory_retains_rename_after_reply_to_creation(self):
+        directory = self.controller.session_topology
+
+        async def observe(topic, message_id, **fields):
+            event = await group_event(self.platform, -100400, "supergroup", topic, title="Club",
+                                      message_id=message_id, **fields)
+            await directory.observe(event)
+            return event.message_obj.raw_message.message
+
+        root = await observe(23, 23, text=None, forum_topic_created=ForumTopicCreated("Books", 0))
+        await observe(24, 24, text=None, forum_topic_created=ForumTopicCreated("Music", 0))
+        for message_id, name in ((25, "Fiction"), (27, "Stories")):
+            await observe(23, message_id, text=None, forum_topic_edited=ForumTopicEdited(name=name))
+            await observe(23, message_id + 1, reply_to_message=root)
+            names = directory.stored_group_names()
+            self.assertEqual(names[("tg-main", "tg-main", "-100400#23")], f"Club-{name}")
+            self.assertEqual(names[("tg-main", "tg-main", "-100400#24")], "Club-Music")
+
+        await observe(23, 25, text=None, forum_topic_edited=ForumTopicEdited(name="Fiction"))
+        self.assertEqual(directory.stored_group_names()[("tg-main", "tg-main", "-100400#23")], "Club-Stories")
+
+    async def test_forward_and_comment_preserve_separate_group_speakers(self):
+        from astrbot_host.group_debounce import group_plain_text
+        from telegram import MessageOriginHiddenUser
+
+        comment = await group_event(self.platform, text="my view")
+        forwarded = await group_event(self.platform, text="their view",
+            forward_origin=MessageOriginHiddenUser(datetime.now(timezone.utc), "Original"))
+        self.assertEqual(group_plain_text(comment), "my view")
+        self.assertIsNone(group_plain_text(forwarded))
+        captured = require(await self.controller.session.bridge.groups.capture_text_only(forwarded))
+        self.assertEqual(captured.forward_origin, "Original")
+        self.assertIn("their view", captured.text)
+
+    async def test_group_quote_keeps_the_other_members_identity(self):
+        quote = Message(17, date=datetime.now(timezone.utc), chat=Chat(-400, "group"),
+                        from_user=User(321, "Quoted", False), text="成员原文")
+        event = await group_event(self.platform, reply_to_message=quote)
+        bridge = self.controller.session.bridge.groups
+        for capture in (bridge.capture, bridge.capture_text_only):
+            result = require(await capture(event))
+            self.assertEqual(result.principal.native_account_id, str(OWNER))
+            reference, = result.quotes
+            self.assertEqual((reference.sender_id, reference.text, reference.companion_sender),
+                             ("321", "成员原文", False))
+
+    async def test_group_quotes_verify_admitted_link_text(self):
+        session = self.controller.session
+        target = self.controller.settings.target("group-0")
+        url = "https://example.org/guide"
+        sender = User(321, "Quoted", False)
+
+        async def receive(event):
+            event.created_at = self.clock.now().timestamp()
+            return await session.receive(event, target)
+
+        for n, prefix, mentions in ((10, "😀 ", []), (20, "😀 @Synthetic_bot <提及自己> ", [MessageEntity("mention", 3, 14)])):
+            end = len(prefix.encode("utf-16-le")) // 2
+            link = MessageEntity("text_link", end, 5, url=url)
+            fields = dict(message_id=n, from_user=sender, text=prefix + "guide 片段", entities=[*mentions, link])
+            original = await group_event(self.platform, **fields)
+            require(await receive(original))
+            embedded = original.message_obj.raw_message.message
+            for number, extra in ((n + 1, {}), (n + 2, {"quote": TextQuote("片段", end + 6)})):
+                reply = await group_event(self.platform, message_id=number, reply_to_message=embedded, **extra)
+                captured = require(await session.bridge.groups.capture(reply))
+                self.assertEqual((captured.principal.native_account_id, captured.quotes[0].sender_id),
+                                 (str(OWNER), "321"))
+                require(await receive(reply))
+
+            for index, (changes, offset, expected) in enumerate((
+                ({}, end + 5, "quote_original_changed"),
+                ({"entities": [*mentions, MessageEntity("text_link", end, 5, url=url + "x")]},
+                 end + 6, "quote_original_changed"),
+                ({"from_user": User(322, "Other", False)}, end + 6, "quote_original_scope_mismatch"),
+            ), 3):
+                altered = await group_event(self.platform, **(fields | changes))
+                reply = await group_event(self.platform, message_id=n + index,
+                    reply_to_message=altered.message_obj.raw_message.message, quote=TextQuote("片段", offset))
+                self.assertEqual((await receive(reply)).failure.code, expected)
+
+    async def receive_group(self, event):
+        event.created_at = self.clock.now().timestamp()
+        return await self.controller.session.receive(event, self.controller.settings.target("group-0"))
+
+    async def test_group_quote_of_admitted_reply(self):
+        earlier = await group_event(self.platform, message_id=10, text="此前的发言")
+        member = User(321, "Quoted", False)
+        fields = dict(message_id=11, from_user=member, text="😀成员回答")
+        original = await group_event(self.platform, **fields, reply_to_message=earlier.message_obj.raw_message.message)
+        require(await self.receive_group(original))
+        # Telegram omits reply_to_message inside the embedded original.
+        for number, changes, selection, failure in (
+            (12, {}, {}, None),
+            (13, {}, {"quote": TextQuote("成员", 2)}, None),
+            (14, {"text": "😀改写回答"}, {"quote": TextQuote("改写", 2)}, "quote_original_changed"),
+            (15, {"from_user": User(322, "Other", False)}, {}, "quote_original_scope_mismatch"),
+        ):
+            embedded = await group_event(self.platform, **(fields | changes))
+            reply = await group_event(self.platform, message_id=number, reply_to_message=embedded.message_obj.raw_message.message,
+                                      **selection)
+            result = await self.receive_group(reply)
+            if failure:
+                self.assertEqual(result.failure.code, failure)
+            else:
+                require(result)
+                captured = require(await self.controller.session.bridge.groups.capture(reply))
+                quote, = captured.quotes
+                self.assertEqual((captured.principal.native_account_id, quote.sender_id, quote.text),
+                                 (str(OWNER), "321", "成员" if selection else fields["text"]))
+                self.assertNotIn("成员", captured.text)
+
+    async def test_group_quote_verifies_redacted_forward_origin(self):
+        from telegram import MessageOriginHiddenUser
+        when = datetime.now(timezone.utc)
+        fields = dict(message_id=10, from_user=User(321, "Forwarder", False), text="原文")
+        original = await group_event(self.platform, **fields,
+                                     forward_origin=MessageOriginHiddenUser(when, "token=demo"))
+        require(await self.receive_group(original))
+        for number, name in ((11, "token=demo"), (12, "token=changed")):
+            embedded = await group_event(self.platform, **fields, forward_origin=MessageOriginHiddenUser(when, name))
+            reply = await group_event(self.platform, message_id=number, reply_to_message=embedded.message_obj.raw_message.message)
+            result = await self.receive_group(reply)
+            if number == 11:
+                require(result)
+            else:
+                self.assertEqual(result.failure.code, "quote_original_changed")
+
+    async def test_group_quote_of_admitted_forward(self):
+        from telegram import MessageOriginUser
+        origin = MessageOriginUser(datetime.now(timezone.utc), User(42, "Source", False))
+        fields = dict(message_id=10, from_user=User(321, "Forwarder", False), text="😀转发原文", forward_origin=origin)
+        original = await group_event(self.platform, **fields)
+        require(await self.receive_group(original))
+        for number, changes, selection, failure in (
+            (11, {}, {}, None),
+            (12, {}, {"quote": TextQuote("原文", 4)}, None),
+            (13, {"text": "😀转发改写"}, {"quote": TextQuote("改写", 4)}, "quote_original_changed"),
+            (14, {"forward_origin": None}, {}, "quote_original_changed"),
+        ):
+            embedded = await group_event(self.platform, **(fields | changes))
+            reply = await group_event(self.platform, message_id=number, reply_to_message=embedded.message_obj.raw_message.message,
+                                      **selection)
+            result = await self.receive_group(reply)
+            if failure:
+                self.assertEqual(result.failure.code, failure)
+            else:
+                require(result)
+                captured = require(await self.controller.session.bridge.groups.capture(reply))
+                quote, = captured.quotes
+                self.assertEqual((captured.principal.native_account_id, quote.sender_id, quote.forward_origin.user_id),
+                                 (str(OWNER), "321", "42"))
+                self.assertEqual(quote.text, "原文" if selection else fields["text"])
+                self.assertNotIn("原文", captured.text)
+
     async def test_group_delivery_and_collective_audience(self):
         from astrbot.core.message.message_event_result import MessageChain
 
@@ -698,11 +1214,19 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
             self.assertEqual(context.scope.kind, ScopeKind.GROUP)
             self.assertEqual({r.kind.value for r in context.audience.recipients}, {"human", "group"})
             await event.send(MessageChain(chain=[Plain("前台")]))
+            from companion_v2.delivery.plan import OutboundPlan
+            self.platform.client.get_chat_member = AsyncMock(return_value=NS(user=User(OWNER, "成员", False,
+                                                                                       username="speaker")))
+            plan = OutboundPlan(quote="22", mentions=(str(OWNER),)) if topic else None
             receipt = await sender.send(DeliveryEnvelope("part", "op", context, 1, "后台", digest("后台"),
-                                        binding, before_dispatch=lambda: True))
+                                        binding, before_dispatch=lambda: True, plan=plan))
             self.assertEqual(receipt.status, "delivered", receipt)
             calls = self.platform.client.send_message.await_args_list
             self.assertEqual(len(calls), 2)
+            if topic:
+                self.assertIn("@speaker", calls[1].kwargs["text"])
+                self.assertEqual(calls[1].kwargs["reply_to_message_id"], "22")
+                self.assertTrue(calls[1].kwargs["allow_sending_without_reply"])
             for call in calls:
                 self.assertEqual(call.kwargs["chat_id"], str(chat))
                 self.assertEqual(call.kwargs.get("message_thread_id"), str(topic) if topic else None)

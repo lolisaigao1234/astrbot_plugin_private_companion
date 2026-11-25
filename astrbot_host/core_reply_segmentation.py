@@ -570,11 +570,18 @@ def uses_managed_group_stream(event):
              if isinstance(core, dict) else None)
     getter = getattr(event, "get_platform_name", None)
     platform = getter() if callable(getter) else getattr(getattr(event, "platform_meta", None), "name", None)
-    return bool(state and state["prepared"].get("channel") == "group" and platform == "aiocqhttp")
+    if not state or state["prepared"].get("channel") != "group":
+        return False
+    if platform == "telegram":
+        # The SDK's streaming edit bypasses send_with_client and its reply headers.
+        outbound = state["prepared"].get("outbound_settings") or {}
+        return bool(core.get("_behavior_plan") or outbound.get("reply_mention_speaker_enabled")
+                    or (outbound.get("reply_quote_enabled") and outbound.get("reply_quote_group_enabled", True)))
+    return platform == "aiocqhttp"
 
 
 async def send_group_stream(event, generator):
-    """QQ has no native text stream: deliver complete native MessageChains."""
+    """Send completed chains through the authorized per-part delivery path."""
     core = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
     state = core["_group_segmentation"]
     policy, buffered = state["policy"], None

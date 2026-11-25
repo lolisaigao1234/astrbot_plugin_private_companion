@@ -131,7 +131,12 @@ def prepare_core_reply_outbound_message(event, prepared, message, *, segment_ind
                                 if isinstance(component, Plain)) + 1
             output[insert_at:insert_at] = images
 
-    if quote:
+    telegram_group = (getattr(getattr(event, "platform_meta", None), "name", "") == "telegram"
+                      and prepared.get("channel") == "group")
+    if telegram_group and (mention_components or quote):
+        from companion_v2.adapters.astrbot.telegram_wire import decorate_event_headers
+        output = decorate_event_headers(event, output, mention_components, quote_id if quote else "")
+    elif quote:
         output.insert(0, Reply(id=quote_id))
     if output == list(chain):
         return message

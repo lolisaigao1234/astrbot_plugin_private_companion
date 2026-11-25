@@ -26,6 +26,8 @@ from .forwards import NativeForwardLocator, resource_id
 from .group_mentions import group_message_parts, group_message_text, current_mention_text
 from .voice_stt import VOICE_TRANSCRIPT_PREFIX, trusted_stt_extra_transcript, trusted_stt_transcript
 from companion_v2.conversation.group_timing import SELF_MENTION
+from .telegram_references import message_references
+from .telegram_media import freeze_attachment, safe_text, sticker_marker
 from .files import file_locator, prepare_file_text, MAX_FILES
 
 
@@ -78,22 +80,29 @@ def _has_self_mention_segment(segments, event, account_id):
     return False
 
 
-def _telegram_group_window(event):
+def telegram_rename_message(event):
+    """Return the native service message that renames a Telegram group or topic."""
+    original = getattr(getattr(event.message_obj, "raw_message", None), "message", None)
+    return original if any(getattr(original, field, None) is not None for field in (
+        "forum_topic_created", "forum_topic_edited", "new_chat_title")) else None
+
+
+def _telegram_group_window(event, *, rename=False):
     message = event.message_obj
     original = getattr(getattr(message, "raw_message", None), "message", None)
     chat = getattr(original, "chat", None)
     sender = getattr(original, "from_user", None)
+    # A rename names a window, not a speaker, so an anonymous administrator or a bot may send it.
+    rename = rename and telegram_rename_message(event) is not None
     if (getattr(chat, "type", None) not in {"group", "supergroup"}
             or type(chat.id) is not int or chat.id >= 0
             or message.self_id != getattr(getattr(event, "client", None), "username", None)
-            or getattr(original, "sender_chat", None) is not None
-            or getattr(sender, "is_bot", None) is not False
-            or type(sender.id) is not int or sender.id <= 0
+            or not rename and (getattr(original, "sender_chat", None) is not None
+                               or getattr(sender, "is_bot", None) is not False)
+            or type(getattr(sender, "id", None)) is not int or sender.id <= 0
             or str(sender.id) != message.sender.user_id
             or type(original.message_id) is not int or str(original.message_id) != message.message_id):
         raise TaskError("host_route_mismatch", "Telegram group update does not match the authenticated sender and chat")
-    if not isinstance(original.text, str) or not original.text.strip():
-        raise TaskError("host_group_media_unsupported", "Telegram group capture requires original text")
     window = str(chat.id)
     if original.is_topic_message:
         thread = original.message_thread_id
@@ -104,15 +113,18 @@ def _telegram_group_window(event):
     return window
 
 
-def group_event_route(event):
-    """Cross-check normalized fields against one supported authenticated event."""
+def group_event_route(event, *, rename=False):
+    """Cross-check normalized fields against one supported authenticated event.
+
+    ``rename`` also accepts Telegram renames that no member sent. Such a route identifies a window only.
+    """
     message, meta, session = event.message_obj, event.platform_meta, event.session
     if (getattr(message.type, "value", None) != "GroupMessage"
             or getattr(session.message_type, "value", None) != "GroupMessage"):
         raise TaskError("host_scene_unsupported", "group capture requires a native group event")
     if not supported_platform_name(meta.name):
         raise TaskError("host_route_mismatch", "the native group platform is unsupported")
-    if meta.name == "telegram" and _telegram_group_window(event) != message.group_id:
+    if meta.name == "telegram" and _telegram_group_window(event, rename=rename) != message.group_id:
         raise TaskError("host_route_mismatch", "Telegram group or topic differs from the original update")
     sender, login, group = event_peer_id(event), event_account_id(event), event_group_id(event)
     event_id = native_id(message.message_id)
@@ -363,7 +375,12 @@ class NativeGroupBridge(NativePrivateBridge):
             original_parts = raw.get("message") if isinstance(raw, Mapping) else None
             self._validate_quote_components(original_parts, parts)
             text = self._text_only_parts(event, route, include_parsed_forwards=include_parsed_forwards)
-            message_text = group_message_text(event, route.account_id)
+            references = message_references(event) if route.platform_name == "telegram" else None
+            message_text = safe_text(event, group_message_text(event, route.account_id))
+            if references:
+                text = references.quote_availability(safe_text(event, text))
+                if references.forward_origin:
+                    text = f"{references.forward_marker}\n{text}"
             lease = self.connections.acquire(account)
             at, event_client = datetime.fromtimestamp(event.created_at, timezone.utc), event_native_client(
                 self.context.get_platform_inst(route.platform_id), event)
@@ -375,11 +392,17 @@ class NativeGroupBridge(NativePrivateBridge):
                              account.bot_id, route.account_id, cid, route.session_id)
             if event_client is not self.client(scope) or not self.account_connected(account, event_client):
                 raise TaskError("host_client_mismatch", "group event did not originate from the connected account client")
+            if references and references.unavailable:
+                event.message_obj.message = [part for part in event.message_obj.message
+                                             if getattr(part.type, "value", part.type) != "Reply"]
             speaker = SubjectRef(self.installation_id, SubjectKind.HUMAN,
                 native_user_subject_id(route.platform_name, route.sender_id))
             return Outcome.success(NativeConversationInput(route.event_id, principal,
                 ConversationRoute(scope, group_id=route.group_id), group_audience(scope, speaker), text, at, role,
-                instruction, group_message_text=message_text))
+                instruction, group_message_text=message_text,
+                quote_unavailable=bool(references and references.unavailable),
+                quotes=(references.quote,) if references and references.quote else (),
+                forward_origin=references.forward_origin if references else ""))
         except TaskError as error:
             return Outcome.failed(error.code, str(error))
         except Exception:
@@ -497,26 +520,31 @@ class NativeGroupBridge(NativePrivateBridge):
                 # Such text cannot bypass the original group media contract.
                 raise TaskError("host_group_media_unsupported", "original group components need their own source adapter")
             parts = self.component_reader(event) if self.component_reader is not None else tuple(event.message_obj.message)
-            if not parts or len(parts) > 128:
+            telegram = message_references(event) if route.platform_name == "telegram" else None
+            if (not parts and not sticker_marker(event)) or len(parts) > 128:
                 raise TaskError("host_media_unsupported", "message components are empty or exceed the intake budget")
             self._validate_quote_components(original_parts, parts)
             text_parts, image_locators, quote_locators, forward_locators = [], [], [], []
             audio_locators, video_locators = [], []
             file_locators = []
             parts = group_message_parts(event, route.account_id, native_parts=parts)
-            for position, part in enumerate(parts):
+            if telegram and telegram.quote and not any(getattr(part.type, "value", part.type) == "Reply" for part in parts):
+                if len(parts) >= 128:
+                    raise TaskError("host_media_unsupported", "message components exceed the intake budget")
+                text_parts.append("\n[引用消息]\n")
+            for position, part in enumerate(parts, start=len(text_parts)):
                 kind = getattr(part.type, "value", part.type)
                 if kind == "Plain" and isinstance(part.text, str):
                     text_parts.append(part.text)
                 elif kind == "At":
                     text_parts.append(current_mention_text(part.qq, event, route.account_id))
                 elif kind == "Image" and self.image_type is not None and type(part) is self.image_type:
-                    image_locators.append(image_locator(position, part.file, part.url))
+                    image_locators.append(freeze_attachment(event, image_locator(position, part.file, part.url)))
                     text_parts.append("\n[图片 " + str(len(image_locators)) + "]\n")
-                elif kind == "Reply" and self.reply_type is not None and type(part) is self.reply_type:
+                elif kind == "Reply" and (telegram is not None or type(part) is self.reply_type):
                     if onebot:
                         quote_locators.append(NativeQuoteLocator(position, message_number(part.id)))
-                    text_parts.append("\n[引用消息]\n")
+                    text_parts.append("" if telegram and telegram.unavailable else "\n[引用消息]\n")
                 elif kind == "Forward" and self.forward_type is not None and type(part) is self.forward_type:
                     if onebot:
                         forward_locators.append(NativeForwardLocator(position, resource_id(part.id)))
@@ -525,17 +553,18 @@ class NativeGroupBridge(NativePrivateBridge):
                     value = part.file if type(part.file) is str and part.file.startswith("base64://") else part.url or part.file
                     if type(value) is not str or not value:
                         raise TaskError("host_audio_unavailable", "group voice has no original host attachment")
-                    audio_locators.append(NativeAudioLocator(position, value))
+                    locator = NativeAudioLocator(position, value, telegram_temp=bool(telegram and value == getattr(part, "path", None)))
+                    audio_locators.append(freeze_attachment(event, locator))
                     text_parts.append("\n[语音 " + str(len(audio_locators)) + "]\n")
                 elif kind == "Video" and self.video_type is not None and type(part) is self.video_type:
                     value = part.file if type(part.file) is str and part.file.startswith("base64://") else part.url or part.file
                     if type(value) is not str or not value:
                         raise TaskError("host_video_unavailable", "group video has no original host attachment")
-                    video_locators.append(NativeVideoLocator(position, value))
+                    video_locators.append(freeze_attachment(event, NativeVideoLocator(position, value)))
                     text_parts.append("\n[视频 " + str(len(video_locators)) + "]\n")
                 elif kind == "File" and self.file_type is not None and type(part) is self.file_type:
                     if len(file_locators) < MAX_FILES:
-                        file_locators.append(file_locator(position, part))
+                        file_locators.append(freeze_attachment(event, file_locator(position, part)))
                     text_parts.append("\n[文件附件，正文尚未读取]\n")
                 elif kind in ("Face", "Mface"):
                     # Sticker/emoji: an emotional expression with no payload. It
@@ -589,9 +618,11 @@ class NativeGroupBridge(NativePrivateBridge):
                             raise TaskError("host_group_media_unsupported", "group media differs from its original component")
             elif onebot and (audio_locators or video_locators):
                 raise TaskError("host_group_media_unsupported", "group media requires original OneBot components")
-            if (len(image_locators) > MAX_INPUT_IMAGES or len(quote_locators) > 1
-                    or len(forward_locators) > intake.max_forwards or len(audio_locators) > MAX_INPUT_AUDIOS
-                    or len(video_locators) > MAX_VIDEOS):
+            partial_media = telegram is not None and (bool(event.message_obj.raw_message.message.media_group_id) or any(
+                getattr(part.type, "value", part.type) == "Plain" and part.text.strip() for part in parts))
+            if (len(quote_locators) > 1 or len(forward_locators) > intake.max_forwards
+                    or not partial_media and (len(image_locators) > MAX_INPUT_IMAGES
+                                          or len(audio_locators) > MAX_INPUT_AUDIOS or len(video_locators) > MAX_VIDEOS)):
                 raise TaskError("host_group_media_limit", "group attachments exceed the input budget")
             text = "".join(text_parts)
             if not text.strip() and _has_self_mention_segment(original_parts, event, route.account_id):
@@ -622,13 +653,18 @@ class NativeGroupBridge(NativePrivateBridge):
                 speaker = SubjectRef(self.installation_id, SubjectKind.HUMAN, subject_id)
                 fallback_input = NativeConversationInput(route.event_id, principal,
                     ConversationRoute(scope, group_id=route.group_id), group_audience(scope, speaker),
-                    fallback_text, at, role, instruction)
+                    safe_text(event, fallback_text), at, role, instruction,
+                    quotes=(telegram.quote,) if telegram and telegram.quote else (),
+                    forward_origin=telegram.forward_origin if telegram else "")
             frozen_images, frozen_quotes, frozen_forwards = (tuple(image_locators), tuple(quote_locators),
                                                                tuple(forward_locators))
             frozen_audios, frozen_videos = tuple(audio_locators), tuple(video_locators)
             frozen_files = tuple(file_locators)
             from companion_v2.conversation.media.understanding import settings as understanding_settings
             file_preferences = understanding_settings(self.file_settings(scope, role) if self.file_settings else {})
+
+            from .telegram_media import TelegramReadBudget, capture_turn_media
+            budget = TelegramReadBudget() if telegram is not None else None
 
             async def prepare():
                 images = await self._capture_images(frozen_images)
@@ -675,40 +711,55 @@ class NativeGroupBridge(NativePrivateBridge):
                     audio = await self.audio_loader(locator)
                     if type(audio) is not CapturedAudio or audio.descriptor.position != locator.position:
                         raise TaskError("host_audio_invalid", "group audio loader changed the original component position")
+                    if not fits_video_budget(tuple(video_descriptors), all_images, (*audio_descriptors, audio.descriptor)):
+                        raise TaskError("host_group_media_limit", "group voice and visual attachments exceed the input budget")
                     audios.append(audio)
                     audio_descriptors.append(audio.descriptor)
-                    if not fits_video_budget(tuple(video_descriptors), all_images, tuple(audio_descriptors)):
-                        raise TaskError("host_group_media_limit", "group voice and visual attachments exceed the input budget")
                 videos = []
                 for locator in frozen_videos:
                     video = await self.video_loader(locator)
                     if type(video) is not CapturedVideo or video.descriptor.position != locator.position:
                         raise TaskError("host_video_invalid", "group video loader changed the original component position")
+                    if not fits_video_budget((*video_descriptors, video.descriptor), all_images, tuple(audio_descriptors)):
+                        raise TaskError("host_group_media_limit", "group video and other attachments exceed the input budget")
                     videos.append(video)
                     video_descriptors.append(video.descriptor)
-                    if not fits_video_budget(tuple(video_descriptors), all_images, tuple(audio_descriptors)):
-                        raise TaskError("host_group_media_limit", "group video and other attachments exceed the input budget")
                 if not fits_video_budget(tuple(video_descriptors), all_images, tuple(audio_descriptors)):
                     raise TaskError("host_group_media_limit", "direct, quoted and forwarded media share one input budget")
                 return images, tuple(quotes), forwards, tuple(audios), tuple(videos)
 
             images, quotes, forwards, audios, videos = (), (), (), (), ()
-            if frozen_images or frozen_quotes or frozen_forwards or frozen_audios or frozen_videos:
+            if frozen_images or frozen_quotes or frozen_forwards or frozen_audios or frozen_videos or (telegram and telegram.quote):
                 try:
-                    images, quotes, forwards, audios, videos = await asyncio.wait_for(prepare(), MEDIA_PREPARE_TIMEOUT)
+                    if telegram is not None:
+                        captured = await capture_turn_media(self, telegram, frozen_images, frozen_audios, frozen_videos,
+                                                            text_parts, partial_media, budget, timeout=MEDIA_PREPARE_TIMEOUT)
+                    else:
+                        captured = await asyncio.wait_for(prepare(), MEDIA_PREPARE_TIMEOUT)
+                    images, quotes, forwards, audios, videos = captured
                 except asyncio.TimeoutError:
                     raise TaskError("host_media_timeout", "group attachment preparation exceeded its intake time") from None
+            if partial_media:
+                text = "".join(text_parts)
             if frozen_files:
                 file_text = await prepare_file_text(frozen_files, self.file_loader, file_preferences,
-                    client=event_client, scope=scope, payload_budget=65536 - sum(map(len, text_parts)))
+                    client=event_client, scope=scope, payload_budget=65536 - sum(map(len, text_parts)),
+                    byte_budget=budget.remaining if budget else None)
                 text = "".join(file_text.get(position, part) for position, part in enumerate(text_parts))
-            if frozen_images or frozen_quotes or frozen_forwards or frozen_audios or frozen_videos or frozen_files:
+            if frozen_images or frozen_quotes or frozen_forwards or frozen_audios or frozen_videos or frozen_files or quotes:
                 if await self._role(account, route.session_id) != (cid, role, instruction):
                     raise TaskError("host_persona_changed", "group role changed while preparing attachments")
                 self.connections.assert_current(lease)
                 if (event_client is not self.client(scope)
                         or not self._connection_current(account, event_client, connection)):
                     raise TaskError("host_client_mismatch", "original group account connection changed")
+            if telegram:
+                text = telegram.quote_availability(safe_text(event, text))
+                if telegram.forward_origin:
+                    forward = telegram.capture_forward(route.event_id, text, images, audios, videos)
+                    self._check_shared_forwards((forward,), quotes, intake, "Telegram forward exceeds intake budget")
+                    text = telegram.forward_marker
+                    images, audios, videos, forwards = (), (), (), (forward,)
             speaker = SubjectRef(self.installation_id, SubjectKind.HUMAN, subject_id)
             return Outcome.success(NativeConversationInput(route.event_id, principal,
                 ConversationRoute(scope, group_id=route.group_id), group_audience(scope, speaker), text, at, role, instruction,

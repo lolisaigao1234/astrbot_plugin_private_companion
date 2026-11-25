@@ -12,15 +12,15 @@ class TelegramFile:
     client: object = field(repr=False, compare=False)
 
 
-def private_token(event):
+def telegram_token(event):
     if (getattr(getattr(event, "platform_meta", None), "name", None) == "telegram"
-            and getattr(getattr(event.message_obj, "type", None), "value", None) == "FriendMessage"):
+            and getattr(getattr(event.message_obj, "type", None), "value", None) in {"FriendMessage", "GroupMessage"}):
         return getattr(getattr(event, "client", None), "token", None)
     return None
 
 
 def safe_text(event, text):
-    token = private_token(event)
+    token = telegram_token(event)
     return text.replace(token, "[redacted]") if token else text
 
 

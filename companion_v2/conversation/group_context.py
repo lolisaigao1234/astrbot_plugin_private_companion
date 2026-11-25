@@ -79,7 +79,7 @@ class GroupConversationContext:
         if len(set(keys)) != len(keys):
             raise TaskError("group_context_invalid", "group history references must be unique")
 
-    def read_input(self, ref, context, role_instruction, at, before, *, evidence=None):
+    def read_input(self, ref, context, role_instruction, at, before, *, evidence=None, include_quoted_media=True):
         from .messages import event_from_document
         self.reference_key(ref)
         row = self.runtime.read_one("SELECT rowid AS input_sequence, * FROM conversation_inputs WHERE event_key = ?", (ref["event_key"],))
@@ -96,7 +96,7 @@ class GroupConversationContext:
                 or record.audience != group_audience(original.scope, original.actor.subject)):
             raise TaskError("group_input_audience", "history input is not available to this collective group")
         from .group_media import input_media
-        media, sources = input_media(self.messages, original, event, record, at)
+        media, sources = input_media(self.messages, original, event, record, at, include_quoted_media=include_quoted_media)
         if evidence is not None:
             evidence.extend(sources)
         item = {"type": "group_member_message", "speaker_id": original.actor.principal.native_account_id,

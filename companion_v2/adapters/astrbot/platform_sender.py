@@ -13,7 +13,7 @@ import logging
 from time import perf_counter
 from uuid import uuid4
 
-from astrbot.core.message.components import At, Face, Image, Plain, Record
+from astrbot.core.message.components import At, Face, Image, Plain, Record, Reply
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.platform.message_session import MessageSession
 from astrbot.core.platform.message_type import MessageType
@@ -39,9 +39,13 @@ def _telegram_refusal(error, chain):
     from astrbot.core.platform.sources.telegram.tg_event import TelegramPlatformEvent
     from telegram.error import BadRequest, Forbidden, InvalidToken, RetryAfter
 
-    if len(chain.chain) != 1:
+    components = chain.chain
+    # A leading Reply only sets reply_to_message_id on the following API call.
+    if components and isinstance(components[0], Reply):
+        components = components[1:]
+    if len(components) != 1 or isinstance(components[0], Reply):
         return None
-    component = chain.chain[0]
+    component = components[0]
     if isinstance(component, Plain) and len(component.text) > TelegramPlatformEvent.MAX_MESSAGE_LENGTH:
         return None
     if isinstance(error, Forbidden):
@@ -250,8 +254,16 @@ class AstrBotPlatformSender:
                 return not_sent("empty_message")
             chain = self._chain(component_plan, platform_name=platform_name)
 
+            telegram_quote = ""
+            mention_prefix = ()
             if platform_name == "telegram":
-                from .telegram_wire import telegram_visible
+                from .telegram_wire import member_usernames, send_optional_reply, telegram_visible, telegram_mentions
+                if scope.kind is ScopeKind.GROUP and envelope.plan:
+                    usernames = await member_usernames(lease.client, scope.native_scope_id, envelope.plan.mentions)
+                    chain.chain, mention_prefix = telegram_mentions(chain.chain, usernames)
+                    telegram_quote = envelope.plan.quote
+                    if telegram_quote:
+                        chain.chain.insert(0, Reply(id=telegram_quote))
                 if not telegram_visible(chain.chain):
                     return not_sent("empty_message")
 
@@ -270,7 +282,10 @@ class AstrBotPlatformSender:
             stage = "platform_send"
             try:
                 with redact_telegram_token(lease.client if platform_name == "telegram" else None):
-                    if platform_name == "telegram" and scope.kind is ScopeKind.PRIVATE:
+                    if telegram_quote or mention_prefix:
+                        accepted = await send_optional_reply(lease.client, chain, session.session_id,
+                            mentions=mention_prefix, optional_reply=bool(telegram_quote))
+                    elif platform_name == "telegram" and scope.kind is ScopeKind.PRIVATE:
                         accepted = await send_private_session(platform, session, chain)
                     else:
                         accepted = await platform.send_by_session(session, chain)

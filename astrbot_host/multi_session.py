@@ -217,6 +217,7 @@ class MultiPrivateBridge(NativePrivateBridge):
         from companion_v2.conversation.media.understanding import media_scope_enabled, settings as understanding_settings
         from .audio.loader import fetch_native_audio_bytes
         from .core_reply_media import frozen_image_locators
+        from .core_reply_mentions import TELEGRAM_ATTACHMENT_NOTES
         from .core_reply_video_sources import file_is_video, video_file_suffix, video_positions
         from .telegram_forward_burst import bounded_file_component, temporary_file_component
         from .video.loader import fetch_native_video_bytes
@@ -362,8 +363,10 @@ class MultiPrivateBridge(NativePrivateBridge):
         notes = list(dict.fromkeys(part.text for part in replacements.values() if isinstance(part, Plain)))
         message.message = [replacements.get(position, part) for position, part in enumerate(message.message)]
         if notes:
-            event.message_str = "\n".join([event.message_str, *notes]).strip()
+            added = "\n".join(notes)
+            event.message_str = f"{event.message_str}\n{added}".strip()
             message.message_str = event.message_str
+            event.set_extra(TELEGRAM_ATTACHMENT_NOTES, added)
 
     async def capture_core_reply(self, event):
         """Authenticate a private route for AstrBot's reply path without reading attachments."""
@@ -1459,9 +1462,13 @@ class MultiHostSession:
                     context = self._select_core_reply_context(target, captured)
                 self.bridge.connections.assert_current(connection_lease)
                 self._validate_core_group_admission(group_admission, context, captured)
-                if (context.scope.kind is ScopeKind.PRIVATE and event.platform_meta.name == "telegram"
-                        and (captured.telegram_burst or getattr(event.message_obj.raw_message.message, "media_group_id", None)
-                             or self.bridge.needs_telegram_media_budget(event))):
+                # Preparing attachments adds host notes; only these parts are the member's own.
+                member_parts = tuple(getattr(event.message_obj, "message", ()))
+                if event.platform_meta.name == "telegram" and (
+                    getattr(event.message_obj.raw_message.message, "media_group_id", None)
+                    or self.bridge.needs_telegram_media_budget(event)
+                    or (context.scope.kind is ScopeKind.PRIVATE and captured.telegram_burst)
+                ):
                     await self.bridge.prepare_telegram_album(event, context, quotes=captured.quotes)
                     self.bridge.connections.assert_current(connection_lease)
                 turn_id = "core-reply:" + digest([context.key, captured.event_id])
@@ -1481,10 +1488,21 @@ class MultiHostSession:
                         and not strip_address_markers(captured.text).strip())
                     # Native media fallbacks carry placeholders; only original
                     # Plain components may become a member's memory evidence.
-                    raw_text = "".join(part.text for part in getattr(event.message_obj, "message", ())
+                    telegram = getattr(getattr(event, "platform_meta", None), "name", "") == "telegram"
+                    if telegram:
+                        from companion_v2.adapters.astrbot.telegram_references import voice_caption_parts
+                        member_parts = voice_caption_parts(event.message_obj.raw_message.message, member_parts)
+                    raw_text = "".join(part.text for part in member_parts
                         if getattr(getattr(part, "type", None), "value", getattr(part, "type", None)) == "Plain"
                         and isinstance(getattr(part, "text", None), str))
-                    captured = replace(captured, text=telegram_plain_text(event, raw_text),
+                    if telegram:
+                        from companion_v2.adapters.astrbot.telegram_media import safe_text, sticker_marker
+                        raw_text = safe_text(event, telegram_plain_text(event, raw_text))
+                        if sticker := sticker_marker(event):
+                            raw_text = sticker
+                        if captured.forward_origin:
+                            raw_text = f"[转发消息，来源：{captured.forward_origin}]\n{raw_text}"
+                    captured = replace(captured, text=raw_text,
                         merged_event_ids=tuple((group_admission or {}).get("debounced_event_ids", ())))
                 segmentation_settings, presentation_settings = None, None
                 group_tool_profile = "full"

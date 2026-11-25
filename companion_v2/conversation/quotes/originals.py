@@ -11,24 +11,29 @@ from companion_v2.foundation.refs import ScopeKind, ScopeRef
 from .models import TelegramQuoteDescriptor
 
 
-def _telegram_text(payload, quote, has_image):
-    """Recover Telegram's original UTF-16 coordinates from verified AstrBot link expansions."""
+def telegram_text(payload, quote, has_image):
+    """Recover Telegram's original UTF-16 coordinates from verified link expansions and group mention markers."""
     prefix = "\n[图片 1]\n" if has_image and payload.startswith("\n[图片 1]\n") else ""
     encoded = payload[len(prefix):].encode("utf-16-le")
-    # Each removal restores the original coordinates for the next link.
-    for end, units, fingerprint in getattr(quote, "link_suffixes", ()):
-        start, stop = 2 * end, 2 * (end + units)
+    # Undo each SDK edit in order so the next offset is in Telegram coordinates.
+    edits = [(end, units, fingerprint, "") for end, units, fingerprint in getattr(quote, "link_suffixes", ())]
+    mentions = getattr(quote, "self_mentions", ())
+    if mentions:
+        from companion_v2.conversation.group_timing import SELF_MENTION
+        edits.extend((offset, len(SELF_MENTION), digest(SELF_MENTION), spelling) for offset, spelling in mentions)
+    for offset, units, fingerprint, replacement in sorted(edits, key=lambda edit: edit[0]):
+        start, stop = 2 * offset, 2 * (offset + units)
         try:
-            suffix = encoded[start:stop].decode("utf-16-le")
+            stored = encoded[start:stop].decode("utf-16-le")
         except UnicodeDecodeError:
-            suffix = ""
-        if not suffix or digest(suffix) != fingerprint:
-            raise TaskError("quote_original_changed", "quoted link differs from the admitted original")
-        encoded = encoded[:start] + encoded[stop:]
+            stored = ""
+        if not stored or digest(stored) != fingerprint:
+            raise TaskError("quote_original_changed", "quoted entity differs from the admitted original")
+        encoded = encoded[:start] + replacement.encode("utf-16-le") + encoded[stop:]
     return prefix, encoded.decode("utf-16-le")
 
 
-def _telegram_original(messages, context, saved, quote, body, references, at):
+def telegram_original(messages, context, saved, quote, body, references, at):
     from companion_v2.conversation.forwards.service import forward_reference, node_reference
 
     media_event = saved
@@ -68,7 +73,7 @@ def _telegram_original(messages, context, saved, quote, body, references, at):
     return body, media_event, owner
 
 
-def _attachment_caption(body, owner, quote):
+def telegram_attachment_caption(body, owner, quote):
     attachment = quote.attachment
     audios = getattr(owner, "audios", ())
     if attachment.kind == "voice" and len(audios) == 1 and body.startswith("\n[语音 1]\n"):
@@ -86,7 +91,7 @@ def _attachment_caption(body, owner, quote):
         label = f"[文件 {name}]" if attachment.kind == "document" else "[文件]"
     else:
         raise TaskError("quote_original_changed", "attachment differs from admitted Telegram original")
-    _, caption = _telegram_text(caption, quote, False)
+    _, caption = telegram_text(caption, quote, False)
     full = label + ("\n" + caption if caption else "")
     if digest(full) != attachment.projection_hash:
         raise TaskError("quote_original_changed", "attachment label or caption changed")
@@ -129,13 +134,13 @@ def original_sources(messages, context, event, quote, text, at, *, publish):
             media_event = saved
             telegram = isinstance(quote, TelegramQuoteDescriptor)
             if telegram:
-                body, media_event, owner = _telegram_original(messages, context, saved, quote, body, references, at)
+                body, media_event, owner = telegram_original(messages, context, saved, quote, body, references, at)
             prefix = ""
             attachment = getattr(quote, "attachment", None)
             if attachment:
-                body = _attachment_caption(body, owner, quote)
+                body = telegram_attachment_caption(body, owner, quote)
             elif offset is not None or getattr(quote, "link_suffixes", ()):
-                prefix, body = _telegram_text(body, quote, bool(getattr(media_event, "images", ())))
+                prefix, body = telegram_text(body, quote, bool(getattr(media_event, "images", ())))
             if offset is not None:
                 # Telegram selection positions are UTF-16 code units, including on emoji.
                 selected = text.encode("utf-16-le")

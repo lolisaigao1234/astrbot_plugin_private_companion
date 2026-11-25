@@ -1,11 +1,11 @@
 """Remove private file credentials left in SDK-generated provider content."""
 
-from companion_v2.adapters.astrbot.telegram_media import private_token
+from companion_v2.adapters.astrbot.telegram_media import telegram_token
 from astrbot.core.agent.message import AudioURLPart, ImageURLPart, TextPart, ThinkPart
 
 
 def protect_telegram_request(event, request):
-    token = private_token(event)
+    token = telegram_token(event)
     if not isinstance(token, str) or not token:
         return
 

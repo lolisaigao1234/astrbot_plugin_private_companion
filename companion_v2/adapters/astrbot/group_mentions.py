@@ -121,14 +121,27 @@ def _telegram_mention_projection(event, parts):
 
 
 def _telegram_parts(event, parts):
+    from .telegram_media import sticker_marker
+    from .telegram_references import voice_caption_parts
+
+    parts = voice_caption_parts(event.message_obj.raw_message.message, parts)
     mention = _telegram_mention_projection(event, parts)
+    sticker = sticker_marker(event)
     result = []
     for index, part in enumerate(parts):
-        if component_kind(part) == "Plain":
+        kind = component_kind(part)
+        if kind == "At":
+            part = SimpleNamespace(type="Plain", text="")
+        elif kind == "Plain":
             text = mention[1] if mention and mention[0] == index else telegram_plain_text(event, part.text)
-            result.append(SimpleNamespace(type="Plain", text=text))
+            if sticker and text.startswith("Sticker: "):
+                text = ""
+            part = SimpleNamespace(type="Plain", text=text)
+        result.append(part)
     if mention and mention[0] == len(parts):
         result.append(SimpleNamespace(type="Plain", text=mention[1]))
+    if sticker:
+        result.append(SimpleNamespace(type="Plain", text=sticker))
     return tuple(result)
 
 
