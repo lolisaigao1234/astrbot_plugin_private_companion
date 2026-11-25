@@ -463,6 +463,11 @@ class NativeConversationInput:
     forward_origin: str = ""
     telegram_burst: tuple["NativeConversationInput", ...] = ()
 
+    @property
+    def own_text(self):
+        """The sender's words without any forwarded text."""
+        return "\n".join(item.text for item in self.telegram_burst or (self,) if not item.forward_origin)
+
 
 NativePrivateInput = NativeConversationInput  # Preserve the private adapter's public snapshot name.
 
