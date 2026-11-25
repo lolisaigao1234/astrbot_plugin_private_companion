@@ -1448,12 +1448,16 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
         root = self.bot_topic(forum_topic_created=ForumTopicCreated("Topic", 0))
         reply = self.bot_topic(24, text="之前")
         mention = {"entities": [MessageEntity("mention", 2, 14)]}
+        link = {"entities": [MessageEntity("text_link", 3, 2, url="https://example.org")]}
         for prefixes, text, original, fields, reason, prompt in (
                 (["/"], "今天天气还行", root, {}, "", "今天天气还行"),
                 (["小爱"], "今天天气还行", root, {}, "", "今天天气还行"),
                 (["/"], "/ 今天天气", root, {}, "native_wakeup", "今天天气"),
                 (["小爱"], "小爱 今天天气", root, {}, "native_wakeup", "今天天气"),
                 (["/", "小爱"], "小爱 今天天气", root, {}, "native_wakeup", "今天天气"),
+                (["/"], "/ 看链接", root, link, "native_wakeup", "看链接 (https://example.org)"),
+                (["小爱"], "小爱 问 @synthetic_bot 继续", root, {"entities": [MessageEntity("mention", 5, 14)]},
+                 "mention", f"问 {SELF_MENTION} 继续"),
                 (["小爱"], "继续", reply, {}, "native_quote", "继续"),
                 (["/"], "继续", reply, {}, "native_quote", "继续"),
                 (["/"], "问 @synthetic_bot 继续", root, mention, "mention", f"问 {SELF_MENTION} 继续"),
@@ -1480,6 +1484,11 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
                     request = NS(prompt=event.message_str)
                     restore_group_mentions(event, request, native, self.native)
                     self.assertEqual(request.prompt, prompt)
+        require(await self.controller.stop())
+        event = await self.waking_event(["/"], "今天天气还行", root)
+        self.assertTrue(event.is_at_or_wake_command)
+        await plugin.receive_companion_message(event)
+        self.assertFalse(event.is_at_or_wake_command)
 
     async def test_topic_created_by_the_bot_merges_only_typed_text(self):
         from companion_v2.adapters.astrbot.group_mentions import group_message_text
