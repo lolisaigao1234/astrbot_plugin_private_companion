@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping
 
+from companion_v2.adapters.astrbot.telegram_reply import telegram_plain_text
 from companion_v2.conversation.private_debounce import MAX_MERGED_CHARS, Policy
 
 from .binding import telegram_forward_message
@@ -38,7 +39,7 @@ def group_plain_text(event):
         if part_kind != "Plain" or not isinstance(value, str):
             return None
         texts.append(value)
-    text = "".join(texts)
+    text = telegram_plain_text(event, "".join(texts))
     return text if text.strip() and len(text) <= MAX_MERGED_CHARS else None
 
 
@@ -48,9 +49,11 @@ def replace_group_plain_text(event, text):
         return False
     try:
         part = event.message_obj.message[0]
-        part.text = text
+        # Keep AstrBot's reply marker: readers of the native message take it off exactly once.
+        marked = part.text.removesuffix(telegram_plain_text(event, part.text)) + text
+        part.text = marked
         event.message_obj.message = [part]
-        event.message_obj.message_str = text
+        event.message_obj.message_str = marked
         event.message_str = text
     except (AttributeError, TypeError):
         return False

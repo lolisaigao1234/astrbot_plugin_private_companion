@@ -310,6 +310,40 @@ class TelegramGroupMediaTests(TelegramHostFixture, unittest.IsolatedAsyncioTestC
             self.assertIn("看 <提及自己> 正文", payload)
             self.assertNotIn("匿名引用原文", payload)
 
+    async def test_group_turn_text_is_the_members_own(self):
+        from astrbot.core.astr_main_agent import collect_initial_request
+        from astrbot_host.core_reply_mentions import restore_group_mentions
+        from companion_v2.conversation.group_timing import SELF_MENTION
+        from companion_v2.execution.models import TaskError
+
+        async def download(url, *, path):
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_bytes(audio_bytes())
+
+        mention = [dict(type="mention", offset=2, length=14)]
+        note = "\n[附件超过读取上限，本轮未读取]"
+        for number, fields, expected in (
+                (11, dict(photo=[dict(file_id="photo", file_unique_id="p", width=2, height=3)]), note),
+                (12, dict(voice=dict(file_id="voice", file_unique_id="v1", duration=1)), "")):
+            with self.subTest(number=number):
+                update = self.update(number, caption="看 @Synthetic_bot 这个", caption_entities=mention, **fields)
+                with (patch("astrbot.core.platform.sources.telegram.tg_adapter.download_file", download),
+                      patch("astrbot_host.media.fetch_image",
+                            AsyncMock(side_effect=TaskError("host_image_limit", "synthetic limit"))),
+                      patch("astrbot.core.astr_main_agent._get_session_conv",
+                            AsyncMock(return_value=NS(history="[]")))):
+                    message = await self.platform.convert_message(update, NS(bot=self.platform.client))
+                    event = self.platform.create_event(message)
+                    event.created_at = self.clock.now().timestamp()
+                    target = self.controller.settings.target("test-group")
+                    prepared = (await self.controller.session.prepare_core_reply(event, target)).unwrap()
+                    request, _ = await collect_initial_request(
+                        event, NS(), NS(provider_wake_prefix="", provider_settings={}))
+                native = prepared["native_input"]
+                self.assertEqual(native.text, "看 @Synthetic_bot 这个")
+                restore_group_mentions(event, request, native, NS())
+                self.assertEqual(request.prompt, f"看 {SELF_MENTION} 这个{expected}")
+
     async def test_caption_keeps_mention_link_and_photo(self):
         from companion_v2.conversation.group_timing import SELF_MENTION
 
