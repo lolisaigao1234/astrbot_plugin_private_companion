@@ -164,6 +164,258 @@ class TelegramHostFixture(MultiFixture):
         if plugin._host_start_task is not None:
             await asyncio.wait_for(plugin._host_start_task, timeout=20)
 
+    def enable_typing(self, interval=1):
+        from astrbot_host.management_identity import dashboard_operator
+        from companion_v2.role_work.state.management import StateManagement
+        manager = StateManagement(self.app, self.context)
+        operator = dashboard_operator(self.app.runtime, "synthetic", at=self.clock.now())
+        status = manager.status(operator).unwrap()
+        manager.command(operator, dict(action="configure", operation_key="typing-on",
+            edit_token=status["edit_token"], role_edit_token=status["role_edit_token"],
+            changes={"typing_enabled": True, "typing_refresh_seconds": interval})).unwrap()
+
+
+class TelegramPresenceTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.app = await self.start_host()
+        self.context, _ = await self.controller.session.synchronize(self.controller.settings.target("tg-owner"))
+        self.action = self.platform.client.send_chat_action = AsyncMock(return_value=True)
+        self.presence = self.app.presence
+
+    async def test_typing_redacts_httpx_request(self):
+        self.enable_typing()
+        bot = self.platform.client
+        transport = httpx.MockTransport(lambda request: httpx.Response(200))
+        async with httpx.AsyncClient(transport=transport) as http:
+            async def chat_action(**kwargs):
+                await http.post(f"https://telegram.invalid/bot{bot.token}/sendChatAction")
+                return True
+
+            self.action.side_effect = chat_action
+            with self.assertLogs("httpx", "INFO") as logs:
+                result = await self.presence.port.typing(self.context)
+        self.assertEqual(result["state"], "accepted")
+        record, = logs.records
+        self.assertIn("/bot[redacted]/sendChatAction", record.getMessage())
+        self.assertNotIn(bot.token, repr(vars(record)))
+
+    async def run_to_host_waiting_hook(self, number, *, peer=OWNER):
+        from astrbot.core.pipeline.process_stage.method.agent_sub_stages import internal
+
+        # Follow Telegram's ordinary update -> adapter queue -> plugin intake
+        # route, then run the real host substage up to the waiting hook.
+        self.platform._event_queue = asyncio.Queue()
+        self.platform.client.username = "synthetic_bot"
+        update = Update(number, message=Message(number, date=datetime.now(timezone.utc),
+            chat=Chat(peer, "private"), from_user=User(peer, "Synthetic", False), text="你好 😀"))
+        await self.platform.message_handler(update, NS(bot=self.platform.client))
+        event = self.platform._event_queue.get_nowait()
+        event.set_extra("activated_handlers", [])
+        event.created_at = self.clock.now().timestamp()
+        await self.started_plugin().receive_companion_message(event)
+        waiting = AsyncMock(return_value=True)
+        with patch.object(internal, "call_event_hook", waiting):
+            stage = internal.InternalAgentSubStage.__new__(internal.InternalAgentSubStage)
+            stage.streaming_response = stage.show_reasoning = False
+            async with asyncio.timeout(3):
+                async for _ in stage.process(event, ""):
+                    pass
+        waiting.assert_awaited_once_with(event, internal.EventType.OnWaitingLLMRequestEvent)
+        await asyncio.sleep(0)
+        return event
+
+    async def test_host_indicator_respects_setting_and_leaves_unmanaged_peer_alone(self):
+        await self.run_to_host_waiting_hook(1)
+        self.action.assert_not_awaited()
+        with patch.object(self.app.private_access_settings, "defaults_installation",
+                          return_value={"stranger_notice": False}):
+            await self.run_to_host_waiting_hook(2, peer=OWNER + 1)
+        self.action.assert_awaited_once_with(chat_id=str(OWNER + 1), action="typing")
+
+    async def test_host_indicator_with_disconnected_client(self):
+        self.enable_typing()
+        self.platform.application.updater.running = False
+        await self.run_to_host_waiting_hook(1)
+        self.action.assert_not_awaited()
+
+    async def test_host_indicator_with_missing_grant(self):
+        self.enable_typing()
+        identities = self.controller.session.bridge.identities
+        grant = next(g for g in identities.grants_for_subject(self.context.actor.subject)
+                     if g.capability == "platform.typing")
+        identities.revoke_grant(grant.grant_id, revoked_at=self.clock.now(), expected_revision=identities.revision)
+        await self.run_to_host_waiting_hook(1)
+        self.action.assert_not_awaited()
+
+    async def test_host_waiting_hook_proceeds_while_authorized_indicator_is_pending(self):
+        self.enable_typing()
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def slow(**kwargs):
+            entered.set()
+            await release.wait()
+            return True
+
+        self.action.side_effect = slow
+        try:
+            event = await self.run_to_host_waiting_hook(1)
+            await asyncio.wait_for(entered.wait(), 3)
+            self.action.assert_awaited_once_with(chat_id=OWNER, action="typing")
+            self.assertTrue(event.get_extra(CORE_REPLY_CONTEXT_EXTRA)["prepared"])
+        finally:
+            release.set()
+
+    async def test_long_reply_refreshes_until_finished(self):
+        self.enable_typing(interval=10)
+        renewed = asyncio.Event()
+
+        async def typing(**kwargs):
+            if self.action.await_count >= 2:
+                renewed.set()
+            return True
+
+        self.action.side_effect = typing
+        self.presence.begin_native_reply(self.context, "long-reply")
+        try:
+            await asyncio.wait_for(renewed.wait(), 8)
+            self.action.assert_awaited_with(chat_id=OWNER, action="typing")
+            worker = self.presence.typing[self.presence.route(self.context)][2]
+        finally:
+            self.presence.finish_native_reply(self.context, "long-reply")
+        await asyncio.wait_for(asyncio.gather(worker, return_exceptions=True), 3)
+        self.assertFalse(self.presence.active_handles)
+
+    async def test_setting_off_does_not_start_typing(self):
+        self.presence.begin_native_reply(self.context, "disabled")
+        self.assertIsNotNone(self.presence.active_turn(self.context))
+        self.assertFalse(self.presence.active_handles)
+        self.presence.finish_native_reply(self.context, "disabled")
+        self.action.assert_not_awaited()
+
+    async def test_disconnect_and_revoked_grant_prevent_dispatch(self):
+        self.enable_typing()
+        port = self.presence.port
+        self.platform.application.updater.running = False
+        self.assertEqual((await port.typing(self.context))["state"], "not_started")
+        self.platform.application.updater.running = True
+        identities = self.controller.session.bridge.identities
+        grant = next(g for g in identities.grants_for_subject(self.context.actor.subject)
+                     if g.capability == "platform.typing")
+        identities.revoke_grant(grant.grant_id, revoked_at=self.clock.now(), expected_revision=identities.revision)
+        self.assertEqual((await port.typing(self.context))["state"], "not_started")
+        self.action.assert_not_awaited()
+
+    async def test_account_status_is_unsupported(self):
+        port = self.presence.port
+        self.assertEqual((await port.online_status(self.context, "online"))["code"], "presence_unsupported")
+        self.assertEqual((await port.custom_status(self.context, "休息"))["code"], "presence_unsupported")
+        self.action.assert_not_awaited()
+
+    async def test_rate_limited_typing_resumes_after_the_requested_delay(self):
+        self.enable_typing()
+        loop = asyncio.get_running_loop()
+        stamps = []
+        renewed = asyncio.Event()
+
+        async def action(**kwargs):
+            stamps.append(loop.time())
+            if len(stamps) == 1:
+                raise RetryAfter(1)
+            renewed.set()
+            return True
+
+        self.action.side_effect = action
+        self.presence.begin_native_reply(self.context, "rate-limited")
+        try:
+            await asyncio.wait_for(renewed.wait(), 6)
+            self.assertGreaterEqual(stamps[1] - stamps[0], 1)
+        finally:
+            self.presence.finish_native_reply(self.context, "rate-limited")
+
+    async def test_rate_limit_survives_a_new_reply_to_the_same_peer(self):
+        self.enable_typing()
+        loop = asyncio.get_running_loop()
+        sent = asyncio.Event()
+        times = []
+
+        async def action(**kwargs):
+            times.append(loop.time())
+            if len(times) == 1:
+                raise RetryAfter(1)
+            sent.set()
+            return True
+
+        self.action.side_effect = action
+        self.presence.begin_native_reply(self.context, "first")
+        route = self.presence.route(self.context)
+        async with asyncio.timeout(3):
+            while self.presence.results_for(self.context).get("typing:" + route, {}).get("retry_after") != 1:
+                await asyncio.sleep(0.01)
+        self.presence.finish_native_reply(self.context, "first")
+        self.presence.begin_native_reply(self.context, "second")
+        try:
+            await asyncio.wait_for(sent.wait(), 5)
+            self.assertGreaterEqual(times[1] - times[0], 1)
+        finally:
+            self.presence.finish_native_reply(self.context, "second")
+
+    async def test_slow_rate_limited_action_is_independent_of_reply(self):
+        self.enable_typing()
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def limited(**kwargs):
+            entered.set()
+            await release.wait()
+            raise RetryAfter(42)
+
+        self.action.side_effect = limited
+        self.presence.begin_native_reply(self.context, "rate-limited")
+        await asyncio.wait_for(entered.wait(), 3)
+        release.set()
+        route = self.presence.route(self.context)
+        worker = self.presence.typing[route][2]
+        async with asyncio.timeout(3):
+            while not self.presence.results_for(self.context).get("typing:" + route):
+                await asyncio.sleep(0.01)
+        self.assertEqual(self.presence.results_for(self.context)["typing:" + route]["retry_after"], 42)
+        self.assertIsNotNone(self.presence.active_turn(self.context))
+        self.presence.finish_native_reply(self.context, "rate-limited")
+        await asyncio.wait_for(asyncio.gather(worker, return_exceptions=True), 3)
+        self.action.assert_awaited_once()
+
+    async def test_failed_and_cancelled_reply_tasks_release_typing(self):
+        self.enable_typing()
+        plugin = self.started_plugin()
+        for number, cancel in enumerate((False, True), start=1):
+            with self.subTest(cancel=cancel):
+                prepared = asyncio.get_running_loop().create_future()
+                release = asyncio.Event()
+
+                async def reply():
+                    event = telegram_event(self.platform, number)
+                    event.created_at = self.clock.now().timestamp()
+                    await plugin.receive_companion_message(event)
+                    prepared.set_result(event.get_extra(CORE_REPLY_CONTEXT_EXTRA)["prepared"]["context"])
+                    await release.wait()
+                    raise RuntimeError("synthetic reply failure")
+
+                task = asyncio.create_task(reply())
+                self.addAsyncCleanup(self.cancel_reply, task)
+                context = await asyncio.wait_for(prepared, 30)
+                self.assertIsNotNone(self.presence.active_turn(context))
+                if cancel:
+                    task.cancel()
+                else:
+                    release.set()
+                with self.assertRaises(asyncio.CancelledError if cancel else RuntimeError):
+                    await task
+                self.assertIsNone(self.presence.active_turn(context))
+
+    @staticmethod
+    async def cancel_reply(task):
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
 
 class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -205,23 +457,24 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
                 self.assertEqual((receipt.status, receipt.failure_code), ("not_sent", reason))
                 self.assertNotIn(token, " ".join(logs.output))
 
-    async def test_chat_action_warning_redacts_the_bot_token(self):
+    async def test_delivery_markdown_fallback_warning_redacts_the_bot_token(self):
         token = self.platform.client.token
-        self.platform.client.send_chat_action.side_effect = InvalidToken(token)
-        self.platform.client.send_message.side_effect = InvalidToken(token)
+        self.platform.client.send_message.side_effect = [
+            BadRequest(f"can't parse entities: {token}"), InvalidToken(token),
+        ]
         with self.assertLogs("astrbot", level="WARNING") as host_logs:
             receipt = await self.send()
         self.assertEqual((receipt.status, receipt.failure_code), ("not_sent", "telegram_invalid_token"))
         self.assertNotIn(token, " ".join(host_logs.output))
         self.assertIn("[redacted]", " ".join(host_logs.output))
 
-    async def test_private_notice_redacts_host_chat_action_warning(self):
+    async def test_private_notice_redacts_markdown_fallback_warning(self):
         from astrbot_host.private_notice import send_private_notice
 
         event = telegram_event(self.platform)
         route = authenticate_notice_route(self.controller, event, ScopeKind.PRIVATE, expected_post="message")
         token = self.platform.client.token
-        self.platform.client.send_chat_action.side_effect = InvalidToken(token)
+        self.platform.client.send_message.side_effect = [BadRequest(f"can't parse entities: {token}"), None]
         with self.assertLogs("astrbot", level="WARNING") as logs:
             receipt = await send_private_notice(self.controller, event, text="验证", route=route)
         self.assertEqual(receipt["state"], "delivered")
@@ -233,12 +486,12 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
 
         event = telegram_event(self.platform)
         token = self.platform.client.token
-        self.platform.client.send_chat_action.side_effect = InvalidToken(token)
+        self.platform.client.send_message.side_effect = [BadRequest(f"can't parse entities: {token}"), None]
         with self.assertLogs("astrbot", level="WARNING") as logs:
             receipt = await _send_private(self.controller, event, platform_id="tg-main",
                                           login="tg-main", peer=str(OWNER), text="送达回执")
         self.assertEqual(receipt["state"], "delivered")
-        self.platform.client.send_message.assert_awaited_once()
+        self.assertEqual(self.platform.client.send_message.await_count, 2)
         self.assertNotIn(token, " ".join(logs.output))
 
     async def test_httpx_logs_redact_delivery_notice_and_relay_requests(self):
@@ -255,13 +508,9 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
             return httpx.Response(200)
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
-            async def chat_action(*args, **kwargs):
-                await http.post(f"https://telegram.invalid/bot{token}/sendChatAction")
-
             async def message(*args, **kwargs):
                 await http.post(f"https://telegram.invalid/bot{token}/sendMessage")
 
-            self.platform.client.send_chat_action.side_effect = chat_action
             self.platform.client.send_message.side_effect = message
             with self.assertLogs("httpx", "INFO") as logs:
                 self.assertEqual((await self.send()).status, "delivered")
@@ -270,7 +519,8 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
                                             login="tg-main", peer=str(OWNER), text="回执")
                 self.assertEqual((notice["state"], relay["state"]), ("delivered", "delivered"))
 
-        methods = ["sendChatAction", "sendMessage"] * 3
+        self.platform.client.send_chat_action.assert_not_awaited()
+        methods = ["sendMessage"] * 3
         self.assertEqual(paths, [f"/bot{token}/{method}" for method in methods])
         self.assertEqual(len(logs.records), len(methods))
         for record, method in zip(logs.records, methods):

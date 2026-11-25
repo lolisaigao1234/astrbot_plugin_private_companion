@@ -1,5 +1,6 @@
 """V2 live speech services."""
 from __future__ import annotations
+from companion_v2.adapters.astrbot.telegram_send import send_context_message
 from .common import *
 
 class LiveSpeechMethods:
@@ -10,7 +11,7 @@ class LiveSpeechMethods:
             record_chain = await self._build_bili_live_tts_chain(session_id, text, push_subtitle=push_subtitle)
             if not record_chain:
                 return
-            await self.context.send_message(session_id, MessageChain(record_chain))
+            await send_context_message(self.context, session_id, MessageChain(record_chain))
             await self._start_bili_live_mouth_sync_for_chain(record_chain)
             logger.info('[B站直播] 已后台补发直播自动回应 TTS: elapsed=%.2fs session=%s', time.perf_counter() - started_at, session_id)
         except Exception as e:
@@ -33,7 +34,7 @@ class LiveSpeechMethods:
         await self._start_bili_live_mouth_sync_for_chain(chain)
         self._schedule_bili_live_tts_local_playback(str(payload.get('audio_path') or ''))
         self._schedule_bili_live_tts_web_playback(str(payload.get('audio_path') or ''))
-        await self.context.send_message(session_id, MessageChain(chain))
+        await send_context_message(self.context, session_id, MessageChain(chain))
         return True
 
     async def _start_bili_live_mouth_sync_for_chain(self, chain: list[Any]) -> None:

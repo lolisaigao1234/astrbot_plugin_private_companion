@@ -22,6 +22,7 @@ class PresenceCoordinator:
         self.app, self.runtime, self.port = app, app.runtime, port
         self.typing, self.suppressed, self.contexts, self.results = {}, {}, {}, {}
         self.native_replies, self._typing_wakes = {}, {}
+        self._typing_retry_until = {}
         self._result_contexts = {}
         self._active_routes = {}
         self.status_worker = None
@@ -203,9 +204,18 @@ class PresenceCoordinator:
     async def _pulse(self, context):
         # One continuous lease covers the whole turn, including tools and part gaps.
         # Stop refreshing when the lease ends; don't issue an unverified protocol toggle.
-        wake = self._typing_wakes.setdefault(self.route(context), asyncio.Event())
+        route = self.route(context)
+        wake = self._typing_wakes.setdefault(route, asyncio.Event())
+        clock = asyncio.get_running_loop().time
         reported_batch = None
         while not self.closed:
+            retry_at = self._typing_retry_until.get(route)
+            if retry_at is not None:
+                delay = retry_at - clock()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                    continue
+                self._typing_retry_until.pop(route)
             wake.clear()
             values = self._allowed(context, "typing_enabled", "platform.typing")
             turn = self.active_turn(context)
@@ -215,18 +225,28 @@ class PresenceCoordinator:
                 turn = self.active_turn(context)
                 if turn is None:
                     raise TaskError("typing_turn_closed", "the original reply has ended")
+            started = asyncio.get_running_loop().time()
             result = await asyncio.wait_for(self.port.typing(context, before_dispatch=current), timeout=3)
             self._record_result("typing:" + self.route(context),
                                 {**result, "batch_id": turn["batch_id"] if turn else None}, context.key)
             batch = turn["batch_id"] if turn else None
             if batch != reported_batch or result.get("state") != "accepted":
-                logger.info("[CompanionV2] QQ 输入提示 recipient=%s turn_id=%s state=%s code=%s",
+                logger.info("[CompanionV2] 输入提示 recipient=%s turn_id=%s state=%s code=%s",
                             context.scope.native_scope_id, batch, result.get("state"), result.get("code", ""))
                 reported_batch = batch
+            if "retry_after" in result:
+                # A replacement reply on this recipient must observe the same flood-control deadline.
+                self._typing_retry_until[route] = clock() + result["retry_after"]
+                continue
             if result.get("state") != "accepted":
                 return
+            interval = values["typing_refresh_seconds"]
+            if "max_refresh_seconds" in result:
+                # A slow acknowledgement consumes part of the platform's typing lifetime.
+                remaining = started + result["max_refresh_seconds"] - asyncio.get_running_loop().time()
+                interval = min(interval, max(0, remaining))
             try:
-                await asyncio.wait_for(wake.wait(), timeout=values["typing_refresh_seconds"])
+                await asyncio.wait_for(wake.wait(), timeout=interval)
             except asyncio.TimeoutError:
                 pass
 

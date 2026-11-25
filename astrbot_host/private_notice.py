@@ -22,6 +22,7 @@ from collections.abc import Mapping
 from weakref import WeakValueDictionary
 
 from companion_v2.adapters.astrbot.telegram_logging import redact_telegram_token
+from companion_v2.adapters.astrbot.telegram_send import send_private_session
 from companion_v2.execution.models import TaskError, digest
 from companion_v2.foundation.refs import ScopeKind
 
@@ -143,7 +144,7 @@ async def send_private_notice(controller, event, *, text, route, transport=None)
             platform = lease.platform
         session = MessageSession(route.platform_id, MessageType.FRIEND_MESSAGE, peer)
         with redact_telegram_token(platform.get_client() if platform_name == "telegram" else None):
-            accepted = await platform.send_by_session(session, MessageChain(chain=[Plain(str(text))]))
+            accepted = await send_private_session(platform, session, MessageChain(chain=[Plain(str(text))]))
         if platform_name == "telegram" and accepted is False:
             return {"state": "failed", "reason": "platform_call_failed"}
     except Exception:  # noqa: BLE001 - send outcome is unknown, never replayed here

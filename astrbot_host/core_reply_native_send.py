@@ -18,6 +18,7 @@ except ModuleNotFoundError as error:
     from astrbot.core.tools.message_tools import SendMessageToUserTool
 
 from companion_v2.adapters.astrbot.telegram_logging import redact_event_error, redact_event_token
+from companion_v2.adapters.astrbot.telegram_send import send_context_message
 from companion_v2.execution.models import TaskError, digest
 from .core_reply import CORE_REPLY_CONTEXT_EXTRA, assert_core_reply_connection, sent_core_text
 from .core_reply_presentation import present_core_reply_message
@@ -108,7 +109,7 @@ class _CurrentReplyContext:
             from .core_reply_behavior import observe_core_behavior_delivery
             observe_core_behavior_delivery(tool._event, part, "started")
             try:
-                result = await self._original.send_message(session, wire)
+                result = await send_context_message(self._original, session, wire)
             except BaseException:
                 attempts[key] = "unknown"
                 state["send_unknown"] += 1
