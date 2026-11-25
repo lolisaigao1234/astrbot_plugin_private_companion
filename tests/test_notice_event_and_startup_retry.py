@@ -295,7 +295,8 @@ def _build_main_import_stubs():
             if item == "QzoneLifePublisher":
                 return lambda _staging: NS(start=lambda: NS())
             if item == "PrivateDebounce":
-                return NS(private_plain_text=lambda _event: None)
+                return type(item, (), {"private_plain_text": staticmethod(lambda _event: None),
+                                       "collecting_event": lambda *_args, **_kwargs: False})
             if item in ("refuse_stranger", "receive_phone_confirmation",
                         "receive_reset_command", "receive_group_llm_command"):
                 return AsyncMock(return_value=None)
