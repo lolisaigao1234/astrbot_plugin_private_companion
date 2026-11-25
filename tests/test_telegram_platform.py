@@ -869,6 +869,23 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
         self.assertIn("telegram/_bot.py", logs)
         self.assertNotIn(bot.token, logs)
 
+    def test_send_errors_with_fixed_text_are_replaced(self):
+        import traceback
+        from companion_v2.adapters.astrbot.telegram_logging import redact_event_error
+
+        event = self.platform.create_event(telegram_event(self.platform).message_obj)
+        token = event.client.token
+        for error in (OSError(2, "missing", f"/bot{token}/file"),
+                      ExceptionGroup("send", [ValueError(token)]), RuntimeError(token)):
+            with self.subTest(error=type(error).__name__):
+                try:
+                    try:
+                        raise error
+                    except Exception as caught:
+                        raise redact_event_error(event, caught)
+                except Exception as raised:
+                    self.assertNotIn(token, str(raised) + traceback.format_exc())
+
     async def test_httpx_logs_redact_managed_replies_and_tool_sends(self):
         from astrbot.core.message.message_event_result import MessageChain
         from astrbot_host.core_reply import prepare_core_reply_event
