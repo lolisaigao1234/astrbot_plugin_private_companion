@@ -49,8 +49,9 @@ def align_group_wake(event, native_context):
         return
     # AstrBot put its reply marker in front of the text before looking for a wake prefix.
     message = event.message_obj
+    plain = telegram_plain_text(event, message.message_str).strip()
     if event.message_str.strip() == message.message_str.strip():
-        event.message_str = telegram_plain_text(event, message.message_str).strip()
+        event.message_str = plain
     if reply:
         return
     text = message.raw_message.message.text.strip()
@@ -58,5 +59,5 @@ def align_group_wake(event, native_context):
     prefixes = native_context.get_config(umo=event.unified_msg_origin).get("wake_prefix", ())
     typed = next((prefix for prefix in prefixes if text.startswith(prefix)), None)
     event.is_at_or_wake_command = mentioned or typed is not None
-    if typed is not None and not mentioned:
-        event.message_str = text[len(typed):].strip()
+    if typed is not None:
+        event.message_str = plain.removeprefix(typed).strip()
