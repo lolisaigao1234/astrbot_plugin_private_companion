@@ -896,7 +896,8 @@ class NativeTogetherProvider:
                         if not callable(resolve) or resolve(native_scope, user_id) is None:
                             raise NativeTogetherError("together_private_room_required")
                     self.store.update(scope, operation["id"], state="dispatching", effect="unknown")
-                    result = await self._close_latest(scope, user_id, group_invite=native_scope["kind"] == "group")
+                    close = self._close_group_invite if native_scope["kind"] == "group" else self._close_latest
+                    result = await close(scope, user_id)
                     if native_scope["kind"] == "group" and result.get("reason") == "no_provider_room":
                         operation = self.store.update(scope, operation["id"], state="failed", effect="not_committed",
                                                       error="no_provider_room")
@@ -1063,7 +1064,44 @@ class NativeTogetherProvider:
             result.update(delivered_privately=True, message="房间链接已私发给发起人。")
         return self.store.update(scope, operation["id"], state="succeeded", effect="committed", result=result)
 
-    async def _close_latest(self, scope: str, user_id: str, *, group_invite: bool = False) -> dict[str, Any]:
+    async def _close_latest(self, scope: str, user_id: str) -> dict[str, Any]:
+        bound_rooms = {
+            str(getattr(room, "room_id", "")): room
+            for room in list(getattr(self.plugin, "rooms", {}).values())
+            + list(getattr(self.plugin, "detached_rooms", {}).values())
+            if getattr(room, "user_id", "") == user_id
+            and not getattr(room, "integration_closed", False)
+            and getattr(getattr(room, "native_v2", None), "scope_key", None) == scope
+        }
+        if bound_rooms:
+            room = max(bound_rooms.values(), key=lambda item: (float(getattr(item, "created_at", 0) or 0),
+                                                               str(getattr(item, "room_id", ""))))
+            await self.plugin.close_room(room)
+            return {"closed": True, "room_id": str(room.room_id), "ticket_revoked": True,
+                    "closed_ticket_token": str(room.ticket_token)}
+        creates = [item for item in self.store.latest(scope, "together.room.create")
+                   if item.get("state") == "succeeded" and isinstance(item.get("result"), dict)
+                   and (item["result"].get("room") or {}).get("ticket_token") in self._open_tokens(scope)]
+        if not creates:
+            return {"closed": False, "reason": "no_provider_room"}
+        room_data = creates[0]["result"].get("room") or {}
+        token = str(room_data.get("ticket_token") or "")
+        if not token:
+            return {"closed": False, "reason": "no_provider_room"}
+        for room in list(getattr(self.plugin, "rooms", {}).values()) + list(getattr(self.plugin, "detached_rooms", {}).values()):
+            if getattr(room, "ticket_token", "") == token and getattr(room, "user_id", "") == user_id:
+                await self.plugin.close_room(room)
+                return {"closed": True, "room_id": str(getattr(room, "room_id", "")),
+                        "ticket_revoked": True, "closed_ticket_token": token}
+        store = getattr(self.plugin, "ticket_store", None)
+        revoke = getattr(store, "revoke", None)
+        if callable(revoke):
+            revoke(token)
+        return {"closed": False, "ticket_revoked": True, "reason": "room_not_active",
+                "closed_ticket_token": token}
+
+    async def _close_group_invite(self, scope: str, user_id: str) -> dict[str, Any]:
+        """Close the requester's most recent room or still usable link in this group or topic."""
         closed = self._closed_tokens(scope)
         owned_tokens: set[str] = set()
         candidates: dict[str, tuple[float, Any]] = {}
@@ -1090,13 +1128,7 @@ class NativeTogetherProvider:
 
         if not candidates:
             return {"closed": False, "reason": "no_provider_room"}
-        # Private close first ends a live room. A group requester closes their most recent invitation or room.
-        eligible = candidates
-        if not group_invite:
-            live = {token: value for token, value in candidates.items() if value[1] is not None}
-            if live:
-                eligible = live
-        token = max(eligible, key=lambda key: (eligible[key][0], key))
+        token = max(candidates, key=lambda key: (candidates[key][0], key))
         _, room = candidates[token]
         if room is not None:
             await self.plugin.close_room(room)
