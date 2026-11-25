@@ -1168,6 +1168,7 @@ class PrivateCompanionV2StagingPlugin(Star):
             if self._claims_target(event):
                 if self.staging_enabled():
                     gate_telegram_private_typing(event)
+                    align_group_wake(event, getattr(self.staging, "context", None))
                     # 目标确实是本插件的，只是这一刻没能受理（停机中、会话不在运行、
                     # 启动失败）。接不了这条本该由它回的消息，是预期未回。
                     self._record_no_reply(event, self._admission_reason(), stage="admission",
@@ -1199,7 +1200,7 @@ class PrivateCompanionV2StagingPlugin(Star):
         if target is None:
             return
         gate_telegram_private_typing(event)
-        align_group_wake(event)
+        align_group_wake(event, getattr(self.staging, "context", None))
         # AstrBot owns the persona and reply; V2 contributes optional background.
         event_ref = uuid4().hex
         origin_key = self._origin_key_for_event(event)

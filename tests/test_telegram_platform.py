@@ -1423,16 +1423,17 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
                        from_user=User(self.platform.client.id, "Bot", True), is_topic_message=True,
                        message_thread_id=23, **fields)
 
-    async def waking_event(self, prefix, text, original, **fields):
+    async def waking_event(self, prefixes, text, original, **fields):
         """A topic message after AstrBot's own waking stage."""
         from astrbot.core.pipeline.waking_check import stage as waking
 
         event = await group_event(self.platform, -100400, "supergroup", 23, text=text,
                                   reply_to_message=original, **fields)
         event.created_at = self.clock.now().timestamp()
+        config = {"platform_settings": {}, "admins_id": [], "wake_prefix": prefixes, "provider_settings": {}}
+        self.native.get_config = lambda umo=None: config
         stage = waking.WakingCheckStage()
-        await stage.initialize(NS(astrbot_config={"platform_settings": {}, "admins_id": [], "wake_prefix": [prefix],
-                                                  "provider_settings": {}}, db_helper=None, astrbot_config_id="synthetic"))
+        await stage.initialize(NS(astrbot_config=config, db_helper=None, astrbot_config_id="synthetic"))
         with patch.object(waking, "star_handlers_registry", NS(get_handlers_by_event_type=lambda *_, **__: [])), \
                 patch.object(waking.SessionPluginManager, "filter_handlers_by_session", AsyncMock(return_value=[])):
             await stage.process(event)
@@ -1441,19 +1442,25 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
         return event
 
     async def test_topic_created_by_the_bot_wakes_only_on_real_addressing(self):
+        from astrbot_host.core_reply_mentions import restore_group_mentions
+
         plugin = self.started_plugin()
         root = self.bot_topic(forum_topic_created=ForumTopicCreated("Topic", 0))
         reply = self.bot_topic(24, text="之前")
         mention = {"entities": [MessageEntity("mention", 2, 14)]}
-        for prefix, text, original, fields, reason in (
-                ("/", "今天天气还行", root, {}, ""), ("小爱", "今天天气还行", root, {}, ""),
-                ("/", "/ 今天天气", root, {}, "native_wakeup"), ("小爱", "继续", reply, {}, "native_quote"),
-                ("/", "继续", reply, {}, "native_quote"), ("/", "问 @synthetic_bot 继续", root, mention, "mention"),
-                ("/", "问 @synthetic_bot 继续", reply, mention, "mention"),
-                ("小爱", "问 @synthetic_bot 继续", reply, mention, "mention")):
-            with self.subTest(prefix=prefix, text=text, reply=original is reply):
-                event = await self.waking_event(prefix, text, original, **fields)
-                prompt = event.message_str
+        for prefixes, text, original, fields, reason, prompt in (
+                (["/"], "今天天气还行", root, {}, "", "今天天气还行"),
+                (["小爱"], "今天天气还行", root, {}, "", "今天天气还行"),
+                (["/"], "/ 今天天气", root, {}, "native_wakeup", "今天天气"),
+                (["小爱"], "小爱 今天天气", root, {}, "native_wakeup", "今天天气"),
+                (["/", "小爱"], "小爱 今天天气", root, {}, "native_wakeup", "今天天气"),
+                (["小爱"], "继续", reply, {}, "native_quote", "继续"),
+                (["/"], "继续", reply, {}, "native_quote", "继续"),
+                (["/"], "问 @synthetic_bot 继续", root, mention, "mention", f"问 {SELF_MENTION} 继续"),
+                (["/"], "问 @synthetic_bot 继续", reply, mention, "mention", f"问 {SELF_MENTION} 继续"),
+                (["小爱"], "问 @synthetic_bot 继续", reply, mention, "mention", f"问 {SELF_MENTION} 继续")):
+            with self.subTest(prefixes=prefixes, text=text, reply=original is reply):
+                event = await self.waking_event(prefixes, text, original, **fields)
                 admissions, candidate = [], self.controller.group_reply_candidate
 
                 async def observed(item, **kwargs):
@@ -1465,13 +1472,11 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
                 self.assertEqual([item["reason"] for item in admissions], [reason])
                 self.assertEqual(admissions[0]["trigger_facts"]["native_wakeup"], bool(reason))
                 self.assertEqual(event.call_llm, not reason)
-                if fields:
-                    from astrbot_host.core_reply_mentions import restore_group_mentions
+                if reason:
                     native = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)["prepared"]["native_input"]
-                    config = {"wake_prefix": [prefix], "provider_settings": {}}
-                    request, context = NS(prompt=prompt), NS(get_config=lambda umo=None: config)
-                    restore_group_mentions(event, request, native, context)
-                    self.assertEqual(request.prompt, f"问 {SELF_MENTION} 继续")
+                    request = NS(prompt=event.message_str)
+                    restore_group_mentions(event, request, native, self.native)
+                    self.assertEqual(request.prompt, prompt)
 
     async def test_topic_created_by_the_bot_merges_only_typed_text(self):
         from companion_v2.adapters.astrbot.group_mentions import group_message_text
@@ -1479,7 +1484,7 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
         plugin, root = self.started_plugin(), self.bot_topic(forum_topic_created=ForumTopicCreated("Topic", 0))
         for prefix in ("/", "小爱"):
             with self.subTest(prefix=prefix):
-                events = [await self.waking_event(prefix, text, root, message_id=number)
+                events = [await self.waking_event([prefix], text, root, message_id=number)
                           for number, text in ((31, "第一句"), (32, "第二句"))]
                 with patch.object(self.controller, "group_reply_candidate", AsyncMock(
                         return_value=Outcome.success({"admitted": False}))) as candidate:
