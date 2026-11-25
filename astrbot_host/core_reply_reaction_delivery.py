@@ -23,7 +23,7 @@ def prepare_reaction_turn(semantic, context, original, turn_id):
     if semantic is None or original is None:
         return False
     semantic.reaction_preferences.prepare_native(context, turn_id, event_id=original.event_id,
-                                                 text=original.text, at=original.at)
+                                                 text=original.own_text, at=original.at)
     return semantic.reaction_available(context, turn_id)
 
 

@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import json
+from types import SimpleNamespace
 import unittest
 
 from astrbot_host.files.loader import load_native_file
@@ -11,6 +12,7 @@ from companion_v2.adapters.astrbot.files import (
     NativeFileLocator,
     prepare_file_text,
 )
+from companion_v2.adapters.astrbot.telegram_media import TelegramFile
 from companion_v2.configuration.models import ConfigurationError
 from companion_v2.configuration.registry import FieldRegistry
 from companion_v2.conversation.media.understanding import (
@@ -129,7 +131,8 @@ class FileUnderstandingTests(unittest.IsolatedAsyncioTestCase):
     async def test_streamed_oversize_file_spends_allowance_but_header_rejection_does_not(self):
         from unittest.mock import AsyncMock, MagicMock, patch
 
-        locators = [NativeFileLocator(i, f"doc{i}.txt", "https://example.org/doc") for i in range(2)]
+        client = SimpleNamespace(base_file_url="https://example.org")
+        locators = [NativeFileLocator(i, f"doc{i}.txt", TelegramFile("doc", client)) for i in range(2)]
         for declared_size, downloads in ((None, 1), (8, 2)):
             with self.subTest(content_length=declared_size):
                 response = MagicMock(status=200, content_length=declared_size, headers={})
@@ -145,10 +148,31 @@ class FileUnderstandingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.content.read.await_count, 2 if declared_size is None else 0)
                 self.assertIn("上限", result[1])
 
+    async def test_other_platforms_keep_their_failure_statuses(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        for reads, declared_size, status in (([b"part", TimeoutError()], None, "文件读取超时"),
+                                             ([b"part", OSError()], None, "文件读取失败"),
+                                             ([b"x" * (1 << 20), b"x"], None, "文件读取失败"),
+                                             ([], 2 << 20, "文件读取失败")):
+            with self.subTest(status=status, content_length=declared_size):
+                response = MagicMock(status=200, content_length=declared_size, headers={})
+                response.content.read = AsyncMock(side_effect=reads)
+                session = MagicMock()
+                session.get.return_value.__aenter__.return_value = response
+                with patch("astrbot_host.media.aiohttp.ClientSession") as factory:
+                    factory.return_value.__aenter__.return_value = session
+                    result = await prepare_file_text(
+                        (NativeFileLocator(0, "doc.txt", "https://example.org/doc"),), load_native_file,
+                        settings({**DEFAULTS, "file_understanding_enabled": True, "file_understanding_max_size_mb": 1,
+                                  "file_understanding_private_enabled": True}), client=None, scope=ScopeKind.PRIVATE)
+                self.assertIn(status, result[0])
+
     async def test_failed_extraction_debits_the_bytes_downloaded(self):
         from unittest.mock import patch
 
-        locators = [NativeFileLocator(i, f"doc{i}.txt", "https://example.org/doc") for i in range(3)]
+        client = SimpleNamespace(base_file_url="https://example.org")
+        locators = [NativeFileLocator(i, f"doc{i}.txt", TelegramFile("doc", client)) for i in range(3)]
         limits = []
         async def fetch(url, *, maximum_bytes):
             limits.append(maximum_bytes)

@@ -1,6 +1,6 @@
 """Protect Bot API credentials in AstrBot warnings and HTTPX request logs."""
 
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 import logging
 from threading import Lock
@@ -87,7 +87,12 @@ def redact_event_error(event, error):
         with redact_event_token(event):
             logging.getLogger("astrbot").warning("Telegram reply was not sent", exc_info=error)
     error.args = tuple(arg.replace(token, "[redacted]") if isinstance(arg, str) else arg for arg in error.args)
-    if isinstance(getattr(error, "message", None), str):
+    with suppress(AttributeError, TypeError):
         error.message = error.message.replace(token, "[redacted]")
     error.__cause__ = error.__context__ = None
-    return error.with_traceback(None)
+    error = error.with_traceback(None)
+    if token in str(error) + "".join(traceback.format_exception(error)):
+        # Some errors build their text from attributes that args cannot replace.
+        error = RuntimeError(f"{type(error).__name__}: {error}".replace(token, "[redacted]"))
+        error.__suppress_context__ = True
+    return error

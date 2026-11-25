@@ -336,7 +336,7 @@ class CoreReplyToolSession:
         original = _field(self.prepared, "native_input")
         if semantic is not None and original is not None:
             semantic.reaction_preferences.prepare_native(self.context, self.turn_id,
-                event_id=original.event_id, text=original.text, at=original.at)
+                event_id=original.event_id, text=original.own_text, at=original.at)
 
     def catalog(self):
         app, context = self.application, self.context
