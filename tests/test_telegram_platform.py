@@ -748,6 +748,7 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
                 (["/"], "/ 看链接", root, link, "native_wakeup", "看链接 (https://example.org)"),
                 (["小爱"], "小爱 问 @synthetic_bot 继续", root, {"entities": [MessageEntity("mention", 5, 14)]},
                  "mention", f"问 {SELF_MENTION} 继续"),
+                (["小爱"], "小爱 问 @alice 继续", root, {"entities": [MessageEntity("mention", 5, 6)]}, "", ""),
                 (["小爱"], "继续", reply, {}, "native_quote", "继续"),
                 (["/"], "继续", reply, {}, "native_quote", "继续"),
                 (["/"], "问 @synthetic_bot 继续", root, mention, "mention", f"问 {SELF_MENTION} 继续"),
