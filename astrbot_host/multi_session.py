@@ -159,6 +159,8 @@ class MultiPrivateBridge(NativePrivateBridge):
 
         message = getattr(event, "message_obj", None)
         stt_text = trusted_stt_transcript(event)
+        from companion_v2.adapters.astrbot.telegram_media import safe_text, sticker_marker
+        sticker = sticker_marker(event)
         stt_used = False
         pieces = []
         for part in parts if parts is not None else getattr(message, "message", ()):
@@ -170,7 +172,8 @@ class MultiPrivateBridge(NativePrivateBridge):
                 else:
                     if stt_text and stt_text in part.text:
                         stt_used = True
-                    pieces.append(part.text)
+                    if not (sticker and part.text.startswith("Sticker: ")):
+                        pieces.append(part.text)
             elif kind in ("Face", "Mface"):
                 # A sticker is an emotional expression, not an empty message:
                 # keep a bounded marker so the model can answer the feeling
@@ -184,7 +187,182 @@ class MultiPrivateBridge(NativePrivateBridge):
             for segment in raw_segments:
                 if _is_sticker_segment(segment):
                     pieces.append("[表情包]")
-        return "".join(pieces)
+        if sticker:
+            pieces.append(sticker)
+        return safe_text(event, "".join(pieces))
+
+    @staticmethod
+    def needs_telegram_media_budget(event):
+        from astrbot.core.message.components import File, Image, Record, Reply, Video
+
+        # Photos and stickers carry a download address; music arrives as an unbounded local recording.
+        raw = getattr(event.message_obj, "raw_message", None)
+        music = getattr(getattr(raw, "message", None), "audio", None)
+        return any(isinstance(part, (File, Image, Video)) or music and isinstance(part, Record) or
+                   isinstance(part, Reply) and any(isinstance(child, (Image, Record, File, Video))
+                                                   for child in part.chain or ())
+                   for part in event.message_obj.message)
+
+    async def prepare_telegram_album(self, event, context, *, quotes=()):
+        """Budget direct attachments and embedded quote photos before SDK request collection."""
+        import base64
+        from astrbot.core.message.components import File, Image, Plain, Record, Reply, Video
+        from companion_v2.adapters.astrbot.files import MAX_FILES, file_locator
+        from companion_v2.adapters.astrbot.native import MEDIA_PREPARE_TIMEOUT, NativeAudioLocator, NativeImageLocator
+        from companion_v2.adapters.astrbot.telegram_media import freeze_attachment
+        from companion_v2.conversation.media.audio.models import MAX_AUDIO_BYTES, MAX_INPUT_AUDIOS
+        from companion_v2.conversation.media.models import MAX_IMAGE_BYTES, MAX_INPUT_IMAGES, MAX_TURN_BYTES, fits_budget
+        from companion_v2.conversation.media.video.models import MAX_VIDEO_BYTES, MAX_VIDEOS
+        from companion_v2.conversation.media.understanding import media_scope_enabled, settings as understanding_settings
+        from .audio.loader import fetch_native_audio_bytes
+        from .core_reply_media import frozen_image_locators
+        from .core_reply_video_sources import file_is_video, video_file_suffix, video_positions
+        from .telegram_forward_burst import bounded_file_component, temporary_file_component
+        from .video.loader import fetch_native_video_bytes
+
+        locators = frozen_image_locators(event)
+        images = {item.position: item for item in locators if isinstance(item, NativeImageLocator)}
+        quote_images = {(quote.position, image.position): image for quote in locators
+                        if not isinstance(quote, NativeImageLocator) for image in quote.images}
+        message = event.message_obj
+        limited = "[附件超过读取上限，本轮未读取]"
+        timed_out = "[附件读取超时，本轮未读取]"
+        deadline = asyncio.get_running_loop().time() + MEDIA_PREPARE_TIMEOUT
+        exhausted_note = limited
+        replacements = {}
+        remaining = MAX_TURN_BYTES
+        limits = {Image: MAX_INPUT_IMAGES, Record: MAX_INPUT_AUDIOS, Video: MAX_VIDEOS, File: MAX_FILES}
+        counts = defaultdict(int)
+        photos = []
+
+        async def read_attachment(awaitable):
+            nonlocal exhausted_note, remaining
+            try:
+                return await asyncio.wait_for(awaitable, deadline - asyncio.get_running_loop().time())
+            except asyncio.TimeoutError:
+                # A cancelled download may already have spent the remaining allowance.
+                remaining = 0
+                exhausted_note = timed_out
+                raise TaskError("host_media_timeout", "attachment preparation timed out") from None
+
+        def unavailable(error):
+            if error.code.endswith("_limit") or error.code == "host_media_timeout":
+                return Plain(exhausted_note)
+            return Plain("[附件不可用]")
+
+        async def load_photo(locator):
+            nonlocal remaining
+            if len(photos) >= MAX_INPUT_IMAGES or remaining <= 0:
+                raise TaskError("host_image_limit", "turn photo capacity exhausted")
+            photo = await read_attachment(self.image_loader(locator, maximum_bytes=min(remaining, MAX_IMAGE_BYTES)))
+            size = photo.descriptor.retained_bytes
+            if (photo.descriptor.position != locator.position or size > remaining
+                    or not fits_budget((*photos, photo.descriptor))):
+                remaining = max(0, remaining - len(photo.content))
+                raise TaskError("host_image_limit", "image exceeds turn limits")
+            remaining -= size
+            photos.append(photo.descriptor)
+            return Image.fromBytes(photo.content)
+
+        configured_preferences = None
+        file_deadline = None
+
+        def preferences():
+            nonlocal configured_preferences
+            if configured_preferences is None:
+                values = self.file_settings(context.scope, context.role_binding.role) if self.file_settings else {}
+                configured_preferences = understanding_settings(values)
+            return configured_preferences
+
+        async def prepare_part(position, part, *, image=None):
+            nonlocal remaining, file_deadline
+            # Telegram delivers GIFs and videos sent as files as documents.
+            kind = Video if file_is_video(part) else type(part)
+            if counts[kind] >= limits[kind] or remaining <= 0:
+                return Plain(exhausted_note)
+            try:
+                if kind is Image:
+                    return await load_photo(image) if image is not None else Plain("[附件不可用]")
+                if kind is Video:
+                    video = next(iter(video_positions(event, video_type=Video, component_reader=lambda _: (part,))), None)
+                    if video is None:
+                        return Plain(limited)
+                    data = await read_attachment(fetch_native_video_bytes(
+                        video, maximum_bytes=min(remaining, MAX_VIDEO_BYTES)))
+                    size = len(data)
+                    if type(part) is File:
+                        name = freeze_attachment(event, file_locator(position, part)).name
+                        replacement = temporary_file_component(event, name, data, video_file_suffix(name) or ".mp4")
+                    else:
+                        replacement = Video(file="base64://" + base64.b64encode(data).decode("ascii"))
+                elif kind is Record:
+                    location = part.url or part.file
+                    locator = NativeAudioLocator(position, location, telegram_temp=location == part.path)
+                    data = await read_attachment(fetch_native_audio_bytes(
+                        freeze_attachment(event, locator), maximum_bytes=min(remaining, MAX_AUDIO_BYTES)))
+                    size = len(data)
+                    replacement = Record(file="base64://" + base64.b64encode(data).decode("ascii"))
+                else:
+                    locator = freeze_attachment(event, file_locator(position, part))
+                    file_preferences = preferences()
+                    if file_deadline is None:
+                        file_deadline = asyncio.get_running_loop().time() + file_preferences["file_understanding_timeout_seconds"]
+                    replacement, size = await read_attachment(bounded_file_component(
+                        event, locator, remaining, file_preferences, context.scope, file_deadline))
+                if size > remaining:
+                    remaining = 0
+                    return Plain(limited)
+                remaining -= size
+                counts[kind] += 1
+                return replacement
+            except TaskError as exc:
+                remaining = max(0, remaining - getattr(exc, "bytes_read", 0))
+                return unavailable(exc)
+
+        for position, part in enumerate(message.message):
+            if type(part) in limits:
+                replacements[position] = await prepare_part(position, part, image=images.get(position))
+
+        # AstrBot reads embedded reply components independently. Only a verified
+        # native original may supply media, after direct attachments have been admitted.
+        original = getattr(event.message_obj.raw_message.message, "reply_to_message", None)
+        for position, reply in enumerate(message.message):
+            if not isinstance(reply, Reply):
+                continue
+            chain = list(reply.chain or ())
+            verified = any(q.position == position and q.message_id == str(reply.id)
+                           and q.sender_id == str(reply.sender_id) and q.selection_offset is None for q in quotes)
+            expected_kind = None
+            if verified and original is not None:
+                if original.document:
+                    expected_kind = File
+                elif original.video or original.video_note or original.animation:
+                    expected_kind = Video
+                elif original.voice or original.audio:
+                    expected_kind = Record
+            for index, child in enumerate(chain):
+                kind = type(child)
+                if kind is Image:
+                    locator = quote_images.get((position, index))
+                    chain[index] = await prepare_part(index, child, image=locator) if locator else Plain("[附件不可用]")
+                elif kind in (File, Video, Record):
+                    if kind is not expected_kind:
+                        chain[index] = Plain("[附件不可用]")
+                        continue
+                    expected_kind = None
+                    if kind is Video or file_is_video(child):
+                        settings = preferences()
+                        if not (settings["video_understanding_enabled"] and settings["video_understanding_quoted_enabled"]
+                                and media_scope_enabled(settings, "video_understanding", context.scope)):
+                            chain[index] = Plain("[引用视频理解未启用，本轮未读取]")
+                            continue
+                    chain[index] = await prepare_part(index, child)
+            reply.chain = chain
+        notes = list(dict.fromkeys(part.text for part in replacements.values() if isinstance(part, Plain)))
+        message.message = [replacements.get(position, part) for position, part in enumerate(message.message)]
+        if notes:
+            event.message_str = "\n".join([event.message_str, *notes]).strip()
+            message.message_str = event.message_str
 
     async def capture_core_reply(self, event):
         """Authenticate a private route for AstrBot's reply path without reading attachments."""
@@ -218,6 +396,10 @@ class MultiPrivateBridge(NativePrivateBridge):
                 from companion_v2.adapters.astrbot.telegram_references import private_references, private_text_parts
                 telegram = private_references(event)
                 parts = private_text_parts(message, message.message)
+                if message.raw_message.message.voice and len(parts) > len(message.message):
+                    caption = parts[-1].text
+                    if caption not in event.message_str:
+                        event.message_str = (event.message_str + "\n" + caption).strip()
                 if telegram.unavailable:
                     # AstrBot also reads Reply chains when collecting provider attachments and text.
                     message.message = [part for part in message.message
@@ -1273,6 +1455,11 @@ class MultiHostSession:
                     context = self._select_core_reply_context(target, captured)
                 self.bridge.connections.assert_current(connection_lease)
                 self._validate_core_group_admission(group_admission, context, captured)
+                if (context.scope.kind is ScopeKind.PRIVATE and event.platform_meta.name == "telegram"
+                        and (captured.telegram_burst or getattr(event.message_obj.raw_message.message, "media_group_id", None)
+                             or self.bridge.needs_telegram_media_budget(event))):
+                    await self.bridge.prepare_telegram_album(event, context, quotes=captured.quotes)
+                    self.bridge.connections.assert_current(connection_lease)
                 turn_id = "core-reply:" + digest([context.key, captured.event_id])
                 presence = self.application.presence
                 if presence is not None:

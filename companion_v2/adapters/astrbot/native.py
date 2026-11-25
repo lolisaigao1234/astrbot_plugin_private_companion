@@ -23,6 +23,7 @@ from companion_v2.conversation.quotes.models import CapturedQuote, message_numbe
 from companion_v2.conversation.forwards.models import CapturedForward, ForwardIntakePolicy, fits_forwards
 from companion_v2.conversation.media.audio.models import CapturedAudio, MAX_INPUT_AUDIOS, fits_audio_budget
 from companion_v2.conversation.media.video.models import CapturedVideo, MAX_VIDEOS, fits_video_budget
+from .telegram_media import TelegramFile, freeze_attachment, safe_text, sticker_marker
 from .files import file_locator, prepare_file_text, MAX_FILES
 
 
@@ -425,7 +426,7 @@ class HostPersona:
 @dataclass(frozen=True)
 class NativeImageLocator:
     position: int
-    locator: str
+    locator: str | TelegramFile
     # Set only after the trusted host ImageResolver resolves a quoted image.
     # Ordinary network message components never gain local-path read authority.
     host_resolved: bool = False
@@ -434,13 +435,14 @@ class NativeImageLocator:
 @dataclass(frozen=True)
 class NativeAudioLocator:
     position: int
-    locator: str
+    locator: str | TelegramFile
+    telegram_temp: bool = False
 
 
 @dataclass(frozen=True)
 class NativeVideoLocator:
     position: int
-    locator: str
+    locator: str | TelegramFile
 
 
 @dataclass(frozen=True)
@@ -943,12 +945,20 @@ class NativePrivateBridge:
         return {"persona_id": projection.persona_id, "prompt": prompt,
                 "bot_id": scope.bot_id, "account_id": scope.account_id}
 
-    async def _capture_images(self, locators):
+    async def _capture_images(self, locators, *, load_optional=None):
         images = []
-        for locator in locators:
+        async def load(locator):
             image = await self.image_loader(locator)
             if not isinstance(image, CapturedImage) or image.descriptor.position != locator.position:
                 raise TaskError("host_image_invalid", "image loader did not preserve the original component position")
+            if load_optional and not fits_budget(tuple(i.descriptor for i in images) + (image.descriptor,)):
+                raise TaskError("host_image_limit", "album exceeds the shared image budget")
+            return image
+
+        for locator in locators:
+            image = await load_optional(load, locator) if load_optional else await load(locator)
+            if image is None:
+                continue
             images.append(image)
             check_manifest(tuple(i.descriptor for i in images))
         return tuple(images)
@@ -981,7 +991,8 @@ class NativePrivateBridge:
                     or event.unified_msg_origin != self._umo(platform_id, session_id)):
                 raise TaskError("host_route_mismatch", "event fields do not identify one registered private route")
             parts = self.component_reader(event) if self.component_reader is not None else tuple(message.message)
-            if not parts or len(parts) > 128:
+            sticker = sticker_marker(event)
+            if (not parts and not sticker) or len(parts) > 128:
                 raise TaskError("host_media_unsupported", "message components are empty or exceed the intake budget")
             text_parts, locators, quote_locators, forward_locators, audio_locators, video_locators = [], [], [], [], [], []
             file_locators = []
@@ -991,16 +1002,28 @@ class NativePrivateBridge:
                 from .telegram_references import private_references, private_text_parts
                 telegram = private_references(event)
                 parts = private_text_parts(message, parts)
-            for position, part in enumerate(parts):
+            telegram_caption = meta.name == "telegram" and any(
+                getattr(part, "text", "").strip() for part in parts
+                if getattr(part.type, "value", part.type) == "Plain" and isinstance(part.text, str))
+            partial_media = telegram_caption or (
+                meta.name == "telegram" and bool(message.raw_message.message.media_group_id))
+            if telegram and telegram.quote and not any(getattr(part.type, "value", part.type) == "Reply" for part in parts):
+                # The SDK replaces some reply chains with Record. Reserve position zero for the verified quote.
+                if len(parts) >= 128:
+                    raise TaskError("host_media_unsupported", "message components exceed the intake budget")
+                text_parts.append("\n[引用消息]\n")
+            for position, part in enumerate(parts, start=len(text_parts)):
                 kind = getattr(part.type, "value", part.type)
                 if kind == "Plain" and isinstance(part.text, str):
-                    text_parts.append(part.text)
+                    text_parts.append("" if sticker and part.text.startswith("Sticker: ") else part.text)
                 elif kind == "At":
                     # QQ Official prepends a synthetic At for C2C events. It is
                     # routing metadata, not user-visible text.
+                    if meta.name == "telegram":
+                        text_parts.append("")
                     continue
                 elif kind == "Image" and self.image_type is not None and type(part) is self.image_type:
-                    locators.append(image_locator(position, part.file, part.url))
+                    locators.append(freeze_attachment(event, image_locator(position, part.file, part.url)))
                     text_parts.append("\n[图片 " + str(len(locators)) + "]\n")
                 elif kind == "Reply" and self.reply_type is not None and type(part) is self.reply_type:
                     if onebot:
@@ -1014,17 +1037,19 @@ class NativePrivateBridge:
                     value = part.file if type(part.file) is str and part.file.startswith("base64://") else part.url or part.file
                     if type(value) is not str or not value:
                         raise TaskError("host_audio_unavailable", "voice has no original host attachment")
-                    audio_locators.append(NativeAudioLocator(position, value))
+                    telegram_temp = meta.name == "telegram" and value == getattr(part, "path", None)
+                    locator = NativeAudioLocator(position, value, telegram_temp=telegram_temp)
+                    audio_locators.append(freeze_attachment(event, locator))
                     text_parts.append("\n[语音 " + str(len(audio_locators)) + "]\n")
                 elif kind == "Video" and self.video_type is not None and type(part) is self.video_type:
                     value = part.file if type(part.file) is str and part.file.startswith("base64://") else part.url or part.file
                     if type(value) is not str or not value:
                         raise TaskError("host_video_unavailable", "video has no original host attachment")
-                    video_locators.append(NativeVideoLocator(position, value))
+                    video_locators.append(freeze_attachment(event, NativeVideoLocator(position, value)))
                     text_parts.append("\n[视频 " + str(len(video_locators)) + "]\n")
                 elif kind == "File" and self.file_type is not None and type(part) is self.file_type:
                     if len(file_locators) < MAX_FILES:
-                        file_locators.append(file_locator(position, part))
+                        file_locators.append(freeze_attachment(event, file_locator(position, part)))
                     text_parts.append("\n[文件附件，正文尚未读取]\n")
                 elif kind in ("Face", "Mface"):
                     # Sticker/emoji: an emotional expression with no payload. Keep
@@ -1033,16 +1058,18 @@ class NativePrivateBridge:
                     text_parts.append("[表情]")
                 else:
                     raise TaskError("host_media_unsupported", "this component needs its own governed source adapter")
-            if len(locators) > MAX_INPUT_IMAGES:
+            if not partial_media and len(locators) > MAX_INPUT_IMAGES:
                 raise TaskError("host_image_limit", "too many images in one input")
-            if len(video_locators) > MAX_VIDEOS:
+            if not partial_media and len(video_locators) > MAX_VIDEOS:
                 raise TaskError("host_video_limit", "too many video attachments in one input")
-            if len(audio_locators) > MAX_INPUT_AUDIOS:
+            if not partial_media and len(audio_locators) > MAX_INPUT_AUDIOS:
                 raise TaskError("host_audio_limit", "too many voice attachments in one input")
             if len(quote_locators) > 1:
                 raise TaskError("host_quote_unsupported", "one original reply component is supported per input")
             if len(forward_locators) > intake.max_forwards:
                 raise TaskError("host_forward_limit", "too many forwarded records in one input")
+            if sticker:
+                text_parts.append(sticker)
             text = "".join(text_parts)
             if telegram:
                 text = telegram.quote_availability(text)
@@ -1067,6 +1094,9 @@ class NativePrivateBridge:
             frozen_files = tuple(file_locators)
             from companion_v2.conversation.media.understanding import settings as understanding_settings
             file_preferences = understanding_settings(self.file_settings(scope, role) if self.file_settings else {})
+            from .telegram_media import TelegramReadBudget, capture_turn_media
+            budget = TelegramReadBudget() if telegram is not None else None
+
             async def prepare():
                 images = await self._capture_images(frozen_images)
                 audios = []
@@ -1074,12 +1104,11 @@ class NativePrivateBridge:
                     audio = await self.audio_loader(locator)
                     if type(audio) is not CapturedAudio or audio.descriptor.position != locator.position:
                         raise TaskError("host_audio_invalid", "audio loader changed the original component position")
-                    audios.append(audio)
-                    if not fits_audio_budget(tuple(a.descriptor for a in audios), tuple(i.descriptor for i in images)):
+                    if not fits_audio_budget(tuple(a.descriptor for a in (*audios, audio)),
+                                             tuple(i.descriptor for i in images)):
                         raise TaskError("host_audio_limit", "voice and images exceed the shared intake budget")
+                    audios.append(audio)
                 quotes = []
-                if telegram and telegram.quote:
-                    quotes.append(replace(telegram.quote, images=await self._capture_images(telegram.images)))
                 for locator in frozen_quotes:
                     if locator.message_id == event_id:
                         raise TaskError("host_quote_invalid", "an input cannot quote itself")
@@ -1114,24 +1143,42 @@ class NativePrivateBridge:
                     video = await self.video_loader(locator)
                     if type(video) is not CapturedVideo or video.descriptor.position != locator.position:
                         raise TaskError("host_video_invalid", "video loader changed the original component position")
-                    direct_videos.append(video)
-                    if not fits_video_budget((*video_descriptors, *(v.descriptor for v in direct_videos)),
+                    if not fits_video_budget((*video_descriptors, *(v.descriptor for v in direct_videos), video.descriptor),
                                              tuple(i.descriptor for i in all_images), audio_descriptors):
                         raise TaskError("host_video_limit", "video and other attachments exceed the shared intake budget")
+                    direct_videos.append(video)
                 return images, tuple(quotes), forwards, tuple(audios), tuple(direct_videos)
             images, quotes, forwards, audios, videos = (), (), (), (), ()
             if frozen_images or frozen_quotes or frozen_forwards or frozen_audios or frozen_videos or (telegram and telegram.quote):
                 try:
-                    images, quotes, forwards, audios, videos = await asyncio.wait_for(prepare(), MEDIA_PREPARE_TIMEOUT)
+                    if telegram is not None:
+                        captured = await capture_turn_media(self, telegram, frozen_images, frozen_audios, frozen_videos,
+                                                            text_parts, partial_media, budget, timeout=MEDIA_PREPARE_TIMEOUT)
+                    else:
+                        captured = await asyncio.wait_for(prepare(), MEDIA_PREPARE_TIMEOUT)
+                    images, quotes, forwards, audios, videos = captured
+                except TaskError as error:
+                    if not partial_media or error.code not in {
+                        "host_audio_limit", "host_video_limit", "host_image_limit", "image_manifest_invalid"
+                    }:
+                        raise
+                    if telegram.quote:
+                        quotes = (telegram.quote,)
+                    for attachment in (*frozen_images, *frozen_audios, *frozen_videos):
+                        text_parts[attachment.position] = "[附件超过读取上限，本轮未读取]"
+                    text = "".join(text_parts)
                 except asyncio.TimeoutError:
                     raise TaskError("host_media_timeout", "attachment preparation exceeded its bounded intake time") from None
+            if partial_media:
+                text = "".join(text_parts)
             if frozen_files:
                 file_text = await prepare_file_text(frozen_files, self.file_loader, file_preferences,
-                    client=event_client, scope=scope, payload_budget=65536 - sum(map(len, text_parts)))
+                    client=event_client, scope=scope, payload_budget=65536 - sum(map(len, text_parts)),
+                    byte_budget=budget.remaining if budget else None)
                 text = "".join(file_text.get(position, part) for position, part in enumerate(text_parts))
-                if telegram:
-                    text = telegram.quote_availability(text)
-            if images or quotes or forwards or audios or videos or frozen_files:
+            if telegram and (partial_media or frozen_files):
+                text = telegram.quote_availability(text)
+            if frozen_images or frozen_quotes or frozen_forwards or frozen_audios or frozen_videos or frozen_files or quotes:
                 # Network/media preparation is outside SQLite; recheck the role,
                 # authenticated sender and client before admitting the captured input.
                 fresh_cid, fresh_role, fresh_instruction = await self._role(account, sender)
@@ -1145,14 +1192,15 @@ class NativePrivateBridge:
                     raise TaskError("host_image_owner_changed", "original image sender or client changed")
                 self.client(scope)
             if telegram and telegram.forward_origin:
-                forward = telegram.capture_forward(event_id, text, images, audios, videos)
+                forward = telegram.capture_forward(event_id, safe_text(event, text), images, audios, videos)
                 self._check_shared_forwards((forward,), quotes, intake, "Telegram forward exceeds intake budget")
                 text = telegram.forward_marker
                 images, audios, videos, forwards = (), (), (), (forward,)
             return Outcome.success(NativePrivateInput(event_id, principal, ConversationRoute(scope, user=actor.subject),
-                AudienceRef(scope, (actor.subject,)), text, at, role, instruction, tuple(images), quotes, forwards, audios, videos))
+                AudienceRef(scope, (actor.subject,)), safe_text(event, text), at, role, instruction,
+                tuple(images), quotes, forwards, audios, videos))
         except TaskError as error:
-            return Outcome.failed(error.code, str(error))
+            return Outcome.failed(error.code, safe_text(event, str(error)))
         except asyncio.TimeoutError:
             return Outcome.failed("host_capture_timeout", "native host capture did not complete in time")
         except Exception:

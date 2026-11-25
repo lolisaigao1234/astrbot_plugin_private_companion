@@ -8,10 +8,11 @@ from pathlib import Path
 import subprocess
 import sys
 
-from companion_v2.adapters.astrbot.files import NativeFileLocator, FileText, TEXT_SUFFIXES, DOCUMENT_SUFFIXES
+from companion_v2.adapters.astrbot.files import NativeFileLocator, FileExtractionError, FileText, TEXT_SUFFIXES, DOCUMENT_SUFFIXES
+from companion_v2.adapters.astrbot.telegram_media import TelegramFile, fetch_location
 from companion_v2.execution.models import TaskError
 from companion_v2.foundation.refs import ScopeKind
-from ..media import fetch_attachment
+from ..media import AttachmentReadError, fetch_attachment
 
 
 async def decode_document(content, locator, *, maximum_chars, formats):
@@ -41,9 +42,15 @@ async def load_native_file(locator, *, client, scope, maximum_bytes, maximum_cha
     if type(locator) is not NativeFileLocator:
         raise TaskError("host_file_location_invalid", "file intake requires a frozen native attachment")
     suffix = Path(locator.name).suffix.lower()
+    telegram = isinstance(locator.locator, TelegramFile)
+    if telegram and isinstance(formats, frozenset):
+        # The capture bridge supplies selected suffixes. The worker takes one CLI mode.
+        if suffix not in formats:
+            raise TaskError("host_file_format_unsupported", "document format is not selected")
+        formats = "text_and_documents"
     if suffix not in TEXT_SUFFIXES | (DOCUMENT_SUFFIXES if formats == "text_and_documents" else frozenset()):
         raise TaskError("host_file_format_unsupported", "document format is not selected or supported")
-    value = locator.locator
+    value = fetch_location(locator)
     if not value:
         raise TaskError("host_file_unavailable", "file has no original native attachment locator")
     if value.startswith("base64://"):
@@ -63,7 +70,24 @@ async def load_native_file(locator, *, client, scope, maximum_bytes, maximum_cha
                 action = "get_private_file_url"
             response = await client.call_action(action, **route)
             value = response.get("url", "") if isinstance(response, dict) else ""
-        content = await fetch_attachment(value, maximum_bytes=maximum_bytes)
+        try:
+            content = await fetch_attachment(value, maximum_bytes=maximum_bytes)
+        except AttachmentReadError as error:
+            if not telegram:
+                # Other platforms keep their own timeout and failure notices.
+                raise error.__cause__ or error
+            code = "host_file_limit" if error.code == "host_image_limit" else "host_file_unavailable"
+            raise FileExtractionError(code, error.bytes_read) from None
+        except TaskError as error:
+            if telegram and error.code == "host_image_limit":
+                raise TaskError("host_file_limit", "file exceeds its original byte budget") from None
+            raise
     if not 0 < len(content) <= maximum_bytes:
         raise TaskError("host_file_limit", "file exceeds its original byte budget")
-    return await decode_document(content, locator, maximum_chars=maximum_chars, formats=formats)
+    try:
+        return await decode_document(content, locator, maximum_chars=maximum_chars, formats=formats)
+    except Exception as exc:
+        if not telegram:
+            raise
+        code = exc.code if isinstance(exc, TaskError) else "host_file_invalid"
+        raise FileExtractionError(code, len(content)) from None

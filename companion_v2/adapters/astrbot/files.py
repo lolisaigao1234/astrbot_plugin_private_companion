@@ -6,6 +6,7 @@ import json
 import logging
 import re
 
+from .telegram_media import TelegramFile
 from companion_v2.execution.models import TaskError
 from companion_v2.conversation.media.understanding import (
     DOCUMENT_SUFFIXES,
@@ -28,7 +29,7 @@ def safe_name(value):
 class NativeFileLocator:
     position: int
     name: str
-    locator: str
+    locator: str | TelegramFile
 
 
 @dataclass(frozen=True)
@@ -55,7 +56,15 @@ def file_locator(position, part):
     return NativeFileLocator(position, safe_name(getattr(part, "name", None)), value if type(value) is str else "")
 
 
-async def prepare_file_text(locators, loader, preferences, *, client, scope, payload_budget=65536):
+class FileExtractionError(TaskError):
+    """Document intake failed after consuming part of the read allowance."""
+
+    def __init__(self, code, bytes_read):
+        super().__init__(code, "document extraction failed")
+        self.bytes_read = bytes_read
+
+
+async def prepare_file_text(locators, loader, preferences, *, client, scope, payload_budget=65536, byte_budget=None):
     remaining = preferences["file_understanding_max_chars"]
     deadline = asyncio.get_running_loop().time() + preferences["file_understanding_timeout_seconds"]
     result = {}
@@ -68,24 +77,36 @@ async def prepare_file_text(locators, loader, preferences, *, client, scope, pay
             entry["status"] = "文件理解未启用，未读取正文"
         elif not media_scope_enabled(preferences, "file_understanding", scope):
             entry["status"] = "当前会话范围未启用文件理解，未读取正文"
-        elif ordinal >= MAX_FILES or remaining < 1:
+        elif ordinal >= MAX_FILES or remaining < 1 or byte_budget == 0:
             entry["status"] = "本轮文件读取上限已达到，未读取此附件"
         else:
             try:
+                limit = preferences["file_understanding_max_size_mb"] * 1024 * 1024
+                if byte_budget is not None:
+                    limit = min(limit, byte_budget)
                 value = await asyncio.wait_for(loader(locator, client=client, scope=scope,
-                    maximum_bytes=preferences["file_understanding_max_size_mb"] * 1024 * 1024,
+                    maximum_bytes=limit,
                     maximum_chars=remaining, formats=preferences["file_understanding_allowed_suffixes"]),
                     timeout=max(0.01, deadline - asyncio.get_running_loop().time()))
-                if (type(value) is not FileText or value.position != locator.position
-                        or value.name != locator.name or len(value.text) > remaining):
+                if type(value) is not FileText:
+                    raise FileExtractionError("host_file_invalid", limit)
+                if byte_budget is not None:
+                    byte_budget = max(0, byte_budget - value.byte_count)
+                if value.position != locator.position or value.name != locator.name or len(value.text) > remaining:
                     raise TaskError("host_file_invalid", "document loader changed the frozen attachment")
+                if value.byte_count > limit:
+                    raise TaskError("host_file_limit", "document exceeds its remaining byte budget")
                 entry.update(sha256=value.content_hash, byte_count=value.byte_count, text=value.text,
                              coverage="部分正文" if value.truncated else "已提取正文")
                 remaining -= len(value.text)
             except TimeoutError:
+                if byte_budget is not None:
+                    byte_budget = 0
                 entry["status"] = "文件读取超时，未取得正文"
                 logger.warning("[CompanionV2] 文件理解未完成 position=%s reason=host_file_timeout", locator.position)
             except Exception as error:
+                if byte_budget is not None and isinstance(error, FileExtractionError):
+                    byte_budget = max(0, byte_budget - error.bytes_read)
                 code = error.code if isinstance(error, TaskError) else "host_file_failed"
                 if code == "host_file_decoder_unavailable":
                     # 点名是哪种格式缺组件：泛化的「暂不可用」会让人以为是文件坏了。

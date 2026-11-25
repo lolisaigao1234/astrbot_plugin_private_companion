@@ -10,7 +10,7 @@ from companion_v2.sources.models import SourceRecord
 from companion_v2.conversation.forwards.service import prepare_forward
 
 from .models import (CapturedQuote, QuoteDescriptor, QuoteImageEvent, TelegramQuote, TelegramQuoteDescriptor,
-                     TelegramLinkedQuoteDescriptor, TelegramForwardedQuoteDescriptor, OWNER)
+                     TelegramLinkedQuoteDescriptor, TelegramForwardedQuoteDescriptor, TelegramAttachmentDescriptor, OWNER)
 from .forward_models import (ForwardQuoteDescriptor, ForwardQuoteMediaDescriptor, QuoteMediaDescriptor,
                              QuotedForwardEvent)
 from .originals import original_sources
@@ -46,11 +46,17 @@ def prepare_quote(sources, parent, audience, captured):
     if audios or videos:
         extra.update(audios=audios, videos=videos)
     if isinstance(captured, TelegramQuote):
+        provenance = {}
         if origin:
             label = sources.prepare_message(replace(record, payload=origin.label)).payload
+            provenance = dict(forward_origin=replace(origin, label=label),
+                origin_resource_hash=origin.resource_hash(captured.message_id))
+        if captured.attachment:
+            return TelegramAttachmentDescriptor(*values, selection_offset=captured.selection_offset,
+                link_suffixes=captured.link_suffixes, attachment=captured.attachment, **provenance), record
+        if origin:
             return TelegramForwardedQuoteDescriptor(*values, selection_offset=captured.selection_offset,
-                link_suffixes=captured.link_suffixes, forward_origin=replace(origin, label=label),
-                origin_resource_hash=origin.resource_hash(captured.message_id)), record
+                link_suffixes=captured.link_suffixes, **provenance), record
         if captured.link_suffixes:
             return TelegramLinkedQuoteDescriptor(*values, selection_offset=captured.selection_offset,
                                                  link_suffixes=captured.link_suffixes), record

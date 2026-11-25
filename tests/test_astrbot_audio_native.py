@@ -4,6 +4,7 @@ import base64
 from dataclasses import replace
 import json
 import unittest
+from unittest.mock import patch
 
 from tests.multi_host_support import MultiFixture, multi_config
 from aiocqhttp.api_impl import WebSocketReverseApi
@@ -11,7 +12,8 @@ from astrbot.core.message.components import Plain, Record
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
 from astrbot_host.audio.components import private_components
 from astrbot_host.audio.loader import load_native_audio
-from companion_v2.execution.models import TaskContext
+from companion_v2.adapters.astrbot.native import NativeAudioLocator
+from companion_v2.execution.models import TaskContext, TaskError
 from tests.audio_support import audio_bytes
 from tests.staging_bootstrap_support import wait_for_batch
 from tests import test_astrbot_image_delivery_native as image_native
@@ -58,3 +60,9 @@ class NativeAudioTests(MultiFixture, unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(sources[0], sources[1])
         self.assertEqual(self.sockets["qq-main"]["101"].frames, [])
         self.assertEqual(self.sockets["qq-second"]["100"].frames, [])
+
+    async def test_crashed_voice_decoder_keeps_its_failure_code(self):
+        locator = NativeAudioLocator(0, "base64://" + base64.b64encode(audio_bytes()).decode("ascii"))
+        with patch("astrbot_host.audio.loader.sys.executable", "/bin/false"), self.assertRaises(TaskError) as caught:
+            await load_native_audio(locator)
+        self.assertEqual(caught.exception.code, "host_audio_fetch_failed")

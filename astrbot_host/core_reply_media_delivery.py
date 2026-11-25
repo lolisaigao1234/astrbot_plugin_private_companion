@@ -60,6 +60,10 @@ def native_reply_messages(event, message):
         return (message,)
     chain = _without_emotion_markers(chain)
     getter = getattr(event, "get_platform_name", None)
+    renders = _renders
+    if callable(getter) and getter() == "telegram":
+        from companion_v2.adapters.astrbot.telegram_wire import telegram_visible
+        renders = telegram_visible
     qq = callable(getter) and getter() in {"aiocqhttp", "qq_official", "qq_official_webhook"}
     groups, current = [], []
     for part in chain:
@@ -82,7 +86,7 @@ def native_reply_messages(event, message):
     # would render nothing at all.
     headers, bodies = [], []
     for group in groups:
-        if _renders(group):
+        if renders(group):
             bodies.append(group)
         else:
             headers.extend(part for part in group if isinstance(part, _DECORATION))
@@ -102,6 +106,9 @@ def is_optional_singing_message(message):
 async def native_wire_message(event, message):
     """The SDK's Image conversion drops sub_type; keep it for owned QQ stickers."""
     getter = getattr(event, "get_platform_name", None)
+    if callable(getter) and getter() == "telegram":
+        from companion_v2.adapters.astrbot.telegram_wire import telegram_component
+        return _derive(message, [telegram_component(part) for part in message.chain])
     if callable(getter) and getter() == "wechat_native":
         chain = getattr(message, "chain", ())
         if any(isinstance(part, Face) for part in chain):

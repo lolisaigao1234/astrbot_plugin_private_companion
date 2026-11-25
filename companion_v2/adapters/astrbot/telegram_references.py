@@ -4,12 +4,16 @@ from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
 from companion_v2.conversation.forwards.models import CapturedForward, CapturedForwardNode
-from companion_v2.conversation.quotes.models import TelegramForwardOrigin, TelegramQuote, prompt_label
+from companion_v2.conversation.quotes.models import (
+    TelegramAttachmentQuote, TelegramForwardOrigin, TelegramQuote, prompt_label,
+)
 from companion_v2.execution.models import TaskError, digest
 
 from companion_v2.sources.privacy import redact_text
 
+from .files import safe_name
 from .quotes import image_locator
+from .telegram_media import freeze_attachment, safe_text, sticker_label
 
 
 @dataclass(frozen=True)
@@ -40,7 +44,7 @@ class TelegramReferences:
         return text
 
 
-def _origin(origin):
+def _origin(event, origin):
     if not origin:
         return None
     source = "未知"
@@ -58,13 +62,32 @@ def _origin(origin):
             source += f"，原消息 {origin.message_id}"
         if origin.author_signature:
             source += f"，署名 {origin.author_signature}"
-    return TelegramForwardOrigin(str(origin.type), source or "未知", int(origin.date.timestamp()),
+    return TelegramForwardOrigin(str(origin.type), safe_text(event, source or "未知"), int(origin.date.timestamp()),
                                  str(origin.sender_user.id) if origin.type == "user" else None, chat_fingerprint)
 
 
+def voice_caption_parts(raw, parts):
+    # AstrBot converts a voice note to Record without its Telegram caption.
+    kinds = [getattr(part.type, "value", part.type) for part in parts]
+    body = kinds[1:] if kinds[:1] == ["Reply"] else kinds
+    if not raw.voice or not raw.caption or body not in (["Record"], ["Plain"]):
+        return parts
+    caption = raw.caption.encode("utf-16-le")
+    for entity in reversed(raw.caption_entities or ()):
+        if entity.type == "text_link" and entity.url:
+            end = 2 * (entity.offset + entity.length)
+            caption = caption[:end] + f" ({entity.url})".encode("utf-16-le") + caption[end:]
+    caption = caption.decode("utf-16-le")
+    if body == ["Plain"] and parts[-1].text == caption:
+        return parts
+    return (*parts, SimpleNamespace(type="Plain", text=caption))
+
+
 def private_text_parts(message, parts):
-    """Restore self mentions only when the authenticated update matches AstrBot's chain."""
+    """Recover Telegram text only for matching converted component shapes."""
     raw = message.raw_message.message
+    if raw.voice:
+        return voice_caption_parts(raw, parts)
     if not raw.text or not any(entity.type == "mention" for entity in raw.entities):
         return parts
     # Text messages have optional Reply, ordered At components, then optional Plain.
@@ -120,8 +143,7 @@ def private_references(event):
     if (raw is None or str(raw.chat.id) != peer or raw.chat.type != "private"
             or str(getattr(raw.from_user, "id", None)) != peer or str(raw.message_id) != str(message.message_id)):
         raise TaskError("host_route_mismatch", "Telegram update does not match the private message")
-    origin = _origin(raw.forward_origin)
-    references = TelegramReferences(origin=origin)
+    references = TelegramReferences(origin=_origin(event, raw.forward_origin))
     reply = next(((index, part) for index, part in enumerate(message.message)
                   if getattr(part.type, "value", part.type) == "Reply"), None)
     original = raw.reply_to_message
@@ -137,14 +159,30 @@ def private_references(event):
     position, part = reply or (0, None)
     text = raw.quote.text if raw.quote else original.text or original.caption or ""
     images = ()
-    static_sticker = original.sticker and not (original.sticker.is_animated or original.sticker.is_video)
-    if (original.photo or static_sticker) and not raw.quote:
-        if static_sticker and original.sticker.emoji:
-            text = f"Sticker: {original.sticker.emoji}"
+    attachment = None
+    if original.voice or original.document:
+        if original.voice:
+            kind, label = "voice", "[语音消息]"
+        elif original.document.file_name:
+            kind, label = "document", f"[文件 {safe_name(original.document.file_name)}]"
+        else:
+            kind, label = "unnamed_document", "[文件]"
+        full = label + ("\n" + original.caption if original.caption else "")
+        attachment = TelegramAttachmentQuote(kind, digest(redact_text(safe_text(event, full))))
+        if not raw.quote:
+            text = full
+    sticker = original.sticker
+    if sticker and not raw.quote:
+        text = sticker_label(sticker)
+    sticker_image = sticker and (sticker.thumbnail or not (sticker.is_animated or sticker.is_video))
+    if not raw.quote and (original.photo or sticker_image):
         text = "\n[图片 1]\n" + text
         if part and str(part.id) == str(original.message_id) and str(part.sender_id) == sender:
-            images = tuple(image_locator(index, item.file, item.url) for index, item in enumerate(part.chain or ())
-                           if getattr(item.type, "value", item.type) == "Image")
+            # A Telegram photo or sticker contributes at most one bitmap.
+            for index, item in enumerate(part.chain or ()):
+                if getattr(item.type, "value", item.type) == "Image":
+                    images = (freeze_attachment(event, image_locator(index, item.file, item.url)),)
+                    break
     # AstrBot inserts these suffixes in the admitted Plain. Keep their UTF-16
     # locations and fingerprints so verified history can recover Telegram's text.
     link_suffixes = []
@@ -154,7 +192,7 @@ def private_references(event):
             link_suffixes.append((entity.offset + entity.length, len(suffix.encode("utf-16-le")) // 2,
                                   digest(suffix)))
     quote = TelegramQuote(position, str(original.message_id), sender, int(original.date.timestamp()),
-                          text if text.strip() else "[附件]", companion_sender=sender != peer,
+                          safe_text(event, text) if text.strip() else "[附件]", companion_sender=sender != peer,
                           selection_offset=raw.quote.position if raw.quote else None, link_suffixes=tuple(link_suffixes),
-                          forward_origin=_origin(original.forward_origin))
+                          forward_origin=_origin(event, original.forward_origin), attachment=attachment)
     return replace(references, quote=quote, images=images)

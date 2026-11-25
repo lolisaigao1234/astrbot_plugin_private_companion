@@ -106,6 +106,50 @@ def _bounded_sections(originals, budget=MAX_MERGED_CHARS, replies=None):
         yield i, prefix + headers[i] + body
 
 
+def temporary_file_component(event, name, data, suffix):
+    from pathlib import Path
+    from tempfile import NamedTemporaryFile
+    from astrbot.core.message.components import File
+    from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
+
+    directory = Path(get_astrbot_temp_path())
+    directory.mkdir(parents=True, exist_ok=True)
+    with NamedTemporaryFile(dir=directory, suffix=suffix, delete=False) as stream:
+        event.track_temporary_local_file(stream.name)
+        stream.write(data)
+    return File(name=name, file=stream.name)
+
+
+async def bounded_file_component(event, locator, remaining, preferences, scope, deadline):
+    import aiohttp
+    import asyncio
+    from pathlib import Path
+    from astrbot.core.message.components import Plain
+    from companion_v2.conversation.media.understanding import media_scope_enabled
+    from companion_v2.adapters.astrbot.telegram_media import fetch_location
+    from companion_v2.execution.models import TaskError
+    from .media import fetch_attachment
+
+    # SDK File.get_file would download the original without the burst's remaining cap.
+    if not preferences["file_understanding_enabled"] or not media_scope_enabled(preferences, "file_understanding", scope):
+        return Plain(f"[文件 {locator.name}：文件理解未启用，未读取正文]"), 0
+    if Path(locator.name).suffix.lower() not in preferences["file_understanding_allowed_suffixes"]:
+        return Plain(f"[文件 {locator.name}：文件格式暂不支持]"), 0
+    time_left = deadline - asyncio.get_running_loop().time()
+    if time_left <= 0:
+        return Plain(f"[文件 {locator.name}：文件读取超时，本轮未读取]"), 0
+    maximum_bytes = min(remaining, preferences["file_understanding_max_size_mb"] * 1024**2)
+    try:
+        data = await asyncio.wait_for(fetch_attachment(fetch_location(locator), maximum_bytes=maximum_bytes),
+                                      time_left)
+    except TimeoutError:
+        # A cancelled prefetch can have consumed at most the offered document allowance.
+        return Plain(f"[文件 {locator.name}：文件读取超时，本轮未读取]"), maximum_bytes
+    except (aiohttp.ClientError, OSError, RuntimeError):
+        raise TaskError("host_file_unavailable", "document could not be retrieved") from None
+    return temporary_file_component(event, locator.name, data, Path(locator.name).suffix[:20]), len(data)
+
+
 def keep_burst_files(event, owner):
     """Let the event that replies to a burst own the voice files of the messages it supersedes."""
     if (getattr(getattr(event, "platform_meta", None), "name", None) != "telegram"

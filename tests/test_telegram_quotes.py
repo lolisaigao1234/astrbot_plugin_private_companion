@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 import unittest
 from unittest.mock import AsyncMock, patch
+import wave
 
 from tests.test_telegram_platform import OWNER, TelegramHostFixture
 from telegram import Document, PhotoSize, Update
@@ -19,6 +20,30 @@ from astrbot_host.media import load_native_image
 
 
 class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
+    def test_non_photo_attachments_share_the_budget_with_a_quoted_photo(self):
+        from astrbot.core.message.components import File, Record, Video
+        reply = Reply(id="10", chain=[Image.fromBytes(b"quoted")])
+        for attachment in (File(name="note.txt", file="note.txt"), Record(file="voice.wav"), Video(file="clip.mp4")):
+            with self.subTest(kind=type(attachment).__name__):
+                event = NS(message_obj=NS(message=[reply, attachment]))
+                self.assertTrue(self.controller.session.bridge.needs_telegram_media_budget(event))
+
+    async def test_provider_photo_budget(self):
+        from tests.telegram_provider_photo_support import check_provider_photo_budget
+
+        async def make_event(fields, original):
+            return await self.event(**fields, reply_to_message=self.message(10, 424242, **original))
+
+        await check_provider_photo_budget(self, make_event, "tg-owner", 424242)
+
+    async def test_provider_quoted_documents_and_videos(self):
+        from tests.telegram_provider_photo_support import check_provider_quoted_attachments
+
+        async def make_event(fields, original):
+            return await self.event(**fields, reply_to_message=self.message(10, 424242, **original))
+
+        await check_provider_quoted_attachments(self, make_event, "tg-owner")
+
     async def asyncSetUp(self):
         self.platform.client.id = 424242
         self.platform.client.username = "synthetic_bot"
@@ -125,10 +150,11 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
     async def test_forwarded_voice_survives_until_the_burst_reply_ends(self):
         from astrbot.core.message.components import Record
         from astrbot.core.platform.astr_message_event import event_context
+        from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
         from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA
 
         plugin = self.started_plugin()
-        paths, heard = [], []
+        paths, recorded, heard = [], [], []
 
         async def receive(event):
             with event_context(event):
@@ -138,7 +164,7 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
                         event.track_temporary_local_file(part.file)
                 await plugin.receive_companion_message(event)
                 if event.get_extra(CORE_REPLY_CONTEXT_EXTRA):
-                    heard.extend((part.file, Path(part.file).exists())
+                    heard.extend(base64.b64decode(part.file.removeprefix("base64://"))
                                  for part in event.message_obj.message if isinstance(part, Record))
 
         tasks = []
@@ -146,14 +172,18 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
             event = await self.event(number=number, text="forwarded words", forward_origin={
                 "type": "hidden_user", "sender_user_name": "Ada", "date": 1700000000})
             if number < 93:
-                path = self.root / f"voice-{number}.wav"
-                path.write_bytes(b"RIFF")
+                path = Path(get_astrbot_temp_path()) / f"voice-{number}.wav"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with wave.open(str(path), "wb") as stream:
+                    stream.setnchannels(1), stream.setsampwidth(2), stream.setframerate(8000)
+                    stream.writeframes(bytes([number, 0]) * 800)
+                recorded.append(path.read_bytes())
                 paths.append(str(path))
-                event.message_obj.message = [Record(file=str(path))]
+                event.message_obj.message = [Record(file=str(path), url=str(path), path=str(path))]
             tasks.append(asyncio.create_task(receive(event)))
             await asyncio.sleep(0.2)
         await asyncio.gather(*tasks)
-        self.assertEqual(heard, [(path, True) for path in paths])
+        self.assertEqual(heard, recorded)
         self.assertFalse(any(Path(path).exists() for path in paths))
 
     async def test_comment_folded_into_a_pending_forward_stays_the_senders_words(self):
@@ -850,6 +880,76 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
             payload = session.application.messages._read_source(saved.source, context, "text", self.clock.now()).payload
             self.assertEqual(json.loads(payload)["image_sources"][0]["original_sender"], str(sender))
 
+    async def test_shared_photo_budget(self):
+        from tests.test_conversation_images import image_bytes
+        photo = dict(file_id="quoted", file_unique_id="x", width=2, height=2)
+        direct, quoted = image_bytes("red"), image_bytes("blue")
+        async def get_file(size, *args, **kwargs):
+            data = direct if size.file_id == "direct" else quoted
+            return NS(file_path="base64://" + base64.b64encode(data).decode())
+        with patch.object(PhotoSize, "get_file", get_file):
+            event = await self.event(photo=[dict(photo, file_id="direct")], caption="current",
+                reply_to_message=self.message(10, 424242, photo=[photo], caption="original"))
+        loader = AsyncMock(wraps=self.bridge.image_loader)
+        with patch.object(self.bridge, "image_loader", loader), patch(
+                "companion_v2.conversation.media.models.MAX_TURN_BYTES", len(direct) + 1):
+            captured = require(await self.bridge.capture(event))
+        self.assertEqual([call.kwargs["maximum_bytes"] for call in loader.await_args_list], [len(direct) + 1, 1])
+        self.assertEqual([image.content for image in captured.images], [direct])
+        self.assertIn("current", captured.text)
+        quote, = captured.quotes
+        self.assertEqual((quote.message_id, quote.sender_id, quote.sent_at, quote.images),
+                         ("10", "424242", 1700000000, ()))
+        self.assertIn("original", quote.text)
+
+    async def test_forward_provider_budget(self):
+        from astrbot.core.astr_main_agent import collect_initial_request
+        from tests.test_conversation_images import image_bytes
+        photos = [image_bytes("red"), image_bytes("blue")]
+        events = []
+        for index, content in enumerate(photos):
+            with patch.object(PhotoSize, "get_file", AsyncMock(return_value=NS(
+                    file_path="base64://" + base64.b64encode(content).decode()))):
+                events.append(await self.event(number=80+index, caption=f"caption-{index}",
+                    photo=[dict(file_id="x", file_unique_id="x", width=2, height=2)],
+                    forward_origin=dict(type="hidden_user", sender_user_name=f"source-{index}", date=1700000000)))
+        comment = await self.event(number=82, text="compare these")
+        from astrbot_host.telegram_forward_burst import merge_forward_burst
+        target = self.controller.settings.target("tg-owner")
+        prepare = self.controller.prepare_core_reply_context
+        plan = require(await prepare(comment, target))
+        entries = [(event, "", None) for event in (*events, comment)]
+        plan = await merge_forward_burst(comment, target, plan, entries, prepare)
+        self.assertEqual([item.event_id for item in plan.captured.telegram_burst], ["80", "81", "82"])
+        with patch("companion_v2.conversation.media.models.MAX_TURN_BYTES", max(map(len, photos))):
+            require(await self.controller.prepare_core_reply(comment, target, plan=plan))
+        with patch("astrbot.core.astr_main_agent._get_session_conv", AsyncMock(return_value=NS(history="[]"))):
+            request, _ = await collect_initial_request(comment, NS(), NS(provider_wake_prefix="", provider_settings={}))
+        payload = await request.assemble_context()
+        self.assertEqual([base64.b64decode(p["image_url"]["url"].split(",")[1])
+                          for p in payload["content"] if p["type"] == "image_url"], photos[:1])
+        for text in ("source-0", "source-1", "caption-0", "caption-1", "compare these", "附件超过读取上限"):
+            self.assertIn(text, json.dumps(payload, ensure_ascii=False))
+
+    async def test_oversized_quoted_photo_keeps_original_attribution_and_caption(self):
+        from astrbot_host.media import load_native_image
+        from tests.test_conversation_images import image_bytes
+
+        self.bridge.image_loader = load_native_image
+        source = image_bytes(size=(8193, 1))
+        photo = [{"file_id": "file", "file_unique_id": "unique", "width": 8193, "height": 1}]
+        with patch.object(PhotoSize, "get_file", new=AsyncMock(return_value=NS(
+                file_path="base64://" + base64.b64encode(source).decode()))):
+            event = await self.event(text="继续", reply_to_message=self.message(10, 424242, photo=photo, caption="原图"))
+        result = require(await self.bridge.capture(event))
+        quote, = result.quotes
+        self.assertEqual((quote.message_id, quote.sender_id, quote.sent_at), ("10", "424242", 1700000000))
+        self.assertTrue(quote.companion_sender)
+        self.assertIn("原图", quote.text)
+        self.assertEqual(quote.images, ())
+        self.assertIn("继续", result.text)
+        self.assertNotIn("原图", result.text)
+
     async def test_admitted_mentions_keep_their_positions_across_links_and_partial_quotes(self):
         session = self.controller.session
         target = self.controller.settings.target("tg-owner")
@@ -975,7 +1075,166 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
         require(await self.controller.session.receive(original, target))
         capture = require(await self.bridge.capture(quoted))
         quote, = capture.quotes
-        self.assertEqual(quote.text, "\n[图片 1]\nSticker: 🍀")
+        self.assertEqual(quote.text, "\n[图片 1]\n[贴纸 🍀]")
         self.assertEqual(len(quote.images), 1)
         self.assertEqual(len(frozen_image_locators(quoted)[0].images), 1)
         require(await self.controller.session.receive(quoted, target))
+
+    async def test_voice_reply_preserves_caption_and_quote_through_provider_and_replay(self):
+        from pathlib import Path
+        from telegram import Voice
+        from astrbot.core.astr_main_agent import MainAgentBuildConfig, _process_quote_message, collect_initial_request
+        from astrbot.core.message.components import Record
+        from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
+        from astrbot_host.audio.loader import load_native_audio
+        from tests.audio_support import audio_bytes
+
+        self.bridge.audio_type, self.bridge.audio_loader = Record, load_native_audio
+        session = self.controller.session
+        target = self.controller.settings.target("tg-owner")
+        caption = "这是语音说明"
+        quote_text = "先前的答复"
+        original = self.message(9, 424242, text=quote_text)
+        voice = {"file_id": "voice", "file_unique_id": "v1", "duration": 1}
+
+        async def download(url, *, path):
+            Path(path).write_bytes(audio_bytes())
+
+        Path(get_astrbot_temp_path()).mkdir(parents=True, exist_ok=True)
+        with patch.object(Voice, "get_file", AsyncMock(return_value=NS(file_path="https://example.org/voice"))), \
+                patch("astrbot.core.platform.sources.telegram.tg_adapter.download_file", download), \
+                patch.object(session.application, "worker_limit", 0):
+            converted = await self.event(90, text="继续", reply_to_message=original)
+            reply = next(part for part in converted.message_obj.message if isinstance(part, Reply))
+            for number, with_component in ((100, False), (110, True)):
+                event = await self.event(number, voice=voice, caption=caption, reply_to_message=original)
+                components = event.message_obj.message
+                components[:] = [part for part in components if not isinstance(part, Reply)]
+                if with_component:
+                    components.insert(0, reply)
+                full = require(await self.bridge.capture(event))
+                self.assertTrue(full.text.startswith("\n[引用消息]\n"))
+                self.assertEqual(full.text.count(caption), 1)
+                self.assertEqual((full.quotes[0].position, full.audios[0].descriptor.position), (0, 1))
+                require(await session.receive(event, target))
+                replay = await self.event(number + 1, text="继续", reply_to_message=self.message(number, voice=voice, caption=caption))
+                require(await session.receive(replay, target))
+                core = require(await self.bridge.capture_core_reply(event))
+                self.assertEqual(core.text.count(caption), 1)
+                with patch("astrbot.core.astr_main_agent._get_session_conv", AsyncMock(return_value=NS(history="[]"))):
+                    request, _ = await collect_initial_request(event, NS(), MainAgentBuildConfig(tool_call_timeout=5))
+                    await _process_quote_message(event, request, "", NS())
+                from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA, inject_core_reply_prompt
+                event.set_extra(CORE_REPLY_CONTEXT_EXTRA, {"prepared": {"native_input": core}})
+                inject_core_reply_prompt(event, request)
+                inject_core_reply_prompt(event, request)
+                payload = json.dumps(await request.assemble_context(), ensure_ascii=False)
+                self.assertEqual(payload.count(caption), 1)
+                self.assertEqual(payload.count(quote_text), 1)
+
+    async def test_transcribed_voice_reply_includes_caption_once(self):
+        from pathlib import Path
+        from telegram import Voice
+        from astrbot.core.astr_main_agent import MainAgentBuildConfig, _process_quote_message, collect_initial_request
+        from astrbot.core.message.components import Plain
+        from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA, inject_core_reply_prompt
+        from tests.audio_support import audio_bytes
+
+        async def download(url, *, path):
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_bytes(audio_bytes())
+
+        transcript, caption, quote_text = "语音转写正文", "这是语音说明", "先前的答复"
+        original = self.message(9, 424242, text=quote_text)
+        converted = await self.event(90, text="继续", reply_to_message=original)
+        reply = next(part for part in converted.message_obj.message if isinstance(part, Reply))
+        with patch.object(Voice, "get_file", AsyncMock(return_value=NS(file_path="https://example.org/voice"))), \
+                patch("astrbot.core.platform.sources.telegram.tg_adapter.download_file", download):
+            for number, header in ((100, []), (110, [reply])):
+                event = await self.event(number, voice={"file_id": "v", "file_unique_id": "v1", "duration": 1},
+                                         caption=caption, reply_to_message=original)
+                event.message_obj.message = [*header, Plain(transcript)]
+                event.message_str = transcript
+                core = require(await self.bridge.capture_core_reply(event))
+                self.assertIn(caption, core.text)
+                with patch("astrbot.core.astr_main_agent._get_session_conv", AsyncMock(return_value=NS(history="[]"))):
+                    request, _ = await collect_initial_request(event, NS(), MainAgentBuildConfig(tool_call_timeout=5))
+                    await _process_quote_message(event, request, "", NS())
+                event.set_extra(CORE_REPLY_CONTEXT_EXTRA, {"prepared": {"native_input": core}})
+                inject_core_reply_prompt(event, request)
+                payload = json.dumps(await request.assemble_context(), ensure_ascii=False)
+                for expected in (transcript, caption, quote_text):
+                    self.assertEqual(payload.count(expected), 1, expected)
+
+    async def test_admitted_attachment_quotes_match_sdk_originals(self):
+        from contextlib import ExitStack
+        from pathlib import Path
+        from telegram import Document, Voice
+        from astrbot.core.message.components import File, Record
+        from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
+        from astrbot_host.audio.loader import load_native_audio
+        from tests.audio_support import audio_bytes
+        from tests.test_conversation_images import image_bytes
+
+        self.bridge.audio_type, self.bridge.audio_loader = Record, load_native_audio
+        self.bridge.file_type = File
+        session = self.controller.session
+        target = self.controller.settings.target("tg-owner")
+        bot = self.platform.client
+        bot.base_file_url = f"https://api.telegram.org/file/bot{bot.token}"
+        url = bot.base_file_url + "/synthetic/test.wav"
+        thumb = dict(file_id="thumb", file_unique_id="t", width=2, height=2)
+        sticker = dict(file_id="stk", file_unique_id="s", width=2, height=2, type="regular", emoji="🍀")
+        caption = "😀一个片段"
+        cases = [(dict(sticker=dict(sticker, is_video=video, is_animated=not video, thumbnail=preview)),
+                  ("\n[图片 1]\n" if preview else "") + "[贴纸 🍀]")
+                 for video in (True, False) for preview in (thumb, None)]
+        cases += [(dict(voice=dict(file_id="v", file_unique_id="v1", duration=1), caption=caption),
+                   "[语音消息]\n" + caption),
+                  (dict(document=dict(file_id="d", file_unique_id="d1", file_name="notes.txt"), caption=caption),
+                   "[文件 notes.txt]\n" + caption)]
+
+        async def download(url, *, path):
+            Path(path).write_bytes(audio_bytes())
+
+        Path(get_astrbot_temp_path()).mkdir(parents=True, exist_ok=True)
+        with ExitStack() as stack:
+            # Exercise admission and durable reads without scheduling unrelated reply generation.
+            stack.enter_context(patch.object(session.application, "worker_limit", 0))
+            for cls in (Voice, Document, PhotoSize):
+                stack.enter_context(patch.object(cls, "get_file", AsyncMock(return_value=NS(file_path=url))))
+            stack.enter_context(patch("astrbot.core.platform.sources.telegram.tg_adapter.download_file", download))
+            stack.enter_context(patch("astrbot_host.media.fetch_image", AsyncMock(return_value=image_bytes())))
+            for index, (fields, expected) in enumerate(cases):
+                with self.subTest(index=index):
+                    number = 300 + index * 10
+                    require(await session.receive(await self.event(number, **fields), target))
+                    original = self.message(number, **fields)
+                    event = await self.event(number + 1, text="继续", reply_to_message=original)
+                    require(await session.receive(event, target))
+                    core = require(await self.bridge.capture_core_reply(event))
+                    self.assertEqual(core.text, "继续")
+                    quote, = core.quotes
+                    self.assertEqual((quote.text, quote.sender_id, quote.sent_at), (expected, str(OWNER), 1700000000))
+                    self.assertEqual(self.observe(core)[0], "继续")
+                    quoted_text = self.quoted_evidence(core)
+                    self.assertIn(expected, quoted_text)
+                    self.assertIn(str(OWNER), quoted_text)
+                    self.assertIn("1700000000", quoted_text)
+                    if "caption" in fields:
+                        selection = await self.event(number + 2, text="选段", reply_to_message=original,
+                                                     quote={"text": "片段", "position": 4})
+                        require(await session.receive(selection, target))
+                        self.assertEqual(require(await self.bridge.capture_core_reply(selection)).quotes[0].text, "片段")
+                        changed = dict(original, caption="其他")
+                        altered = await self.event(number + 4, text="选段", reply_to_message=dict(original, caption=caption + "改"),
+                                                   quote={"text": "片段", "position": 4})
+                        self.assertEqual((await session.receive(altered, target)).failure.code, "quote_original_changed")
+                    else:
+                        changed = dict(original, sticker=dict(fields["sticker"], emoji="😀"))
+                    changed_event = await self.event(number + 3, text="?", reply_to_message=changed)
+                    self.assertEqual((await session.receive(changed_event, target)).failure.code, "quote_original_changed")
+        with self.controller.runtime.read_only_snapshot() as db:
+            rows = "\n".join(db.iterdump())
+        self.assertNotIn(bot.token, rows)
+        self.assertNotIn("/synthetic/test.wav", rows)

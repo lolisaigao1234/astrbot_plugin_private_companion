@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import json
+from types import SimpleNamespace
 import unittest
 
 from astrbot_host.files.loader import load_native_file
@@ -11,6 +12,7 @@ from companion_v2.adapters.astrbot.files import (
     NativeFileLocator,
     prepare_file_text,
 )
+from companion_v2.adapters.astrbot.telegram_media import TelegramFile
 from companion_v2.configuration.models import ConfigurationError
 from companion_v2.configuration.registry import FieldRegistry
 from companion_v2.conversation.media.understanding import (
@@ -108,6 +110,90 @@ class FileUnderstandingTests(unittest.IsolatedAsyncioTestCase):
         entry = json.loads(result[2].split("\n", 2)[2])
         self.assertEqual(entry["status"], "文件理解未启用，未读取正文")
         self.assertEqual(entry["component_position"], 2)
+
+    async def test_documents_share_the_remaining_capacity(self):
+        budget = 7
+        limits = []
+        async def load(locator, *, maximum_bytes, **kwargs):
+            limits.append(maximum_bytes)
+            return extract_document(b"four" if locator.position == 0 else b"abc",
+                                    locator.position, locator.name, maximum_chars=32)
+        files = [NativeFileLocator(pos, f"file{pos}.txt", f"source{pos}") for pos in range(3)]
+        for scope in (ScopeKind.PRIVATE, ScopeKind.GROUP):
+            with self.subTest(scope=scope):
+                limits.clear()
+                rendered = await prepare_file_text(files, load, settings({**DEFAULTS,
+                    "file_understanding_enabled": True, f"file_understanding_{scope.value}_enabled": True}),
+                    client=None, scope=scope, byte_budget=budget)
+                self.assertEqual(limits, [7, 3])
+                self.assertIn("上限", rendered[2])
+
+    async def test_streamed_oversize_file_spends_allowance_but_header_rejection_does_not(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        client = SimpleNamespace(base_file_url="https://example.org")
+        locators = [NativeFileLocator(i, f"doc{i}.txt", TelegramFile("doc", client)) for i in range(2)]
+        for declared_size, downloads in ((None, 1), (8, 2)):
+            with self.subTest(content_length=declared_size):
+                response = MagicMock(status=200, content_length=declared_size, headers={})
+                response.content.read = AsyncMock(side_effect=[b"1234567", b"8"])
+                session = MagicMock()
+                session.get.return_value.__aenter__.return_value = response
+                with patch("astrbot_host.media.aiohttp.ClientSession") as factory:
+                    factory.return_value.__aenter__.return_value = session
+                    result = await prepare_file_text(locators, load_native_file, settings({**DEFAULTS,
+                        "file_understanding_enabled": True, "file_understanding_private_enabled": True}),
+                        client=None, scope=ScopeKind.PRIVATE, byte_budget=7)
+                self.assertEqual(session.get.call_count, downloads)
+                self.assertEqual(response.content.read.await_count, 2 if declared_size is None else 0)
+                self.assertIn("上限", result[1])
+
+    async def test_other_platforms_keep_their_failure_statuses(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        for reads, declared_size, status in (([b"part", TimeoutError()], None, "文件读取超时"),
+                                             ([b"part", OSError()], None, "文件读取失败"),
+                                             ([b"x" * (1 << 20), b"x"], None, "文件读取失败"),
+                                             ([], 2 << 20, "文件读取失败")):
+            with self.subTest(status=status, content_length=declared_size):
+                response = MagicMock(status=200, content_length=declared_size, headers={})
+                response.content.read = AsyncMock(side_effect=reads)
+                session = MagicMock()
+                session.get.return_value.__aenter__.return_value = response
+                with patch("astrbot_host.media.aiohttp.ClientSession") as factory:
+                    factory.return_value.__aenter__.return_value = session
+                    result = await prepare_file_text(
+                        (NativeFileLocator(0, "doc.txt", "https://example.org/doc"),), load_native_file,
+                        settings({**DEFAULTS, "file_understanding_enabled": True, "file_understanding_max_size_mb": 1,
+                                  "file_understanding_private_enabled": True}), client=None, scope=ScopeKind.PRIVATE)
+                self.assertIn(status, result[0])
+
+    async def test_failed_extraction_debits_the_bytes_downloaded(self):
+        from unittest.mock import patch
+
+        client = SimpleNamespace(base_file_url="https://example.org")
+        locators = [NativeFileLocator(i, f"doc{i}.txt", TelegramFile("doc", client)) for i in range(3)]
+        limits = []
+        async def fetch(url, *, maximum_bytes):
+            limits.append(maximum_bytes)
+            return b"oops" if len(limits) == 1 else b"abc"
+
+        async def decode(content, locator, *, maximum_chars, formats):
+            if locator.position == 0:
+                raise TaskError("host_file_invalid", "cannot decode")
+            return extract_document(content, locator.position, locator.name, maximum_chars=maximum_chars)
+
+        for scope in (ScopeKind.PRIVATE, ScopeKind.GROUP):
+            with self.subTest(scope=scope):
+                limits.clear()
+                with patch("astrbot_host.files.loader.fetch_attachment", fetch), patch(
+                        "astrbot_host.files.loader.decode_document", decode):
+                    rendered = await prepare_file_text(locators, load_native_file, settings({**DEFAULTS,
+                        "file_understanding_enabled": True, f"file_understanding_{scope.value}_enabled": True}),
+                        client=None, scope=scope, byte_budget=7)
+                self.assertEqual(limits, [7, 3])
+                self.assertIn("abc", rendered[1])
+                self.assertIn("上限", rendered[2])
 
     async def test_disallowed_scope_does_not_call_the_attachment_loader(self):
         async def forbidden(*_args, **_kwargs):

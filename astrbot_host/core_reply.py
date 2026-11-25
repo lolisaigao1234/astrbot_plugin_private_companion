@@ -10,6 +10,7 @@ import json
 import time
 from typing import Any
 
+from companion_v2.adapters.astrbot.telegram_logging import redact_event_error, redact_event_token
 from companion_v2.execution.models import TaskContext, TaskError, encode, require
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.sources.privacy import redact_text
@@ -251,14 +252,15 @@ def prepare_core_reply_event(
 
         async def authorized_send(message: Any, *args: Any, **kwargs: Any) -> Any:
             try:
-                return await guarded_send(message, *args, **kwargs)
+                with redact_event_token(event):
+                    return await guarded_send(message, *args, **kwargs)
             except BaseException as error:
                 finish_core_reply_presence(event, force=True)
                 if _is_silent_send_denial(error):
                     state["silent_suppressed"] = True
                     _clear_suppressed_result_chain(event)
                     return None
-                raise
+                raise redact_event_error(event, error)
 
         async def guarded_send(message: Any, *args: Any, **kwargs: Any) -> Any:
             if getattr(message, "type", None) in {"tool_call", "tool_result", "agent_stats", "reasoning", "break"}:
@@ -458,14 +460,15 @@ def prepare_core_reply_event(
 
         async def authorized_streaming(*args: Any, **kwargs: Any) -> Any:
             try:
-                return await guarded_streaming(*args, **kwargs)
+                with redact_event_token(event):
+                    return await guarded_streaming(*args, **kwargs)
             except BaseException as error:
                 finish_core_reply_presence(event, force=True)
                 if _is_silent_send_denial(error):
                     state["silent_suppressed"] = True
                     _clear_suppressed_result_chain(event)
                     return None
-                raise
+                raise redact_event_error(event, error)
 
         async def guarded_streaming(*args: Any, **kwargs: Any) -> Any:
             # AstrBot skips result decorators for an active stream with no chain.
@@ -796,8 +799,12 @@ def inject_core_reply_prompt(event: Any, req: Any) -> None:
     origin = getattr(original, "forward_origin", "")
     markers = [f"[转发消息，来源：{origin}]"] if origin else []
     for quote in getattr(original, "quotes", ()):
-        if getattr(quote, "forward_origin", None):
-            # Capture keeps the original label so a later check can prove it unchanged.
+        raw = getattr(getattr(getattr(event, "message_obj", None), "raw_message", None), "message", None)
+        # Capture keeps the original label so a later check can prove it unchanged.
+        if getattr(raw, "voice", None) and not any(
+                getattr(part.type, "value", part.type) == "Reply" for part in event.message_obj.message):
+            markers.append(redact_text(quote.observation_text()))
+        elif getattr(quote, "forward_origin", None):
             attribution = redact_text(quote.forward_origin.attribution(quote.sender_id))
             markers.append(f"[引用消息 {quote.message_id}，{attribution}]")
     if markers and isinstance(getattr(req, "prompt", None), str):

@@ -31,6 +31,7 @@ from __future__ import annotations
 from collections import OrderedDict
 import time
 
+from companion_v2.adapters.astrbot.telegram_media import freeze_attachment
 from companion_v2.adapters.astrbot.native import NativeVideoLocator
 from companion_v2.conversation.media.video.models import MAX_VIDEOS
 
@@ -108,10 +109,20 @@ _VIDEO_FILE_SUFFIXES = frozenset({
 _EXCLUDED_VIDEO_FILE_SUFFIXES = frozenset({".ts", ".m2ts", ".mts"})
 
 
-def _file_is_video(part):
+def video_file_suffix(name):
+    from pathlib import Path
+
+    suffix = Path(name).suffix.lower()
+    return suffix if suffix in _VIDEO_FILE_SUFFIXES else ""
+
+
+def file_is_video(part):
     from pathlib import Path
     from urllib.parse import urlparse
 
+    kind = getattr(part, "type", None)
+    if getattr(kind, "value", kind) != "File":
+        return False
     file_attr = "file_" if hasattr(part, "file_") else "file"
     for attr in ("name", "url", file_attr):
         val = getattr(part, attr, None)
@@ -126,7 +137,7 @@ def _file_is_video(part):
     return False
 
 
-def video_positions(event, *, video_type, component_reader=None):
+def video_positions(event, *, video_type, component_reader=None, limit=MAX_VIDEOS):
     """读这条消息里的视频位置（含群/私聊 ``.mp4`` 等视频 File 段，排除 ``.ts``）。
 
     ``capture_text_only`` 只读文本骨架，从不触碰这里；位置是在它把组件折成
@@ -145,15 +156,15 @@ def video_positions(event, *, video_type, component_reader=None):
     for position, part in enumerate(parts if isinstance(parts, (list, tuple)) else ()):
         kind = getattr(getattr(part, "type", None), "value", getattr(part, "type", None))
         is_native_video = (type(part) is video_type and kind == "Video")
-        is_video_file = (kind == "File" and _file_is_video(part))
+        is_video_file = file_is_video(part)
         if not (is_native_video or is_video_file):
             continue
         file_attr = "file_" if is_video_file and hasattr(part, "file_") else "file"
         file = getattr(part, file_attr, None)
         value = file if type(file) is str and file.startswith("base64://") else getattr(part, "url", None) or file
         if type(value) is str and value:
-            found.append(NativeVideoLocator(position, value))
-        if len(found) >= MAX_VIDEOS:
+            found.append(freeze_attachment(event, NativeVideoLocator(position, value)))
+        if limit is not None and len(found) >= limit:
             break
     return tuple(found)
 
