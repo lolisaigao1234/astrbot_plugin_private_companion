@@ -11,6 +11,8 @@ from companion_v2.sources.privacy import redact_text
 
 logger = logging.getLogger(__name__)
 BARE_MENTION_SENTINEL_PROMPT = " "
+# What attachment preparation appended to the member's words for the model.
+TELEGRAM_ATTACHMENT_NOTES = "_private_companion_telegram_attachment_notes"
 
 
 async def _resolve_session_conversation(event, native_context):
@@ -127,8 +129,17 @@ def restore_group_mentions(event, request, native_input, native_context):
     applied_prefix = prefix if prefix and prompt.startswith(prefix) else ""
     if applied_prefix:
         prompt = prompt[len(applied_prefix):]
-    if prefix:
-        plain = telegram_plain_text(event, event.message_obj.message_str)
+    message = getattr(event, "message_obj", None)
+    if prefix or getattr(getattr(getattr(message, "raw_message", None), "message", None), "voice", None):
+        # AstrBot's own text has neither these markers nor a voice note's caption.
+        plain = telegram_plain_text(event, message.message_str)
+    getter = getattr(event, "get_extra", None)
+    notes = getter(TELEGRAM_ATTACHMENT_NOTES) if callable(getter) else None
+    applied_suffix = ""
+    if notes and prompt.endswith(notes):
+        applied_suffix = "\n" + notes
+        prompt = prompt.removesuffix(notes).removesuffix("\n")
+        plain = plain.removesuffix(notes).removesuffix("\n")
     # A custom wake prefix leaves the marker AstrBot adds for a reply in the prompt.
     marked = event.message_obj.message_str if telegram_has_reply_prefix(event) else plain
     if original == plain == marked:
@@ -169,5 +180,5 @@ def restore_group_mentions(event, request, native_input, native_context):
                 if "{{prompt}}" in template else (template + before, template + after))
     for before, after in variants:
         if prompt == before:
-            request.prompt = applied_prefix + after
+            request.prompt = applied_prefix + after + applied_suffix
             return
