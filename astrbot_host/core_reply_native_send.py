@@ -17,7 +17,7 @@ except ModuleNotFoundError as error:
         raise
     from astrbot.core.tools.message_tools import SendMessageToUserTool
 
-from companion_v2.adapters.astrbot.telegram_logging import redact_event_token
+from companion_v2.adapters.astrbot.telegram_logging import redact_event_error, redact_event_token
 from companion_v2.adapters.astrbot.telegram_send import send_context_message
 from companion_v2.execution.models import TaskError, digest
 from .core_reply import CORE_REPLY_CONTEXT_EXTRA, assert_core_reply_connection, sent_core_text
@@ -38,8 +38,8 @@ class _CurrentReplyContext:
             with redact_event_token(self._tool._event):
                 return await self._send_message(session, message_chain)
         except BaseException as error:
-            self.error = error
-            raise
+            self.error = redact_event_error(self._tool._event, error)
+            raise self.error
 
     async def _send_message(self, session, message_chain):
         tool, state = self._tool, self._tool._state

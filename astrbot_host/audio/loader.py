@@ -101,7 +101,12 @@ def _read_temp_record(value, maximum_bytes):
 async def load_native_audio(locator, *, maximum_bytes=MAX_AUDIO_BYTES):
     content = await fetch_native_audio_bytes(locator, maximum_bytes=maximum_bytes)
     with account_for_decode(content):
-        return await decode_audio(content, locator.position)
+        try:
+            return await decode_audio(content, locator.position)
+        except TaskError:
+            raise
+        except Exception:
+            raise TaskError("host_audio_fetch_failed", "original voice could not be prepared") from None
 
 
 async def fetch_native_audio_bytes(locator, *, maximum_bytes):

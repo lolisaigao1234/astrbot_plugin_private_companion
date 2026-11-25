@@ -1973,6 +1973,45 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
             self.assertIn(f"/bot[redacted]/{method}", record.getMessage())
             self.assertNotIn(token, repr(record.args))
 
+    async def test_refused_reply_keeps_the_credential_out_of_astrbot_logs(self):
+        from loguru import logger as sink
+        from telegram.ext import ExtBot
+        from telegram.request import BaseRequest
+        from astrbot.core import logger
+        from astrbot.core.message.message_event_result import MessageChain
+        from astrbot_host.core_reply import prepare_core_reply_event
+
+        class Refused(BaseRequest):
+            read_timeout = 1
+
+            async def initialize(self):
+                pass
+
+            async def shutdown(self):
+                pass
+
+            async def do_request(self, *args, **kwargs):
+                return 403, b'{"ok":false,"error_code":403,"description":"Forbidden: bot was blocked by the user"}'
+
+        bot = ExtBot("123456:SYNTHETIC", request=Refused(), get_updates_request=Refused())
+        event = self.platform.create_event(telegram_event(self.platform).message_obj)
+        event.client = bot
+        prepare_core_reply_event(event, {}, authorize=AsyncMock(return_value=Outcome.success({})))
+        lines = []
+        handler = sink.add(lines.append, format="{message}")
+        try:
+            try:
+                await event.send(MessageChain().message("回复"))
+            except Exception as error:
+                # AstrBot's respond stage reports a failed send this way.
+                logger.error(f"Failed to send the message chain: error = {error}", exc_info=True)
+        finally:
+            sink.remove(handler)
+        logs = "".join(lines)
+        self.assertIn("Failed to send the message chain: error = Forbidden: bot was blocked by the user", logs)
+        self.assertIn("telegram/_bot.py", logs)
+        self.assertNotIn(bot.token, logs)
+
     async def test_httpx_logs_redact_managed_replies_and_tool_sends(self):
         from astrbot.core.message.message_event_result import MessageChain
         from astrbot_host.core_reply import prepare_core_reply_event
