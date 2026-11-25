@@ -150,6 +150,16 @@ async def bounded_file_component(event, locator, remaining, preferences, scope, 
     return temporary_file_component(event, locator.name, data, Path(locator.name).suffix[:20]), len(data)
 
 
+def keep_burst_files(event, owner):
+    """Let the event that replies to a burst own the voice files of the messages it supersedes."""
+    if (getattr(getattr(event, "platform_meta", None), "name", None) != "telegram"
+            or owner is event or not getattr(owner, "_execution_active", False)):
+        return
+    for path in tuple(event._temporary_local_files):
+        event.untrack_temporary_local_file(path)
+        owner.track_temporary_local_file(path)
+
+
 async def merge_forward_burst(event, target, plan, entries, prepare_context):
     verified, parts, sections = [], [], []
     remaining_media = MAX_CORE_FORWARD_IMAGES
