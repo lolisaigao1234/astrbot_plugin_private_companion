@@ -105,9 +105,9 @@ def restore_group_mentions(event, request, native_input, native_context):
     prompt = getattr(request, "prompt", None)
     if not isinstance(original, str) or not isinstance(plain, str) or not isinstance(prompt, str):
         return
-    if telegram_has_reply_prefix(event):
-        plain = event.message_obj.message_str
-    if original == plain:
+    # A custom wake prefix leaves the marker AstrBot adds for a reply in the prompt.
+    marked = event.message_obj.message_str if telegram_has_reply_prefix(event) else plain
+    if original == plain == marked:
         return
     config = {}
     getter = getattr(native_context, "get_config", None)
@@ -116,7 +116,8 @@ def restore_group_mentions(event, request, native_input, native_context):
     provider = config.get("provider_settings", {}) if isinstance(config, Mapping) else {}
     prefixes = list(config.get("wake_prefix", ())) if getattr(event, "is_at_or_wake_command", False) else []
     prefixes.append(provider.get("wake_prefix", ""))
-    variants = [(plain, original), (plain.strip(), original.strip())]
+    variants = [(plain, original), (plain.strip(), original.strip()),
+                (marked, original), (marked.strip(), original.strip())]
     if not plain.strip():
         variants.append((BARE_MENTION_SENTINEL_PROMPT, original))
     if not plain.strip() and any(

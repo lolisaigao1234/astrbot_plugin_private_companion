@@ -126,9 +126,9 @@ class TelegramPlatformTests(unittest.TestCase):
         self.assertEqual(refused.exception.code, "host_route_mismatch")
 
 
-async def group_event(platform, chat_id=-400, kind="group", topic=None, text="你好", **fields):
+async def group_event(platform, chat_id=-400, kind="group", topic=None, text="你好", message_id=22, **fields):
     chat = Chat(chat_id, kind, is_forum=True if topic else None)
-    message = Message(22, date=datetime.now(timezone.utc), chat=chat, text=text,
+    message = Message(message_id, date=datetime.now(timezone.utc), chat=chat, text=text,
                       from_user=fields.pop("from_user", User(OWNER, "Synthetic", False)),
                       message_thread_id=topic, is_topic_message=bool(topic), **fields)
     native = await platform.convert_message(Update(12, message=message), NS(bot=platform.client))
@@ -707,6 +707,80 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
                 self.assertEqual(call.kwargs["chat_id"], str(chat))
                 self.assertEqual(call.kwargs.get("message_thread_id"), str(topic) if topic else None)
             self.platform.client.send_message.reset_mock()
+
+    def bot_topic(self, message_id=23, **fields):
+        return Message(message_id, date=datetime.now(timezone.utc), chat=Chat(-100400, "supergroup", is_forum=True),
+                       from_user=User(self.platform.client.id, "Bot", True), is_topic_message=True,
+                       message_thread_id=23, **fields)
+
+    async def waking_event(self, prefix, text, original, **fields):
+        """A topic message after AstrBot's own waking stage."""
+        from astrbot.core.pipeline.waking_check import stage as waking
+
+        event = await group_event(self.platform, -100400, "supergroup", 23, text=text,
+                                  reply_to_message=original, **fields)
+        event.created_at = self.clock.now().timestamp()
+        stage = waking.WakingCheckStage()
+        await stage.initialize(NS(astrbot_config={"platform_settings": {}, "admins_id": [], "wake_prefix": [prefix],
+                                                  "provider_settings": {}}, db_helper=None, astrbot_config_id="synthetic"))
+        with patch.object(waking, "star_handlers_registry", NS(get_handlers_by_event_type=lambda *_, **__: [])), \
+                patch.object(waking.SessionPluginManager, "filter_handlers_by_session", AsyncMock(return_value=[])):
+            await stage.process(event)
+        # The stage stops events that no listener wanted; here the plugin is called directly.
+        event.continue_event()
+        return event
+
+    async def test_topic_created_by_the_bot_wakes_only_on_real_addressing(self):
+        plugin = self.started_plugin()
+        root = self.bot_topic(forum_topic_created=ForumTopicCreated("Topic", 0))
+        reply = self.bot_topic(24, text="之前")
+        mention = {"entities": [MessageEntity("mention", 2, 14)]}
+        for prefix, text, original, fields, reason in (
+                ("/", "今天天气还行", root, {}, ""), ("小爱", "今天天气还行", root, {}, ""),
+                ("/", "/ 今天天气", root, {}, "native_wakeup"), ("小爱", "继续", reply, {}, "native_quote"),
+                ("/", "继续", reply, {}, "native_quote"), ("/", "问 @synthetic_bot 继续", root, mention, "mention"),
+                ("/", "问 @synthetic_bot 继续", reply, mention, "mention"),
+                ("小爱", "问 @synthetic_bot 继续", reply, mention, "mention")):
+            with self.subTest(prefix=prefix, text=text, reply=original is reply):
+                event = await self.waking_event(prefix, text, original, **fields)
+                prompt = event.message_str
+                admissions, candidate = [], self.controller.group_reply_candidate
+
+                async def observed(item, **kwargs):
+                    admissions.append(require(outcome := await candidate(item, **kwargs)))
+                    return outcome
+
+                with patch.object(self.controller, "group_reply_candidate", observed):
+                    await plugin.receive_companion_message(event)
+                self.assertEqual([item["reason"] for item in admissions], [reason])
+                self.assertEqual(admissions[0]["trigger_facts"]["native_wakeup"], bool(reason))
+                self.assertEqual(event.call_llm, not reason)
+                if fields:
+                    from astrbot_host.core_reply_mentions import restore_group_mentions
+                    native = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)["prepared"]["native_input"]
+                    config = {"wake_prefix": [prefix], "provider_settings": {}}
+                    request, context = NS(prompt=prompt), NS(get_config=lambda umo=None: config)
+                    restore_group_mentions(event, request, native, context)
+                    self.assertEqual(request.prompt, f"问 {SELF_MENTION} 继续")
+
+    async def test_topic_created_by_the_bot_merges_only_typed_text(self):
+        from companion_v2.adapters.astrbot.group_mentions import group_message_text
+
+        plugin, root = self.started_plugin(), self.bot_topic(forum_topic_created=ForumTopicCreated("Topic", 0))
+        for prefix in ("/", "小爱"):
+            with self.subTest(prefix=prefix):
+                events = [await self.waking_event(prefix, text, root, message_id=number)
+                          for number, text in ((31, "第一句"), (32, "第二句"))]
+                with patch.object(self.controller, "group_reply_candidate", AsyncMock(
+                        return_value=Outcome.success({"admitted": False}))) as candidate:
+                    first = asyncio.create_task(plugin.receive_companion_message(events[0]))
+                    await asyncio.sleep(.05)
+                    await plugin.receive_companion_message(events[1])
+                    await first
+                self.assertIs(candidate.await_args.args[0], events[1])
+                self.assertEqual(candidate.await_args.kwargs["latest_native_text"], "第二句")
+                self.assertEqual(events[1].message_str, "第一句\n第二句")
+                self.assertEqual(group_message_text(events[1], "tg-main"), "第一句\n第二句")
 
     async def test_unconfigured_and_migrated_windows_stay_silent(self):
         plugin = self.started_plugin()

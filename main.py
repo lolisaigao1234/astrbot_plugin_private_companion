@@ -61,6 +61,7 @@ from .astrbot_host.core_reply_tool_guard import (
     close_core_reply_tool_guard, install_core_reply_tool_guard, mark_managed_turn,
 )
 from .astrbot_host.core_reply_mentions import prepare_bare_mention_request
+from companion_v2.adapters.astrbot.telegram_reply import align_group_wake
 from .astrbot_host.binding import telegram_forward_message
 from .astrbot_host.core_reply_forwards import (
     apply_debounced_private_merge,
@@ -1194,6 +1195,7 @@ class PrivateCompanionV2StagingPlugin(Star):
         if target is None:
             return
         gate_telegram_private_typing(event)
+        align_group_wake(event)
         # AstrBot owns the persona and reply; V2 contributes optional background.
         event_ref = uuid4().hex
         origin_key = self._origin_key_for_event(event)
