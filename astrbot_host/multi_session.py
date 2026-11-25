@@ -17,6 +17,7 @@ from companion_v2.adapters.astrbot.native import (
     platform_client_matches,
     supported_platform_name,
 )
+from companion_v2.adapters.astrbot.telegram_reply import telegram_plain_text
 from companion_v2.adapters.astrbot.group import NativeGroupBridge, _is_sticker_segment
 from companion_v2.adapters.astrbot.onebot import OneBotPrivateSender
 from companion_v2.adapters.astrbot.onebot_group import OneBotGroupSender
@@ -564,6 +565,9 @@ class MultiGroupBridge(NativeGroupBridge):
         self.settings = settings
 
     def target_for_route(self, platform_id, account_id, group_id):
+        family = self.authority.platform_name
+        if callable(family) and family(platform_id) == "telegram":
+            return self.settings.group_target(platform_id, account_id, group_id, allow_template=False)
         return (super().target_for_route(platform_id, account_id, group_id)
                 or self.settings.group_target(platform_id, account_id, group_id))
 
@@ -1480,7 +1484,7 @@ class MultiHostSession:
                     raw_text = "".join(part.text for part in getattr(event.message_obj, "message", ())
                         if getattr(getattr(part, "type", None), "value", getattr(part, "type", None)) == "Plain"
                         and isinstance(getattr(part, "text", None), str))
-                    captured = replace(captured, text=raw_text,
+                    captured = replace(captured, text=telegram_plain_text(event, raw_text),
                         merged_event_ids=tuple((group_admission or {}).get("debounced_event_ids", ())))
                 segmentation_settings, presentation_settings = None, None
                 group_tool_profile = "full"

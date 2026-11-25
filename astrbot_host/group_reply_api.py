@@ -86,7 +86,8 @@ class GroupReplyWebAPI:
             route_id(self.group_id)
         except ValueError:
             raise TaskError("group_reply_target_required", "select a valid group route") from None
-        selected = settings.group_target(configured.platform_id, configured.account_id, self.group_id)
+        selected = settings.group_target(configured.platform_id, configured.account_id, self.group_id,
+            allow_template=self.controller._configured_platform_name(configured.platform_id) != "telegram")
         if selected is None or selected.bot_id != configured.bot_id:
             raise TaskError("group_reply_target_required", "the native group target changed")
         return selected

@@ -30,6 +30,7 @@ from companion_v2.storage.runtime import StorageRuntime
 from companion_v2.proactive.search_settings import SearchSettingsStore
 from .multi_authority import HOST_ID, MANIFEST, MultiAuthority
 from .multi_session import MultiHostSession, persona_conversation
+from .display_names import configured_platform_families
 from .multi_settings import MultiHostSettings, find_persona_mapping
 from .bootstrap_provider import resolve_bootstrap_provider
 from .group_settings import GroupTarget
@@ -955,15 +956,7 @@ class AstrBotMultiController:
             return str(platform.meta().name)
         # AstrBot loads plugins before platforms. Until a Telegram channel is loaded its name
         # comes from AstrBot's own configuration, so its people are never taken for QQ numbers.
-        try:
-            matches = [row for row in self.context.get_config().get("platform", ())
-                       if row.get("id") == platform_id]
-            if len(matches) == 1 and matches[0].get("enable") is False:
-                return "telegram" if matches[0].get("type") == "telegram" else ""
-            return "telegram" if any(row.get("type") == "telegram" and row.get("enable") is True
-                                     for row in matches) else ""
-        except (AttributeError, TypeError):
-            return ""
+        return "telegram" if configured_platform_families(self.context).get(platform_id) == "telegram" else ""
 
     async def _open_async(self):
         if self.runtime is None:
@@ -1508,7 +1501,7 @@ class AstrBotMultiController:
             message, session, meta = event.message_obj, event.session, event.platform_meta
             if getattr(message.type, "value", None) == "GroupMessage":
                 route = group_event_route(event)
-                target = self.settings.group_target(route.platform_id, route.account_id, route.group_id)
+                target = self.settings.group_target(*route.route_key, allow_template=route.platform_name != "telegram")
                 platform = self.context.get_platform_inst(meta.id)
                 if (target is None or platform is None or platform.get_client() is not event_native_client(platform, event)
                         or (connected and not native_client_connected(
@@ -1532,6 +1525,31 @@ class AstrBotMultiController:
             return self.settings.effective_private_target(target)
         except (ValueError, AttributeError, TypeError):
             return None
+
+    def declines_telegram_group(self, event):
+        """Keep default replies off for refused groups on a managed Telegram account."""
+        meta = getattr(event, "platform_meta", None)
+        if (getattr(meta, "name", None) != "telegram" or self._terminated
+                or self.settings is None or not self.settings.enabled
+                or not isinstance(event, self.native_types.event)
+                or getattr(event.message_obj.type, "value", None) != "GroupMessage"):
+            return False
+        # The account registry exists before a session starts and between sessions.
+        # A queued update can still carry a bot from an earlier polling generation.
+        try:
+            state = self._connections_for().telegram_client_state((meta.id, meta.id), event.client)
+            if state != "current":
+                return state == "retired"
+        except (ValueError, AttributeError, TypeError, RuntimeError):
+            return False
+        try:
+            route = group_event_route(event)
+        except (ValueError, AttributeError, TypeError):
+            return True
+        if self.settings.group_target(*route.route_key, allow_template=False) is None:
+            logger.info("[CompanionV2] Telegram 群窗口未配置 platform=%s group=%s", meta.id, route.group_id)
+            return True
+        return False
 
     async def persona_mapping_for_event(self, event):
         """Return the registered character from the installed window snapshot."""

@@ -61,6 +61,7 @@ from .astrbot_host.core_reply_tool_guard import (
     close_core_reply_tool_guard, install_core_reply_tool_guard, mark_managed_turn,
 )
 from .astrbot_host.core_reply_mentions import prepare_bare_mention_request
+from companion_v2.adapters.astrbot.telegram_reply import align_group_wake
 from .astrbot_host.binding import telegram_forward_message
 from .astrbot_host.core_reply_forwards import (
     apply_debounced_private_merge,
@@ -1154,11 +1155,16 @@ class PrivateCompanionV2StagingPlugin(Star):
             logger.debug("[CompanionV2] 外部 hear_voice/gemini_stt 已接管本轮语音回复，跳过重复受理")
             return
         if not self.staging.claims(event):
+            declines_group = getattr(self.staging, "declines_telegram_group", None)
+            if callable(declines_group) and declines_group(event):
+                suppress_default_reply(event)
+                return
             # 不是本插件的目标：这条消息从来没有进入它的预期范围，回复与否都不是
             # 它的失败，既不写台账也不出日志——平台日志不该被别人的群消息刷屏。
             if self._claims_target(event):
                 if self.staging_enabled():
                     gate_telegram_private_typing(event)
+                    align_group_wake(event, getattr(self.staging, "context", None))
                     # 目标确实是本插件的，只是这一刻没能受理（停机中、会话不在运行、
                     # 启动失败）。接不了这条本该由它回的消息，是预期未回。
                     self._record_no_reply(event, self._admission_reason(), stage="admission",
@@ -1190,6 +1196,7 @@ class PrivateCompanionV2StagingPlugin(Star):
         if target is None:
             return
         gate_telegram_private_typing(event)
+        align_group_wake(event, getattr(self.staging, "context", None))
         # AstrBot owns the persona and reply; V2 contributes optional background.
         event_ref = uuid4().hex
         origin_key = self._origin_key_for_event(event)

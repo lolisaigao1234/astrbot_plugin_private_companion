@@ -8,6 +8,7 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from threading import RLock
+from weakref import WeakValueDictionary
 
 from companion_v2.execution.models import TaskError
 
@@ -32,6 +33,8 @@ class _Connection:
     state: str = "waiting"
     reason_code: str = ""
     last_recovered_at: str | None = None
+    retired_telegram_clients: WeakValueDictionary = field(default_factory=WeakValueDictionary)
+    last_retired_telegram_client: object = None
     waiters: set = field(default_factory=set)
 
 
@@ -150,6 +153,13 @@ class NativeAccountConnections:
         recovered = connected and record.generation > 0 and (replacement or record.state != "online")
         if replacement or record.state != state or record.reason_code != reason:
             self._advance(record)
+        if meta.name == "telegram" and record.client is not None and record.client is not client:
+            # Queued events keep real SDK bots alive until they have been dispatched.
+            try:
+                record.retired_telegram_clients[id(record.client)] = record.client
+            except TypeError:
+                # Some adapter wrappers do not support weak references.
+                record.last_retired_telegram_client = record.client
         record.platform, record.client, record.transport = platform, client, transport
         record.platform_name, record.state, record.reason_code = meta.name, state, reason
         if recovered:
@@ -182,6 +192,21 @@ class NativeAccountConnections:
                 for record in self._accounts.values()
                 if record.state == "online" and record.platform is not None and record.client is not None
             }
+
+    def telegram_client_state(self, account, client):
+        """Distinguish queued events from current and previously accepted SDK clients."""
+        if client is None:
+            return None
+        with self._lock:
+            self.refresh(account)
+            record = self._record(account)
+            if record.platform_name == "telegram":
+                if client is record.client:
+                    return "current"
+                if (client is record.last_retired_telegram_client
+                        or record.retired_telegram_clients.get(id(client)) is client):
+                    return "retired"
+            return None
 
     def acquire(self, account, *, connected=True):
         with self._lock:
