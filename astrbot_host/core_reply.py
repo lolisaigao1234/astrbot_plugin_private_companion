@@ -10,7 +10,7 @@ import json
 import time
 from typing import Any
 
-from companion_v2.adapters.astrbot.telegram_logging import redact_event_token
+from companion_v2.adapters.astrbot.telegram_logging import redact_event_error, redact_event_token
 from companion_v2.execution.models import TaskContext, TaskError, encode, require
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.sources.privacy import redact_text
@@ -260,7 +260,7 @@ def prepare_core_reply_event(
                     state["silent_suppressed"] = True
                     _clear_suppressed_result_chain(event)
                     return None
-                raise
+                raise redact_event_error(event, error)
 
         async def guarded_send(message: Any, *args: Any, **kwargs: Any) -> Any:
             if getattr(message, "type", None) in {"tool_call", "tool_result", "agent_stats", "reasoning", "break"}:
@@ -468,7 +468,7 @@ def prepare_core_reply_event(
                     state["silent_suppressed"] = True
                     _clear_suppressed_result_chain(event)
                     return None
-                raise
+                raise redact_event_error(event, error)
 
         async def guarded_streaming(*args: Any, **kwargs: Any) -> Any:
             # AstrBot skips result decorators for an active stream with no chain.

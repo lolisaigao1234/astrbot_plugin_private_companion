@@ -162,6 +162,7 @@ def capture_private_reply_context(messages, context, native_input, *, at, merged
                      limit=AFTER_TURNS * MAX_BUBBLES_PER_TURN, max_chars=1800,
                      include_turns=True)
 
+    current_events = {item.event_id for item in getattr(native_input, "telegram_burst", ()) or (native_input,)}
     sent_before, sent_after = [], []
     for contact in confirmed_contacts:
         sent_at = _moment(contact["delivered_at"])
@@ -181,7 +182,7 @@ def capture_private_reply_context(messages, context, native_input, *, at, merged
         turn_bubbles = []
         previous_speaker = None
         for item in items:
-            if item["speaker"] == "user" and item["event_id"] == native_input.event_id:
+            if item["speaker"] == "user" and item["event_id"] in current_events:
                 previous_speaker = None
                 continue
             moment = _moment(item["at"])
