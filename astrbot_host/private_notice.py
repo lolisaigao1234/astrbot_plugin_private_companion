@@ -31,6 +31,8 @@ async def send_text_notice(controller, route, *, text, transport=None):
     """平台直发一句纯文本到已认证的路由（私聊或群），返回有界回执。"""
     if not text or not str(text).strip():
         return {"state": "skipped", "reason": "blank_line"}
+    if getattr(route, "platform_name", "") == "telegram" and route.kind is ScopeKind.GROUP:
+        return await send_group_notice(controller, route, text=text)
     api = transport if transport is not None else _transport(controller, route)
     if route.kind is ScopeKind.GROUP:
         action, target = "send_group_msg", {"group_id": int(route.peer)}
@@ -44,6 +46,16 @@ async def send_text_notice(controller, route, *, text, transport=None):
     identifier = result.get("message_id") if isinstance(result, Mapping) else None
     return {"state": "delivered", "message_id": identifier,
             "receipt": digest(["text-notice.v1", route.platform_id, route.login, route.peer, str(text)])}
+
+
+def _telegram_notice_failure(error, dispatched):
+    from companion_v2.adapters.astrbot.platform_sender import _telegram_refusal
+
+    try:
+        reason = _telegram_refusal(error, dispatched)
+    except Exception:
+        reason = None
+    return {"state": "failed", "reason": reason} if reason else {"state": "unknown", "reason": "platform_call_failed"}
 
 
 async def send_group_notice(controller, route, *, text, mention_id="", transport=None):
@@ -81,18 +93,47 @@ async def send_group_notice(controller, route, *, text, mention_id="", transport
     # synthetic receipt is deterministic and is never used to replay.
     if platform is None or not callable(getattr(platform, "send_by_session", None)):
         return {"state": "failed", "reason": "group_transport_unavailable"}
+    dispatched = None
     try:
         from astrbot.core.message.components import At, Plain
         from astrbot.core.message.message_event_result import MessageChain
         from astrbot.core.platform.message_session import MessageSession
         from astrbot.core.platform.message_type import MessageType
-        chain = []
-        if mention:
-            chain.extend([At(qq=mention), Plain(" ")])
-        chain.append(Plain(str(text)))
-        session = MessageSession(route.platform_id, MessageType.GROUP_MESSAGE, peer)
-        await platform.send_by_session(session, MessageChain(chain))
-    except Exception:  # noqa: BLE001 - send outcome is unknown, never replayed here
+        lease = getattr(route, "connection_lease", None)
+        if lease is not None:
+            controller.session.bridge.connections.assert_current(lease)
+        if platform_name == "telegram" and mention:
+            # The native At component only prefixes a username. Telegram IDs
+            # use an explicit text-link entity on the one outgoing message.
+            from telegram import MessageEntity
+            chat, _, topic = peer.partition("#")
+            from companion_v2.adapters.astrbot.telegram_wire import member_usernames
+            username = (await member_usernames(route.client, peer, [mention])).get(mention)
+            if lease is not None:
+                controller.session.bridge.connections.assert_current(lease)
+            label = f"@{username}" if username else "成员"
+            entity = MessageEntity("text_link", 0, len(label), url="tg://user?id=" + mention)
+            chat_id, topic_id = chat, int(topic) if topic else None
+            with redact_telegram_token(route.client):
+                try:
+                    await route.client.send_message(chat_id=chat_id, message_thread_id=topic_id,
+                                                    text=f"{label} {text}", entities=[entity])
+                except Exception as exc:
+                    from companion_v2.adapters.astrbot.platform_sender import telegram_call_refusal
+                    reason = telegram_call_refusal(exc)
+                    return {"state": "failed" if reason else "unknown", "reason": reason or "platform_call_failed"}
+        else:
+            chain = [At(qq=mention), Plain(" ")] if mention else []
+            chain.append(Plain(str(text)))
+            session = MessageSession(route.platform_id, MessageType.GROUP_MESSAGE, peer)
+            with redact_telegram_token(platform.get_client() if platform_name == "telegram" else None):
+                dispatched = MessageChain(chain=chain)
+                accepted = await platform.send_by_session(session, dispatched)
+            if platform_name == "telegram" and accepted is False:
+                return {"state": "failed", "reason": "platform_call_failed"}
+    except Exception as exc:
+        if platform_name == "telegram" and dispatched is not None:
+            return _telegram_notice_failure(exc, dispatched)
         return {"state": "failed", "reason": "platform_call_failed"}
     return {"state": "delivered", "message_id": "session:" + digest(
         ["group-session-notice.v1", route.platform_id, route.login, peer, mention, str(text)]),
@@ -100,7 +141,7 @@ async def send_group_notice(controller, route, *, text, mention_id="", transport
                            peer, mention, str(text)])}
 
 
-async def send_private_notice(controller, event, *, text, route, transport=None):
+async def send_private_notice(controller, event, *, text, route, transport=None, require_message_id=False):
     """Send one bounded private notice through the authenticated account route."""
     if not text or not str(text).strip():
         return {"state": "skipped", "reason": "blank_line"}
@@ -129,6 +170,7 @@ async def send_private_notice(controller, event, *, text, route, transport=None)
     platform = getattr(route, "platform", None)
     if platform is None or not callable(getattr(platform, "send_by_session", None)):
         return {"state": "failed", "reason": "private_transport_unavailable"}
+    dispatched = None
     try:
         from astrbot.core.message.components import Plain
         from astrbot.core.message.message_event_result import MessageChain
@@ -144,10 +186,19 @@ async def send_private_notice(controller, event, *, text, route, transport=None)
             platform = lease.platform
         session = MessageSession(route.platform_id, MessageType.FRIEND_MESSAGE, peer)
         with redact_telegram_token(platform.get_client() if platform_name == "telegram" else None):
-            accepted = await send_private_session(platform, session, MessageChain(chain=[Plain(str(text))]))
+            dispatched = MessageChain(chain=[Plain(str(text))])
+            if require_message_id and platform_name == "telegram":
+                sent = await platform.get_client().send_message(chat_id=int(peer), text=str(text))
+                identifier = getattr(sent, "message_id", None)
+                if type(identifier) is not int or identifier <= 0:
+                    return {"state": "unknown", "reason": "missing_prompt_message_id"}
+                return {"state": "delivered", "message_id": identifier}
+            accepted = await send_private_session(platform, session, dispatched)
         if platform_name == "telegram" and accepted is False:
             return {"state": "failed", "reason": "platform_call_failed"}
-    except Exception:  # noqa: BLE001 - send outcome is unknown, never replayed here
+    except Exception as exc:
+        if platform_name == "telegram" and dispatched is not None:
+            return _telegram_notice_failure(exc, dispatched)
         return {"state": "failed", "reason": "platform_call_failed"}
     receipt = digest(["private-session-notice.v1", route.platform_id, route.login, peer, str(text)])
     return {"state": "delivered", "message_id": "session:" + receipt, "receipt": receipt}

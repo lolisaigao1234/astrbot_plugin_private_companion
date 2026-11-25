@@ -991,6 +991,7 @@ class AstrBotMultiController:
             authority=self.authority, native_types=self.native_types, provider_fingerprint=manifest["provider_fingerprint"],
             connection_manager=connections,
             runtime_instance_id="astrbot-multi-" + uuid4().hex, native_tool_port=self.native_extensions, now=self.now,
+            relay_window_names=self.session_topology.stored_window_names,
             persona_window_snapshot_lookup=self.session_topology.persona_selection_snapshot,
             persona_window_snapshot_update=self.session_topology.update_persona_selection_snapshot,
             private_session_lookup=self.session_topology.private_session_id,
@@ -1663,7 +1664,12 @@ class AstrBotMultiController:
         """Report a target member's private reply to the original relay source."""
         from .relay_pending_events import process_private_receipts
         try:
-            await process_private_receipts(self, event, target)
+            if getattr(getattr(event, "platform_meta", None), "name", None) == "telegram":
+                from .relay_pending import telegram_receipt_lock
+                async with telegram_receipt_lock(self.runtime, target.platform_id, target.account_id, target.participant_id):
+                    await process_private_receipts(self, event, target)
+            else:
+                await process_private_receipts(self, event, target)
         except Exception:
             logger.warning("[CompanionV2] 私聊递话回执处理失败", exc_info=True)
 

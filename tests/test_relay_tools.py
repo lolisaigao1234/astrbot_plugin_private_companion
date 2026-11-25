@@ -227,6 +227,27 @@ class RelayToolPortTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(tasks), 1)
         self.assertEqual(tasks[0]["text"], self.text)
 
+    async def test_receipt_insert_failure_does_not_publish_accepted_outbox(self):
+        invocation = self.invocation("relay_message", {
+            "destination_id": "2002", "text": self.text, "need_receipt": True},
+            "receipt-proposal")
+        prepared = self.port._propose(invocation, json.loads(invocation.arguments_json))
+        operation_id = json.loads(prepared.source.payload)["operation_id"]
+        self.current_input = {"event_id": "receipt-confirmation",
+                              "observed_at": (NOW + timedelta(seconds=1)).isoformat()}
+        self.current_text = "确认发送"
+        arguments = {"operation_id": operation_id, "destination_id": "2002",
+                     "text": self.text, "need_receipt": True, "confirmed": True}
+        from unittest.mock import patch
+        with patch("astrbot_host.relay_tools.add_task", side_effect=RuntimeError("receipt insert failed")):
+            with self.assertRaisesRegex(RuntimeError, "receipt insert failed"):
+                await self.port._send(self.invocation(SEND_ACTION, arguments, "receipt-send"), arguments)
+        with self.assertRaises(TaskError) as raised:
+            await self.port._send(self.invocation(SEND_ACTION, arguments, "receipt-send"), arguments)
+        self.assertEqual(raised.exception.code, "relay_result_unknown")
+        self.assertEqual(len(self.api.calls), 1)
+        self.assertEqual(claim_private_receipts(self.runtime, "2002"), [])
+
     async def test_private_receipt_task_is_recorded_after_send(self):
         invocation = self.invocation("relay_message", {
             "destination_id": "2002", "text": self.text, "need_receipt": True},

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import AsyncMock, Mock, patch
 
 from companion_v2.capabilities.native import parse_manifest, parse_result
 from companion_v2.execution.models import SideEffect
@@ -85,6 +87,9 @@ class FakeReality:
 class FakeTickets:
     def __init__(self):
         self.tickets = {}
+
+    def get(self, token):
+        return self.tickets.get(token)
 
     def revoke(self, token):
         self.tickets.pop(token, None)
@@ -306,6 +311,216 @@ class NativeRealityTogetherTests(unittest.IsolatedAsyncioTestCase):
         snap2 = request(restarted, "together.room.snapshot", invocation="snapshot-after")
         self.assertEqual((await restarted.execute(snap2, before_dispatch=lambda: True))["result"]["rooms"], [])
 
+    async def test_group_invite_replay_after_restart_reports_spent_ticket(self):
+        identity = context()
+        identity["audience"]["scope"].update(platform="tg-main", kind="group", session_id="-100#23")
+        plugin = FakeTogether()
+        plugin.telegram_group_invite_route = Mock(return_value=object())
+        plugin.send_telegram_group_invite = AsyncMock(return_value={"state": "delivered"})
+        provider = TOGETHER.NativeTogetherProvider(plugin, self.root, version=PRODUCT_VERSION)
+        req = request(provider, "together.room.create", invocation="delivered-group", identity=identity,
+                      arguments={"mode": "call"})
+        original = await provider.execute(req, before_dispatch=lambda: True)
+        self.assertTrue(original["result"]["delivered_privately"])
+        self.assertIn("重启", original["result"]["message"])
+        self.assertTrue((await provider.lookup(req, before_dispatch=lambda: True))["result"]["ticket_available"])
+        plugin.ticket_store = FakeTickets()
+        restarted = TOGETHER.NativeTogetherProvider(plugin, self.root, version=PRODUCT_VERSION)
+        for reader in (restarted.execute, restarted.lookup):
+            replay = await reader(req, before_dispatch=lambda: True)
+            self.assertTrue(replay["result"]["delivered_privately"])
+            self.assertFalse(replay["result"]["ticket_available"])
+            self.assertNotIn("ticket-1", json.dumps(replay))
+        plugin.send_telegram_group_invite.assert_awaited_once()
+        self.assertEqual(plugin.issued, 1)
+
+    async def test_group_invite_closed_before_dm_ack_reports_unusable_ticket(self):
+        identity = context()
+        identity["audience"]["scope"].update(platform="tg-main", kind="group", session_id="-100#23")
+        plugin = FakeTogether()
+        plugin.telegram_group_invite_route = Mock(return_value=object())
+        dispatched, acknowledge = asyncio.Event(), asyncio.Event()
+
+        async def send(route, url):
+            dispatched.set()
+            await acknowledge.wait()
+            return {"state": "delivered"}
+
+        plugin.send_telegram_group_invite = AsyncMock(side_effect=send)
+        provider = TOGETHER.NativeTogetherProvider(plugin, self.root, version=PRODUCT_VERSION)
+        req = request(provider, "together.room.create", invocation="in-flight", identity=identity,
+                      arguments={"mode": "call"})
+        creating = asyncio.create_task(provider.execute(req, before_dispatch=lambda: True))
+        try:
+            await asyncio.wait_for(dispatched.wait(), 5)
+            close = request(provider, "together.room.close", invocation="close-in-flight", identity=identity)
+            self.assertTrue((await provider.execute(close, before_dispatch=lambda: True))["result"]["ticket_revoked"])
+        finally:
+            acknowledge.set()
+        original = await creating
+        self.assertTrue(original["result"]["delivered_privately"])
+        self.assertFalse(original["result"]["ticket_available"])
+        self.assertEqual(await provider.execute(req, before_dispatch=lambda: True), original)
+        plugin.send_telegram_group_invite.assert_awaited_once()
+
+    async def test_close_revokes_group_ticket_after_uncertain_delivery(self):
+        identity = context()
+        identity["audience"]["scope"].update(platform="tg-main", kind="group", session_id="-100#23")
+        plugin = FakeTogether()
+        plugin.telegram_group_invite_route = Mock(return_value=object())
+        plugin.send_telegram_group_invite = AsyncMock(return_value={"state": "unknown"})
+        provider = TOGETHER.NativeTogetherProvider(plugin, self.root, version=PRODUCT_VERSION)
+        create = request(provider, "together.room.create", invocation="maybe-delivered", identity=identity,
+                         arguments={"mode": "call"})
+        first = await provider.execute(create, before_dispatch=lambda: True)
+        self.assertEqual(first["state"], "unknown")
+        token, = plugin.ticket_store.tickets
+        for field, value in (("installation_id", "other-install"), ("bot_id", "other-bot"),
+                             ("account_id", "other-account"), ("session_id", "-100#24")):
+            other = copy.deepcopy(identity)
+            other["audience"]["scope"][field] = value
+            denied = request(provider, "together.room.close", invocation="other-" + field, identity=other)
+            self.assertEqual((await provider.execute(denied, before_dispatch=lambda: True))["state"], "failed")
+            self.assertIsNotNone(plugin.ticket_store.get(token))
+        other = copy.deepcopy(identity)
+        other["role_binding"]["role_id"] = "other-role"
+        denied = request(provider, "together.room.close", invocation="other-role", identity=other)
+        self.assertEqual((await provider.execute(denied, before_dispatch=lambda: True))["state"], "failed")
+        self.assertIsNotNone(plugin.ticket_store.get(token))
+        close = request(provider, "together.room.close", invocation="close-uncertain", identity=identity)
+        receipt = await provider.execute(close, before_dispatch=lambda: True)
+        self.assertIsNone(plugin.ticket_store.get(token))
+        self.assertTrue(receipt["result"]["ticket_revoked"])
+        self.assertNotIn(token, json.dumps(receipt))
+        self.assertEqual(await provider.execute(create, before_dispatch=lambda: True), first)
+        plugin.send_telegram_group_invite.assert_awaited_once()
+
+    async def test_close_orders_uncertain_ticket_with_live_and_detached_rooms(self):
+        identity = context()
+        identity["audience"]["scope"].update(platform="tg-main", kind="group", session_id="-100#23")
+        for room_first in (True, False):
+            for detached in (True, False):
+                with self.subTest(room_first=room_first, detached=detached):
+                    plugin = FakeTogether()
+                    plugin.telegram_group_invite_route = Mock(return_value=object())
+                    plugin.send_telegram_group_invite = AsyncMock(return_value={"state": "unknown"})
+                    root = self.root / f"{room_first}-{detached}"
+                    provider = TOGETHER.NativeTogetherProvider(plugin, root, version=PRODUCT_VERSION)
+                    create = request(provider, "together.room.create", invocation="invite",
+                                     identity=identity, arguments={"mode": "call"})
+                    original = await provider.execute(create, before_dispatch=lambda: True)
+                    self.assertEqual(original["state"], "unknown")
+                    ticket, = plugin.ticket_store.tickets.values()
+                    room = SimpleNamespace(room_id="owned", ticket_token="bound-token", user_id="12345",
+                                           integration_closed=False, native_v2=SimpleNamespace(**ticket.native_v2),
+                                           created_at=ticket.created_at + (1 if room_first else -1))
+                    (plugin.detached_rooms if detached else plugin.rooms)["owned"] = room
+                    for name, user, scope in (("other-user", "67890", room.native_v2.scope_key),
+                                              ("other-scope", "12345", "different")):
+                        plugin.rooms[name] = SimpleNamespace(room_id=name, ticket_token=name, user_id=user,
+                            integration_closed=False, native_v2=SimpleNamespace(scope_key=scope), created_at=99)
+                    provider = TOGETHER.NativeTogetherProvider(plugin, root, version=PRODUCT_VERSION)
+                    for index, expect_room in enumerate((room_first, not room_first)):
+                        close = request(provider, "together.room.close", invocation=f"close-{index}", identity=identity)
+                        result = await provider.execute(close, before_dispatch=lambda: True)
+                        self.assertEqual(result["result"]["closed"], expect_room)
+                        self.assertTrue(result["result"]["ticket_revoked"])
+                        self.assertEqual(await provider.execute(close, before_dispatch=lambda: True), result)
+                        if index == 0:
+                            self.assertEqual(plugin.closed, ["owned"] if room_first else [])
+                            self.assertEqual(plugin.ticket_store.get(ticket.token) is not None, room_first)
+                    self.assertEqual(plugin.closed, ["owned"])
+                    self.assertEqual(set(plugin.rooms), {"other-user", "other-scope"})
+                    self.assertIsNone(plugin.ticket_store.get(ticket.token))
+                    self.assertEqual(await provider.lookup(create, before_dispatch=lambda: True), original)
+                    plugin.send_telegram_group_invite.assert_awaited_once()
+
+    async def test_refused_group_invite_survives_notice_error_and_replay(self):
+        identity = context()
+        identity["audience"]["scope"].update(platform="tg-main", kind="group", session_id="-100#23")
+        for failure in (RuntimeError("group unavailable"), asyncio.CancelledError()):
+            with self.subTest(failure=type(failure).__name__):
+                root = self.root / type(failure).__name__
+                plugin = FakeTogether()
+                plugin.telegram_group_invite_route = Mock(return_value=object())
+                plugin.send_telegram_group_invite = AsyncMock(return_value={"state": "failed", "reason": "telegram_forbidden"})
+                plugin._revoke_unused_ticket = lambda ticket: plugin.ticket_store.tickets.pop(ticket.token) is not None
+                plugin.notify_telegram_invite_refused = AsyncMock(side_effect=failure)
+                provider = TOGETHER.NativeTogetherProvider(plugin, root, version=PRODUCT_VERSION)
+                req = request(provider, "together.room.create", invocation="refused", identity=identity,
+                              arguments={"mode": "call"})
+                if isinstance(failure, asyncio.CancelledError):
+                    with self.assertRaises(asyncio.CancelledError):
+                        await provider.execute(req, before_dispatch=lambda: True)
+                else:
+                    self.assertEqual((await provider.execute(req, before_dispatch=lambda: True))["state"], "failed")
+                restarted = TOGETHER.NativeTogetherProvider(plugin, root, version=PRODUCT_VERSION)
+                receipt = await restarted.execute(req, before_dispatch=lambda: True)
+                self.check_receipt(restarted, req, receipt, SideEffect.LOCAL)
+                self.assertEqual((receipt["state"], receipt["effect"]), ("failed", "not_committed"))
+                self.assertEqual(plugin.issued, 1)
+                self.assertFalse(plugin.ticket_store.tickets)
+                plugin.notify_telegram_invite_refused.assert_awaited_once()
+
+    async def test_group_invite_replay_resumes_only_a_confirmed_unsent_notice(self):
+        identity = context()
+        identity["audience"]["scope"].update(platform="tg-main", kind="group", session_id="-100#23")
+        plugin = FakeTogether()
+        plugin.telegram_group_invite_route = Mock(return_value=object())
+        plugin.send_telegram_group_invite = AsyncMock(return_value={"state": "failed", "reason": "telegram_forbidden"})
+        plugin._revoke_unused_ticket = lambda ticket: plugin.ticket_store.tickets.pop(ticket.token) is not None
+        plugin.notify_telegram_invite_refused = AsyncMock(side_effect=[{"state": "failed"}, {"state": "delivered"}])
+        provider = TOGETHER.NativeTogetherProvider(plugin, self.root, version=PRODUCT_VERSION)
+        req = request(provider, "together.room.create", invocation="refused", identity=identity,
+                      arguments={"mode": "call"})
+        # The refusal is on disk, but the process stops before reserving the group send.
+        provider._notify_invite_refused = AsyncMock(side_effect=asyncio.CancelledError())
+        with self.assertRaises(asyncio.CancelledError):
+            await provider.execute(req, before_dispatch=lambda: True)
+        plugin.notify_telegram_invite_refused.assert_not_awaited()
+        restarted = TOGETHER.NativeTogetherProvider(plugin, self.root, version=PRODUCT_VERSION)
+        restarted.NOTICE_RETRY_SECONDS = 0.01
+        route = plugin.telegram_group_invite_route.return_value
+        plugin.telegram_group_invite_route.side_effect = RuntimeError("route is offline")
+        offline = await restarted.execute(req, before_dispatch=lambda: True)
+        self.assertEqual((offline["state"], offline["effect"]), ("failed", "not_committed"))
+        plugin.telegram_group_invite_route.side_effect = None
+        plugin.telegram_group_invite_route.return_value = None
+        await restarted.recover_group_notices()
+        plugin.notify_telegram_invite_refused.assert_not_awaited()
+        plugin.telegram_group_invite_route.return_value = route
+        # Reconnection must deliver a confirmed-unsent notice even when the
+        # registered tool returns a cached receipt and never calls this provider.
+        await asyncio.wait_for(restarted._notice_retry, 2)
+        await restarted.close()
+        self.assertEqual(plugin.notify_telegram_invite_refused.await_count, 2)
+        for _ in range(3):
+            provider = TOGETHER.NativeTogetherProvider(plugin, self.root, version=PRODUCT_VERSION)
+            result = await provider.execute(req, before_dispatch=lambda: True)
+            self.assertEqual((result["state"], result["effect"]), ("failed", "not_committed"))
+        self.assertEqual(plugin.notify_telegram_invite_refused.await_count, 2)
+        plugin.send_telegram_group_invite.assert_awaited_once()
+        self.assertEqual(plugin.issued, 1)
+
+    async def test_stale_refusal_notice_expires_without_contacting_group(self):
+        identity = context()
+        identity["audience"]["scope"].update(platform="tg-main", kind="group", session_id="-100#23")
+        plugin = FakeTogether()
+        plugin.telegram_group_invite_route = Mock(return_value=object())
+        plugin.send_telegram_group_invite = AsyncMock(return_value={"state": "failed", "reason": "telegram_forbidden"})
+        plugin._revoke_unused_ticket = lambda ticket: plugin.ticket_store.tickets.pop(ticket.token) is not None
+        plugin.notify_telegram_invite_refused = AsyncMock(return_value={"state": "failed"})
+        provider = TOGETHER.NativeTogetherProvider(plugin, self.root, version=PRODUCT_VERSION)
+        req = request(provider, "together.room.create", invocation="stale", identity=identity, arguments={"mode": "call"})
+        receipt = await provider.execute(req, before_dispatch=lambda: True)
+        scope = TOGETHER.scope_key(identity)
+        original = provider.store.get(scope, receipt["operation_id"])
+        with patch.object(TOGETHER.time, "time", return_value=original["created_at"] + TOGETHER.INVITE_DEFAULT_SECONDS):
+            await provider.recover_group_notices()
+        self.assertEqual(provider.store.get(scope, original["id"])["result"]["group_notice"], "expired")
+        plugin.notify_telegram_invite_refused.assert_awaited_once()
+        await provider.close()
+
     async def test_together_create_rejects_missing_or_mismatched_persona(self):
         plugin = FakeTogether()
         provider = TOGETHER.NativeTogetherProvider(plugin, self.root, version=PRODUCT_VERSION)
@@ -348,7 +563,11 @@ class NativeRealityTogetherTests(unittest.IsolatedAsyncioTestCase):
         plugin.rooms["invited"] = SimpleNamespace(
             room_id="invited", ticket_token="invite-ticket", user_id="12345",
             native_v2=SimpleNamespace(**binding), integration_closed=False,
-            mode="watch", created_at=3.0, call_active=False, resume_token="")
+            mode="watch", created_at=binding.get("created_at", 0) - 1, call_active=False, resume_token="")
+        # A newer unredeemed private ticket must not displace the active room on close.
+        created_again = request(provider, "together.room.create", invocation="second-ticket",
+                                arguments={"mode": "watch"})
+        await provider.execute(created_again, before_dispatch=lambda: True)
         snap = request(provider, "together.room.snapshot", invocation="snapshot-invited")
         self.assertEqual((await provider.execute(snap, before_dispatch=lambda: True))["result"]["active_count"], 1)
         other = request(provider, "together.room.snapshot", invocation="snapshot-other-invited",

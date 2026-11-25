@@ -52,7 +52,7 @@ from companion_v2.device.action_service import phone_profile
 from companion_v2.reality.model_profile import reality_text_profile
 from .settings import HostControlError
 from .display_names import event_person_names
-from .group_standing import group_sender_standing
+from .group_standing import resolve_group_standing
 from .huawei_health.service import get_huawei_health_service_for_root
 from companion_v2.conversation.voice_reply import VoiceReplyDelivery
 from companion_v2.execution.models import Lane, ProviderBinding, TaskContext, TaskError, digest, require, stamp
@@ -567,6 +567,20 @@ class MultiGroupBridge(NativeGroupBridge):
         """让运行中的桥接看到刚确认的群目标，而不必重载插件。"""
         self.settings = settings
 
+    def room_available(self, context):
+        scope = context.scope
+        if scope.kind is not ScopeKind.GROUP or self.platform_name(scope) != "telegram":
+            return False
+        target = self.settings.group_target(scope.platform, scope.account_id, scope.native_scope_id, allow_template=False)
+        if target is None or target.bot_id != scope.bot_id or scope.session_id != scope.native_scope_id:
+            return False
+        sender = context.actor.principal.native_account_id
+        if not sender.isascii() or not sender.isdigit() or int(sender) <= 0:
+            return False
+        current = self.authority.actor(target, sender)
+        return (current.principal, current.subject, current.binding_id, current.binding_revision) == (
+            context.actor.principal, context.actor.subject, context.actor.binding_id, context.actor.binding_revision)
+
     def target_for_route(self, platform_id, account_id, group_id):
         family = self.authority.platform_name
         if callable(family) and family(platform_id) == "telegram":
@@ -713,8 +727,9 @@ class MultiHostSession:
                  provider_fingerprint, runtime_instance_id, now, native_tool_port=None, news_port=None,
                  solar_term_port=None, qzone_transport=None, balance_port=None, weather_ports=None,
                  persona_window_snapshot_lookup=None, persona_window_snapshot_update=None, private_session_lookup=None,
-                 search_port_factory=None, connection_manager=None):
+                 search_port_factory=None, connection_manager=None, relay_window_names=None):
         self.runtime, self.settings, self.authority, self.types, self.now = runtime, settings, authority, native_types, now
+        self.group_standing_cache = {}
         self.native_tool_port = native_tool_port
         self.search_port_factory = search_port_factory
         self.huawei_health = get_huawei_health_service_for_root(runtime.data_root, logger=logger)
@@ -812,7 +827,7 @@ class MultiHostSession:
         modes = ["onebot_private", "onebot_group"]
         self.sender_binding = ProviderBinding("message.delivery", "astrbot-multi." + ".".join(modes),
             native_types.version, digest([runtime.installation_id, *modes]))
-        relay_port = RelayToolPort(self.bridge, native_types=native_types)
+        relay_port = RelayToolPort(self.bridge, native_types=native_types, window_names=relay_window_names)
         tool_port = CompositeAstrBotToolPort(native_tool_port, relay_port)
         registry_fields = configuration_fields(profiles)
         registry_ids = {item.field_id for item in registry_fields}
@@ -829,7 +844,7 @@ class MultiHostSession:
             default_provider_resolver=conversation_provider_resolver(native_context),
             provider_lookup=self._load_model_provider,
             sender=LocalSender(self.sender_binding, self.send, supports_images=True, supports_poke=True), policy=common.policy, limits=common.limits, now=now,
-            tool_port=tool_port, segmentation=common.segmentation,
+            tool_port=tool_port, group_room_available=self.bridge.groups.room_available, segmentation=common.segmentation,
             # 记忆归属读的是别家插件自己公开的声明；跨插件读取只在这一个适配函数里，
             # 核心不反向导入宿主包。写入端口复用同一条发现路径：日记、梦境与主动
             # 消息完成后推给当前对外表达记忆的一方，失败不影响已完成的领域动作。
@@ -1014,6 +1029,11 @@ class MultiHostSession:
                 if self.bridge.target_for_scope(captured.route.scope) != target:
                     raise TaskError("host_target_mismatch", "input changed its configured native route")
                 self.application.require_running()
+                standing = None
+                if captured.route.scope.kind is ScopeKind.GROUP:
+                    lease = self.bridge.connections.acquire((target.platform_id, target.account_id))
+                    standing = await resolve_group_standing(event, self.group_standing_cache)
+                    self.bridge.connections.assert_current(lease)
                 # Admission, active-role fencing and input publication are one
                 # transaction. Rejected inputs cannot change another task's role.
                 with self.runtime.transaction() as connection:
@@ -1029,7 +1049,7 @@ class MultiHostSession:
                         # Standing must be on record before this turn's prompt is
                         # composed, otherwise the very message that says "群主"
                         # is answered with the role still unknown.
-                        self._record_group_standing(event, context, connection=connection)
+                        self._record_group_standing(standing, context, connection=connection)
                     def admitted(original, batch_id, *, replayed):
                         if original.scope.kind is ScopeKind.GROUP:
                             self.authority.group_delivery.admit(target, original, batch_id,
@@ -1261,7 +1281,9 @@ class MultiHostSession:
                                   speaker_id=captured.principal.native_account_id,
                                   received_at=captured.at, event_id=captured.event_id)
                 self._record_platform_names(event, context)
-                self._record_group_standing(event, context)
+                standing = await resolve_group_standing(event, self.group_standing_cache)
+                self.bridge.connections.assert_current(connection_lease)
+                self._record_group_standing(standing, context)
                 if reply_candidate:
                     from companion_v2.conversation.reply_settings import GROUP
                     snapshot = (reply_snapshot if reply_snapshot is not None
@@ -1913,7 +1935,7 @@ class MultiHostSession:
         except Exception:
             pass
 
-    def _record_group_standing(self, event, context, connection=None):
+    def _record_group_standing(self, standing, context, connection=None):
         """Remember the sender's platform standing for later group prompts.
 
         OneBot already reports whether the speaker is the group owner or an
@@ -1924,7 +1946,6 @@ class MultiHostSession:
         if context.scope.kind is not ScopeKind.GROUP:
             return
         try:
-            standing = group_sender_standing(event)
             if standing is None or standing["group_id"] not in ("", context.scope.native_scope_id):
                 return
             from companion_v2.conversation.group_roles import GroupRoleStore

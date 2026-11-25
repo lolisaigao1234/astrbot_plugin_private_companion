@@ -24,7 +24,7 @@ class AstrBotRolePort(Protocol):
 
 class AstrBotCompanionHost:
     def __init__(self, runtime, *, event_port, identity_port, role_port, runtime_identity,
-                 tool_port=None, memory_owner=None, memory_push=None, configuration_store=None,
+                 tool_port=None, group_room_available=None, memory_owner=None, memory_push=None, configuration_store=None,
                  **application_options):
         # Native providers and the included QQ Zone provider share one supervised
         # executor.  The latter is optional and is absent when the host supplied no
@@ -34,7 +34,7 @@ class AstrBotCompanionHost:
         if qzone_port is not None:
             tool_port = CompositeAstrBotToolPort(tool_port, qzone_port)
         declarations = tool_port.declarations() if tool_port is not None else ()
-        external = map_tools(runtime, tool_port) if declarations else None
+        external = map_tools(runtime, tool_port, group_room_available=group_room_available) if declarations else None
         # Every declared extension keeps its own scope preferences (proactive sharing
         # and thought weight) on the shared configuration entry point.
         internal = getattr(tool_port, "provider_admission", None)

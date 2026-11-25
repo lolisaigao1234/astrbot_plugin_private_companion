@@ -8,15 +8,25 @@ from an authenticated inbound event for that same account.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from time import time
 from uuid import uuid4
+from weakref import WeakValueDictionary
 
 
 KEY = "conversation.relay.pending.v1"
 MAX_TASKS = 200
 LIVE_STATES = frozenset({"waiting", "sending", "waiting_reply", "reporting", "waiting_permission"})
 REPORTABLE_KINDS = frozenset({"group_wait", "private_receipt"})
+
+
+_receipt_locks = WeakValueDictionary()
+
+
+def telegram_receipt_lock(runtime, platform, account, peer):
+    """Serialize dispatch/registration with answers on the same private route."""
+    return _receipt_locks.setdefault((runtime, platform, account, str(peer)), asyncio.Lock())
 
 
 def _read(runtime):
@@ -39,33 +49,44 @@ def _write(connection, data):
     )
 
 
-def _prune(data, now):
+def _remove_task(connection, tasks, task_id):
+    task = tasks.pop(task_id)
+    if isinstance(task, dict) and task.get("telegram_account") and task.get("kind") == "group_wait":
+        outcome = {"sent": "already_sent", "failed": "failed", "waiting": "expired",
+                   "expired": "expired"}.get(task.get("state"), "unknown")
+        connection.execute("INSERT OR IGNORE INTO runtime_metadata(key,value) VALUES (?,?)",
+                           ("conversation.relay.outcome:" + task_id, outcome))
+
+
+def _prune(connection, data, now):
     tasks = data["tasks"]
     for task_id, task in list(tasks.items()):
         if not isinstance(task, dict):
-            del tasks[task_id]
+            _remove_task(connection, tasks, task_id)
             continue
         expires_at = task.get("expires_at")
         if isinstance(expires_at, (int, float)) and expires_at <= now:
             # 还没结论的待办不直接丢：标记成 expired，等下一次同群事件
             # 把“没等到人、已撤回”回报给发起窗口；其余（已发/已失败）照旧清理。
-            if (task.get("state") in LIVE_STATES
+            if task.get("telegram_account") and task.get("kind") == "group_wait" and task.get("state") == "sending":
+                task["state"] = "unknown"
+            elif (task.get("state") in LIVE_STATES
                     and task.get("kind") in REPORTABLE_KINDS
                     and not task.get("expired_notice_sent")):
                 task["state"] = "expired"
                 task["expired_at"] = now
             elif task.get("state") != "expired":
-                del tasks[task_id]
+                _remove_task(connection, tasks, task_id)
                 continue
         # 过期通知最多保留一天：同群一直没新消息时不至于长期占着队列。
         expired_at = task.get("expired_at")
         if (task.get("state") == "expired" and isinstance(expired_at, (int, float))
                 and now - expired_at > 24 * 60 * 60):
-            del tasks[task_id]
+            _remove_task(connection, tasks, task_id)
     if len(tasks) > MAX_TASKS:
         ordered = sorted(tasks.items(), key=lambda item: item[1].get("created_at", 0))
         for task_id, _ in ordered[:len(tasks) - MAX_TASKS]:
-            del tasks[task_id]
+            _remove_task(connection, tasks, task_id)
 
 
 def add_task(runtime, task):
@@ -73,12 +94,12 @@ def add_task(runtime, task):
     now = time()
     with runtime.transaction() as connection:
         data = _read(runtime)
-        _prune(data, now)
+        _prune(connection, data, now)
         signature = task.get("signature", "")
         if signature:
             for existing in data["tasks"].values():
                 if existing.get("signature") == signature and existing.get("state") in {
-                        "waiting", "sending", "sent", "waiting_reply", "reporting",
+                        "waiting", "sending", "sent", "unknown", "waiting_reply", "reporting",
                         "waiting_permission"}:
                     return existing.get("id", "")
         identifier = uuid4().hex
@@ -88,15 +109,29 @@ def add_task(runtime, task):
         return identifier
 
 
-def claim_group(runtime, group_id, target_user_id, now=None):
+def scheduled_state(runtime, task_id):
+    task = _read(runtime)["tasks"].get(task_id) or {}
+    if not task:
+        row = runtime.read_one("SELECT value FROM runtime_metadata WHERE key=?",
+                               ("conversation.relay.outcome:" + task_id,))
+        return row["value"] if row else "unknown"
+    state = task.get("state")
+    if state == "waiting" and task.get("expires_at", 0) <= time():
+        return "expired"
+    return {"waiting": "scheduled", "sent": "already_sent", "failed": "failed",
+            "expired": "expired"}.get(state, "unknown")
+
+
+def claim_group(runtime, group_id, target_user_id, now=None, *, telegram_account=None):
     now = time() if now is None else now
     claimed = []
     with runtime.transaction() as connection:
         data = _read(runtime)
-        _prune(data, now)
+        _prune(connection, data, now)
         for task in data["tasks"].values():
             if (task.get("kind") == "group_wait" and task.get("state") == "waiting"
                     and task.get("group_id") == group_id
+                    and task.get("telegram_account") == telegram_account
                     and task.get("target_user_id") == target_user_id
                     and task.get("expires_at", 0) > now):
                 task["requeue_state"] = "waiting"
@@ -106,28 +141,103 @@ def claim_group(runtime, group_id, target_user_id, now=None):
     return claimed
 
 
-def claim_private_receipts(runtime, target_user_id, now=None, *, permission=False):
+def _waiting_receipts(data, user_id, account, now, state):
+    return sorted((task for task in data["tasks"].values()
+                   if task.get("kind") == "private_receipt" and task.get("state") == state
+                   and task.get("telegram_account") == account and task.get("target_user_id") == user_id
+                   and task.get("expires_at", 0) > now), key=lambda task: task.get("created_at", 0))
+
+
+def _claim_receipt(tasks):
+    if not tasks:
+        return []
+    task = tasks[0]
+    task["requeue_state"] = task["state"]
+    task["state"] = "reporting"
+    return [dict(task)]
+
+
+def claim_private_receipts(runtime, target_user_id, now=None, *, permission=False, telegram_account=None):
     now = time() if now is None else now
-    wanted = "waiting_permission" if permission else "waiting_reply"
-    next_state = "reporting"
-    claimed = []
     with runtime.transaction() as connection:
         data = _read(runtime)
-        _prune(data, now)
-        ordered = sorted(data["tasks"].values(), key=lambda item: item.get("created_at", 0))
-        for task in ordered:
-            if (task.get("kind") == "private_receipt" and task.get("state") == wanted
-                    and task.get("target_user_id") == target_user_id
-                    and task.get("expires_at", 0) > now):
-                task["requeue_state"] = wanted
-                task["state"] = next_state
-                claimed.append(dict(task))
-                break
+        _prune(connection, data, now)
+        state = "waiting_permission" if permission else "waiting_reply"
+        claimed = _claim_receipt(_waiting_receipts(data, target_user_id, telegram_account, now, state))
         _write(connection, data)
-    return claimed
+        return claimed
 
 
-def claim_expired(runtime, group_id=None, now=None):
+def _seen_message_block(account, user_id, message_id):
+    peer = json.dumps([*account, user_id], separators=(",", ":"))
+    # SQLite INTEGER is signed. Each row records 63 independent message IDs.
+    block, offset = divmod(message_id, 63)
+    return peer, f"conversation.relay.private_seen_block:{peer}:{block}", 1 << offset
+
+
+def release_unprocessed_telegram_claim(runtime, account, user_id, message_id, claimed):
+    """Undo the claim and its seen bit together when intake stops before dispatch."""
+    permission, replies = claimed
+    if not (permission or replies):
+        return
+    task_id = (permission or replies)[0]["id"]
+    _, block_key, mask = _seen_message_block(account, user_id, message_id)
+    with runtime.transaction() as connection:
+        data = _read(runtime)
+        task = data["tasks"].get(task_id)
+        if task is None or task["state"] != "reporting":
+            return
+        task["state"] = task.pop("requeue_state")
+        connection.execute("UPDATE runtime_metadata SET value=value & ? WHERE key=?", (~mask, block_key))
+        _write(connection, data)
+
+
+def claim_telegram_receipt(runtime, account, user_id, message_id, *, reply_to=None, permission_answer=False):
+    """One native private message can advance one receipt, including after restart."""
+    if type(message_id) is not int or message_id <= 0:
+        return [], []
+    peer, block_key, mask = _seen_message_block(account, user_id, message_id)
+    legacy_key = "conversation.relay.private_seen:" + peer
+    with runtime.transaction() as connection:
+        now = time()
+        data = _read(runtime)
+        if not data["tasks"]:
+            return [], []
+        # Old installations recorded only a high-water mark; keep that replay boundary.
+        cursor = connection.execute(
+            "INSERT INTO runtime_metadata(key, value) SELECT ?, ? WHERE NOT EXISTS "
+            "(SELECT 1 FROM runtime_metadata WHERE key=? AND CAST(value AS INTEGER)>=?) "
+            "ON CONFLICT(key) DO UPDATE SET value=runtime_metadata.value | excluded.value "
+            "WHERE (runtime_metadata.value & excluded.value)=0",
+            (block_key, mask, legacy_key, message_id),
+        )
+        if not cursor.rowcount:
+            return [], []
+        _prune(connection, data, now)
+        prompts = _waiting_receipts(data, user_id, account, now, "waiting_permission")
+        waiting = _waiting_receipts(data, user_id, account, now, "waiting_reply")
+        permission, replies = [], []
+        matches = [task for task in prompts if reply_to is not None and task.get("prompt_message_id") == reply_to]
+        if matches:
+            if len(matches) == 1 and type(reply_to) is int and 0 < reply_to < message_id and permission_answer:
+                permission = _claim_receipt(matches)
+        else:
+            if reply_to is not None:
+                addressed = [task for task in waiting if task.get("question_message_id") == reply_to]
+                if len(addressed) == 1 and type(reply_to) is int and 0 < reply_to < message_id:
+                    replies = _claim_receipt(addressed)
+            elif not prompts:
+                # With a permission prompt and a question both open, only a native
+                # reply target identifies which requester should receive this text.
+                eligible = [task for task in waiting if task.get("question_message_id") is None
+                            or task["question_message_id"] < message_id]
+                if len(eligible) == 1:
+                    replies = _claim_receipt(eligible)
+        _write(connection, data)
+        return permission, replies
+
+
+def claim_expired(runtime, group_id=None, now=None, *, telegram_account=None):
     """Take expired tasks once so their origin window can be told the relay was dropped.
 
     Expiry is recorded by ``_prune``; the task is removed here because the notice is
@@ -137,15 +247,15 @@ def claim_expired(runtime, group_id=None, now=None):
     claimed = []
     with runtime.transaction() as connection:
         data = _read(runtime)
-        _prune(data, now)
+        _prune(connection, data, now)
         for task_id, task in list(data["tasks"].items()):
-            if task.get("state") != "expired":
+            if task.get("state") != "expired" or task.get("telegram_account") != telegram_account:
                 continue
             if group_id is not None and (
                     task.get("kind") != "group_wait" or task.get("group_id") != group_id):
                 continue
             claimed.append(dict(task))
-            del data["tasks"][task_id]
+            _remove_task(connection, data["tasks"], task_id)
         _write(connection, data)
     return claimed
 
@@ -160,7 +270,7 @@ def finish(runtime, task_id, state):
         _write(connection, data)
 
 
-def mark_waiting_permission(runtime, task_id, reply_text):
+def mark_waiting_permission(runtime, task_id, reply_text, prompt_message_id=None):
     with runtime.transaction() as connection:
         data = _read(runtime)
         task = data["tasks"].get(task_id)
@@ -168,6 +278,8 @@ def mark_waiting_permission(runtime, task_id, reply_text):
             task.pop("requeue_state", None)
             task["state"] = "waiting_permission"
             task["reply_text"] = reply_text
+            if type(prompt_message_id) is int:
+                task["prompt_message_id"] = prompt_message_id
         _write(connection, data)
 
 

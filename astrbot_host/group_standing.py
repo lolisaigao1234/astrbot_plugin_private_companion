@@ -1,11 +1,8 @@
-"""Group standing read from the authenticated OneBot sender payload.
+"""Read group standing from authenticated OneBot events and Telegram memberships."""
 
-``sender.role`` is the platform's own answer to "who is this in this group":
-``owner`` / ``admin`` / ``member``. QQ Official (webhook / openid) payloads carry
-no such field, so this stays optional and never blocks intake.
-"""
-
+import asyncio
 from collections.abc import Mapping
+from time import monotonic
 
 ROLES = ("owner", "admin", "member")
 
@@ -38,3 +35,41 @@ def group_sender_standing(event):
         group = str(group)
     return {"account_id": account, "role": role,
             "group_id": group.strip() if isinstance(group, str) else ""}
+
+
+async def resolve_group_standing(event, cache, *, fresh=False):
+    """Read standing for a validated group event. Topics share chat membership."""
+    if getattr(getattr(event, "platform_meta", None), "name", "") != "telegram":
+        return group_sender_standing(event)
+    from companion_v2.adapters.astrbot.group import group_event_route
+    from companion_v2.adapters.astrbot.native import bounded_native_lookup
+    from companion_v2.adapters.astrbot.telegram_logging import redact_telegram_token
+
+    route = group_event_route(event)
+    chat = event.message_obj.raw_message.message.chat.id
+    client = event.client
+    key = (route.platform_id, chat, route.sender_id)
+    if fresh:
+        cache.pop(key, None)
+    entry = cache.get(key)
+    if entry and entry[0] is client and entry[1] > monotonic():
+        role = entry[2]
+    else:
+        try:
+            with redact_telegram_token(client):
+                lookup = client.get_chat_member(chat_id=chat, user_id=int(route.sender_id))
+                if fresh:
+                    member = await bounded_native_lookup(lookup, operation="group_standing")
+                else:
+                    # Advisory observations share the per-window intake queue.
+                    member = await asyncio.wait_for(lookup, timeout=1)
+            role = ({"creator": "owner", "administrator": "admin", "member": "member"}.get(member.status)
+                    if str(member.user.id) == route.sender_id else None)
+        except Exception:
+            role = None
+        if len(cache) >= 1024:
+            cache.pop(next(iter(cache)))
+        cache[key] = client, monotonic() + (30 if role else 5), role
+    if role is None:
+        return None
+    return {"account_id": route.sender_id, "role": role, "group_id": route.group_id}

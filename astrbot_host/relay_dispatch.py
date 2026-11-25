@@ -43,6 +43,16 @@ def with_destination(route, destination_id, *, kind=None):
         return SimpleNamespace(**values)
 
 
+def _delivery_result(plan, receipt):
+    state = "unknown"
+    if receipt.get("state") == "delivered" and receipt.get("message_id") is not None:
+        state = "sent"
+    elif receipt.get("state") == "failed" and str(receipt.get("reason", "")).startswith("telegram_"):
+        # The transport classifies a Telegram refusal only for a single API call.
+        state = "failed"
+    return {"state": state, "text": plan.text, "audit": plan.audit, "receipt": receipt}
+
+
 async def relay_private(controller, event, *, request: RelayRequest, settings,
                         actor_is_core: bool, actor_id: str = "", confirmed: bool = False,
                         route=None, base_route=None, transport=None):
@@ -66,10 +76,9 @@ async def relay_private(controller, event, *, request: RelayRequest, settings,
     if route is None:
         raise RelayNotDelivered("relay_target_unavailable", "目标私聊不可用，未发送。",
                                 audit=plan.audit)
-    receipt = await send_private_notice(controller, event, text=plan.text, route=route, transport=transport)
-    if receipt.get("state") != "delivered" or receipt.get("message_id") is None:
-        return {"state": "unknown", "text": plan.text, "audit": plan.audit, "receipt": receipt}
-    return {"state": "sent", "text": plan.text, "audit": plan.audit, "receipt": receipt}
+    options = {"require_message_id": True} if plan.need_receipt and getattr(route, "platform_name", "") == "telegram" else {}
+    receipt = await send_private_notice(controller, event, text=plan.text, route=route, transport=transport, **options)
+    return _delivery_result(plan, receipt)
 
 
 async def relay_group(controller, event, *, request: RelayRequest, settings,
@@ -90,9 +99,7 @@ async def relay_group(controller, event, *, request: RelayRequest, settings,
                                 audit=plan.audit)
     receipt = await send_group_notice(controller, route, text=plan.text,
                                       mention_id=plan.mention_id, transport=transport)
-    if receipt.get("state") != "delivered" or receipt.get("message_id") is None:
-        return {"state": "unknown", "text": plan.text, "audit": plan.audit, "receipt": receipt}
-    return {"state": "sent", "text": plan.text, "audit": plan.audit, "receipt": receipt}
+    return _delivery_result(plan, receipt)
 
 
 __all__ = ["RelayNotDelivered", "relay_group", "relay_private", "with_destination"]

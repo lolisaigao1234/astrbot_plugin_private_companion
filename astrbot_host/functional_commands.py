@@ -8,6 +8,8 @@ import json
 import logging
 import re
 
+from companion_v2.adapters.astrbot.telegram_reply import telegram_plain_text
+
 from .binding import message_text
 from .native_extensions.request_context import set_system_instruction
 
@@ -155,6 +157,8 @@ _HELP = (
     "语种：陪伴 切换语种 中文/日语/英语（只改当前私聊窗口）；群聊用 陪伴群 切换语种 日语。\n"
     "群聊：陪伴群 状态、话题、黑话 <词>、片段 <线索>、LLM状态；关闭LLM / 开启LLM 需安装管理员；"
     "生图权限用 陪伴群 开启生图 / 关闭生图，需安装管理员。\n"
+    "Telegram 群聊：完整工具档位下，有相应权限的成员可以请求建房，链接由 Bot 私发。"
+    "发起人可在原群或原话题请求关闭自己最新的房间或撤销未使用的链接。\n"
     "查询依赖本轮实际授权工具；其他配置、权限、清理与重置请在陪伴小屋对应页面操作。"
 )
 
@@ -169,6 +173,11 @@ def _match_alias(value: str, aliases: dict[str, str]):
         if folded.startswith(key + " "):
             return aliases[alias], value[len(alias):].strip()
     return None, ""
+
+
+def functional_command_text(event, *, channel: str) -> str:
+    text = message_text(event)
+    return telegram_plain_text(event, text) if channel == "group" else text
 
 
 def parse_functional_command(text: object, *, channel: str) -> FunctionalCommand | None:
@@ -670,6 +679,37 @@ def execute_functional_command(command: FunctionalCommand | None, *, application
     return ""
 
 
+def _telegram_group_voice_command(event, command):
+    return (command is not None and command.surface == "group" and command.intent == "voice_language"
+            and getattr(getattr(event, "platform_meta", None), "name", None) == "telegram")
+
+
+async def prepare_telegram_voice_language_receipt(event, command, session, prepared):
+    """Check native standing immediately before the existing authorized settings write."""
+    if not _telegram_group_voice_command(event, command) or isinstance(_event_extra(event, _RECEIPT_EXTRA), str):
+        return
+    from companion_v2.execution.models import TaskError
+    from .command_authority import is_core_subject
+    from .group_standing import resolve_group_standing
+
+    receipt = "未执行：只有群主或群管理员可以更改本群语音语种。"
+    lease = prepared.get("connection_lease")
+    if session is not None and lease is not None and event.client is lease.client:
+        standing = await resolve_group_standing(event, session.group_standing_cache, fresh=True)
+        try:
+            session.bridge.connections.assert_current(lease)
+        except TaskError:
+            receipt = "未执行：Telegram 连接已变化，请重新发送指令。"
+        else:
+            if standing and standing["role"] in {"owner", "admin"}:
+                context = prepared["context"]
+                if is_core_subject(session.runtime, context.actor.subject):
+                    receipt = execute_functional_command(command, application=session.application, context=context)
+                else:
+                    receipt = "未执行：只有安装管理员可以更改本群语音语种。"
+    _set_event_extra(event, _RECEIPT_EXTRA, receipt)
+
+
 def functional_command_receipt(event, command: FunctionalCommand | None, *, application=None,
                                context=None) -> str:
     """Execute once per admitted event and reuse the receipt on later model rounds."""
@@ -678,6 +718,8 @@ def functional_command_receipt(event, command: FunctionalCommand | None, *, appl
     stashed = _event_extra(event, _RECEIPT_EXTRA)
     if isinstance(stashed, str):
         return stashed
+    if _telegram_group_voice_command(event, command):
+        return "未执行：尚未验证本群管理员身份。"
     receipt = execute_functional_command(command, application=application, context=context)
     _set_event_extra(event, _RECEIPT_EXTRA, receipt)
     return receipt
@@ -686,13 +728,7 @@ def functional_command_receipt(event, command: FunctionalCommand | None, *, appl
 def inject_functional_command_instruction(event, request, *, channel: str, own_module: str | None = None,
                                           application=None, context=None) -> FunctionalCommand | None:
     """Attach request-local guidance after native extensions have reset their context."""
-    from .event_routing import competing_command_handler
-
-    if competing_command_handler(event, own_module=own_module) is not None:
-        command = None
-    else:
-        command = parse_functional_command(message_text(event), channel=channel)
-    _store_core_functional_command(event, command)
+    command = classify_functional_command(event, channel=channel, own_module=own_module)
     if command is not None:
         logger.info("[CompanionV2] 功能指令识别 surface=%s intent=%s", command.surface, command.intent)
     set_system_instruction(request, "functional_command", command_instruction(command))
@@ -708,7 +744,7 @@ def classify_functional_command(event, *, channel: str, own_module: str | None =
     if competing_command_handler(event, own_module=own_module) is not None:
         command = None
     else:
-        command = parse_functional_command(message_text(event), channel=channel)
+        command = parse_functional_command(functional_command_text(event, channel=channel), channel=channel)
     _store_core_functional_command(event, command)
     return command
 

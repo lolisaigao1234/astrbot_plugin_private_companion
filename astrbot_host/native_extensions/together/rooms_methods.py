@@ -45,10 +45,57 @@ class TogetherRoomsMethods:
             await asyncio.sleep(0.5)
         return {'url': url, 'tunnel_started': tunnel_started, 'tunnel_ready': tunnel_ready, 'fixed_public_url': False}
 
+    def telegram_group_invite_route(self, scope, sender):
+        from astrbot_host.recalls import NativeNoticeRoute
+        from companion_v2.foundation.refs import ScopeKind
+
+        if not sender.isascii() or not sender.isdigit() or int(sender) <= 0:
+            return None
+        platform_id, account = scope["platform"], scope["account_id"]
+        bridge = self.controller.session.bridge
+        pinned = bridge.platforms.get(platform_id)
+        if pinned is None or pinned[0].meta().name != "telegram":
+            return None
+        group = scope.get("native_scope_id")
+        target = self.controller.settings.group_target(platform_id, account, group, allow_template=False)
+        if not target or target.bot_id != scope["bot_id"] or group != scope["session_id"]:
+            return None
+        lease = bridge.connections.acquire((platform_id, account))
+        if lease.platform.meta().name != "telegram":
+            return None
+        return NativeNoticeRoute(ScopeKind.PRIVATE, platform_id, target.bot_id, account,
+            sender, sender, sender, lease.client, group_id=group, platform=lease.platform, platform_name="telegram",
+            connection_lease=lease, connections=bridge.connections)
+
+    async def send_telegram_group_invite(self, route, message):
+        from astrbot_host.private_notice import send_private_notice
+
+        return await send_private_notice(self.controller, None, route=route, text=message, require_message_id=True)
+
+    async def notify_telegram_invite_refused(self, private_route):
+        from dataclasses import replace
+        from astrbot_host.private_notice import send_group_notice
+        from companion_v2.foundation.refs import ScopeKind
+
+        group = replace(private_route, kind=ScopeKind.GROUP,
+                        peer=private_route.group_id, session_id=private_route.group_id)
+        return await send_group_notice(self.controller, group, text="请先私聊启动 Bot，再申请房间。")
+
     async def _send_private_room_link(self, event: AstrMessageEvent, message: str) -> bool:
         sender_id = _single_line(event.get_sender_id(), 80)
         if not sender_id.isdigit():
             return False
+        if getattr(getattr(event, "platform_meta", None), "name", "") == "telegram":
+            from dataclasses import replace
+            from astrbot_host.recalls import authenticate_notice_route
+            from companion_v2.foundation.refs import ScopeKind
+
+            group = authenticate_notice_route(self.controller, event, ScopeKind.GROUP, expected_post="message")
+            if group is None or group.sender != sender_id:
+                return False
+            private = replace(group, kind=ScopeKind.PRIVATE, peer=sender_id, session_id=sender_id)
+            receipt = await self.send_telegram_group_invite(private, message)
+            return receipt["state"] == "delivered"
         bot = getattr(event, 'bot', None)
         if bot is None:
             return False
@@ -76,10 +123,9 @@ class TogetherRoomsMethods:
         logger.warning('[TogetherCompanion] 群聊邀请链接私发失败: user=%s errors=%s', sender_id, ' | '.join(errors) or '当前适配器不支持私聊发送')
         return False
 
-    def _revoke_unused_ticket(self, ticket: RoomTicket) -> None:
+    def _revoke_unused_ticket(self, ticket: RoomTicket) -> bool:
         revoke = getattr(getattr(self, 'ticket_store', None), 'revoke', None)
-        if callable(revoke):
-            revoke(ticket.token)
+        return callable(revoke) and revoke(ticket.token) is True
 
     async def _open_room_from_llm_tool(self, mode: str, event: AstrMessageEvent) -> str:
         """Create a short-lived room for an explicit LLM tool request."""
@@ -107,6 +153,9 @@ class TogetherRoomsMethods:
             private_sent = await self._send_private_room_link(event, private_message)
             if not private_sent:
                 self._revoke_unused_ticket(user_ticket)
+                if getattr(getattr(event, "platform_meta", None), "name", "") == "telegram":
+                    return json.dumps({"status": "error", "message": "请先私聊启动 Bot，再申请房间。",
+                                       "group_delivery_blocked": True}, ensure_ascii=False)
                 return json.dumps({'status': 'error', 'message': '当前 QQ 会话不允许 Bot 向群成员临时私发链接，请先私聊 Bot 再说同样的话或发送 /一起。', 'group_delivery_blocked': True}, ensure_ascii=False)
             return json.dumps({'status': 'ok', 'room_type': normalized_mode, 'message': f'{label}邀请链接已私发给发起人，群内不要重复公开链接。', 'room_url': '', 'credential_included': False, 'delivered_privately': True, 'expires_at': user_ticket.expires_at, 'final_response_instruction': '只需在群里简短告知邀请链接已私发，不得输出或复述任何房间 URL。'}, ensure_ascii=False)
         return json.dumps({'status': 'ok', 'room_type': normalized_mode, 'message': f'{label}房间已准备好。{access_note}{selection_note}', 'room_url': room_url, 'credential_included': True, 'mobile_public_access': True, 'tunnel_started': access['tunnel_started'], 'tunnel_ready': access['tunnel_ready'], 'expires_at': user_ticket.expires_at, 'final_response_instruction': '必须在最终回复中逐字完整输出 room_url；room_url 中的 /join/凭证路径和 ?mode= 参数都不得删除、截断、改写，也不得只回复域名。'}, ensure_ascii=False)

@@ -4,10 +4,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+import json
 import time
 import unittest
 
-from astrbot_host.relay_pending import add_task, claim_private_receipts
+from astrbot_host.relay_pending import add_task, claim_private_receipts, claim_telegram_receipt
 from astrbot_host.relay_pending_events import process_group_presence, process_private_receipts
 from companion_v2.storage.runtime import StorageRuntime
 
@@ -58,6 +59,61 @@ class RelayPendingEventTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["message"][0], {"type": "at", "data": {"qq": "7777"}})
         self.assertEqual(kwargs["message"][-1]["data"]["text"], "看到后回我")
 
+    def test_pruned_telegram_delivery_keeps_its_original_outcome(self):
+        from astrbot_host.relay_pending import finish, scheduled_state
+        from unittest.mock import patch
+        for state, expected in (("sent", "already_sent"), ("failed", "failed"), ("unknown", "unknown")):
+            with self.subTest(state=state):
+                task = add_task(self.runtime, {"kind": "group_wait", "state": "waiting",
+                    "expires_at": time.time()+10, "telegram_account": ["telegram", "main"]})
+                finish(self.runtime, task, state)
+                with patch("astrbot_host.relay_pending.time", return_value=time.time()+20):
+                    add_task(self.runtime, {"kind": "private_receipt", "state": "waiting_reply"})
+                self.assertEqual(scheduled_state(self.runtime, task), expected)
+
+    def test_telegram_receipt_claims_distinct_out_of_order_messages_once(self):
+        account = ["telegram", "main"]
+        task = {"kind": "private_receipt", "state": "waiting_permission", "target_user_id": "peer",
+                "telegram_account": account, "expires_at": time.time() + 60}
+        for message_id in (127, 63, 126, 64):
+            task_id = add_task(self.runtime, {**task, "prompt_message_id": message_id - 2})
+            permission, replies = claim_telegram_receipt(self.runtime, account, "peer", message_id, reply_to=message_id - 2, permission_answer=True)
+            self.assertEqual([record["id"] for record in permission], [task_id])
+            self.assertEqual(replies, [])
+            for seen in (127, message_id):
+                self.assertEqual(claim_telegram_receipt(self.runtime, account, "peer", seen, reply_to=seen - 2, permission_answer=True), ([], []))
+
+    def test_addressed_answer_cannot_be_claimed_by_a_legacy_question(self):
+        from astrbot_host.relay_pending import _read
+
+        account = ["telegram", "main"]
+        ids = []
+        for topic in ("-400#22", "-400#23"):
+            ids.append(add_task(self.runtime, {
+                "kind": "private_receipt", "state": "waiting_reply", "source_kind": "group",
+                "source_id": topic, "target_user_id": "peer", "telegram_account": account,
+                "confirm_before_report": False, "expires_at": time.time() + 60,
+            }))
+        self.assertEqual(claim_telegram_receipt(self.runtime, account, "peer", 99, reply_to=75), ([], []))
+        tasks = _read(self.runtime)["tasks"]
+        self.assertEqual([tasks[key]["state"] for key in ids], ["waiting_reply", "waiting_reply"])
+
+    def test_telegram_receipt_keeps_legacy_replay_boundary(self):
+        account = ["telegram", "main"]
+        key = "conversation.relay.private_seen:" + json.dumps([*account, "peer"], separators=(",", ":"))
+        with self.runtime.transaction() as connection:
+            connection.execute("INSERT INTO runtime_metadata(key, value) VALUES (?, ?)", (key, "100"))
+        task = {"kind": "private_receipt", "state": "waiting_reply", "target_user_id": "peer",
+                "telegram_account": account, "expires_at": time.time() + 60}
+        task_id = add_task(self.runtime, task)
+        for message_id in (99, 100):
+            self.assertEqual(claim_telegram_receipt(self.runtime, account, "peer", message_id), ([], []))
+        _, replies = claim_telegram_receipt(self.runtime, account, "peer", 102)
+        self.assertEqual([record["id"] for record in replies], [task_id])
+        second = add_task(self.runtime, task)
+        _, replies = claim_telegram_receipt(self.runtime, account, "peer", 101)
+        self.assertEqual([record["id"] for record in replies], [second])
+
     async def test_private_receipt_reports_next_reply_to_source(self):
         add_task(self.runtime, {
             "kind": "private_receipt", "state": "waiting_reply", "target_user_id": "2002",
@@ -72,6 +128,38 @@ class RelayPendingEventTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["user_id"], 1001)
         self.assertIn("今晚来吗", kwargs["message"][0]["data"]["text"])
         self.assertIn("好的", kwargs["message"][0]["data"]["text"])
+
+    async def test_qq_cancelled_permission_prompt_can_resume(self):
+        from asyncio import CancelledError
+        from unittest.mock import patch
+        from astrbot_host.relay_pending import _read
+
+        task = add_task(self.runtime, {
+            "kind": "private_receipt", "state": "waiting_reply", "target_user_id": "2002",
+            "confirm_before_report": True, "expires_at": time.time() + 60,
+        })
+        target = SimpleNamespace(participant_id="2002", platform_id="onebot", account_id="account")
+        with patch("astrbot_host.relay_pending_events._ask_permission", side_effect=CancelledError):
+            with self.assertRaises(CancelledError):
+                await process_private_receipts(self.controller, self.event, target)
+        self.assertEqual(_read(self.runtime)["tasks"][task]["state"], "waiting_reply")
+
+    async def test_cancelled_qq_receipt_reports_keep_failed_state(self):
+        from asyncio import CancelledError
+        from unittest.mock import patch
+        from astrbot_host.relay_pending import _read
+
+        target = SimpleNamespace(participant_id="2002", platform_id="onebot", account_id="account")
+        for state in ("waiting_reply", "waiting_permission"):
+            with self.subTest(state=state):
+                task = add_task(self.runtime, {
+                    "kind": "private_receipt", "state": state, "target_user_id": "2002",
+                    "confirm_before_report": state == "waiting_permission", "expires_at": time.time() + 60,
+                })
+                with patch("astrbot_host.relay_pending_events._report_receipt", side_effect=CancelledError):
+                    with self.assertRaises(CancelledError):
+                        await process_private_receipts(self.controller, self.event, target)
+                self.assertEqual(_read(self.runtime)["tasks"][task]["state"], "failed")
 
     async def test_receipt_permission_is_requested_before_reporting(self):
         add_task(self.runtime, {

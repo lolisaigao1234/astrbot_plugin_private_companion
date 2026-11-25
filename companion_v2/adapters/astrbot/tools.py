@@ -212,7 +212,7 @@ def _same_declaration(declaration, current):
             and replace(current.descriptor, binding=original) == declaration.descriptor)
 
 
-def map_tools(runtime, port: AstrBotToolPort) -> ExternalToolExecutor:
+def map_tools(runtime, port: AstrBotToolPort, *, group_room_available=None) -> ExternalToolExecutor:
     if (not inspect.iscoroutinefunction(port.invoke) or not callable(port.declarations)
             or not callable(port.current_declaration) or inspect.iscoroutinefunction(port.declarations)
             or inspect.iscoroutinefunction(port.current_declaration)):
@@ -239,4 +239,4 @@ def map_tools(runtime, port: AstrBotToolPort) -> ExternalToolExecutor:
         admission_factory = getattr(port, "provider_admission", None)
         admit = admission_factory(declaration.host_tool_id) if callable(admission_factory) else None
         providers.append(ExternalToolProvider(declaration.descriptor, invoke, current, admit))
-    return ExternalToolExecutor(runtime, tuple(providers))
+    return ExternalToolExecutor(runtime, tuple(providers), group_room_available=group_room_available)

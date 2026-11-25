@@ -92,8 +92,8 @@ class RoomTicketStore:
             return None
         return ticket
 
-    def revoke(self, token: str) -> None:
-        self._tickets.pop(str(token or ""), None)
+    def revoke(self, token: str) -> bool:
+        return self._tickets.pop(str(token or ""), None) is not None
 
     def revoke_room(self, room_id: str) -> int:
         target = str(room_id or "")

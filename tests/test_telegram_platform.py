@@ -135,14 +135,14 @@ async def group_event(platform, chat_id=-400, kind="group", topic=None, text="�
     return platform.create_event(native)
 
 
-async def forum_reply_event(platform, *, topic_root):
+async def forum_reply_event(platform, *, topic_root, text="/ 原文"):
     original = Message(10 if topic_root else 11, date=datetime.now(timezone.utc),
                        chat=Chat(-400, "supergroup", is_forum=True),
                        from_user=User(platform.client.id, "Bot", True),
                        is_topic_message=True, message_thread_id=10,
                        forum_topic_created=ForumTopicCreated("Topic", 0) if topic_root else None,
                        text=None if topic_root else "之前")
-    return await group_event(platform, kind="supergroup", topic=10, text="/ 原文", reply_to_message=original)
+    return await group_event(platform, kind="supergroup", topic=10, text=text, reply_to_message=original)
 
 
 class TelegramGroupTests(unittest.IsolatedAsyncioTestCase):
@@ -281,6 +281,24 @@ class TelegramGroupTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(any(isinstance(part, Reply) for part in event.message_obj.message), not topic_root)
                 self.assertEqual(group_trigger_facts(event, "tg-main")["quoted_bot"], not topic_root)
                 self.assertEqual(group_message_text(event, "tg-main"), "/ 原文")
+
+    async def test_functional_commands_in_bot_replies_and_bot_created_topics(self):
+        from astrbot_host.functional_commands import (
+            classify_functional_command, inject_functional_command_instruction,
+        )
+
+        platform = TelegramPlatform()
+        for root in (True, False):
+            for text, recognized in (("陪伴群 话题", True), ("/陪伴群 话题", True),
+                                     ("/ 陪伴群 话题", False), ("你好", False)):
+                with self.subTest(topic_root=root, text=text):
+                    event = await forum_reply_event(platform, topic_root=root, text=text)
+                    self.assertEqual(event.message_obj.message_str, "/ " + text)
+                    classified = classify_functional_command(event, channel="group")
+                    request = NS(system_prompt="role", extra_user_content_parts=[])
+                    injected = inject_functional_command_instruction(event, request, channel="group")
+                    self.assertEqual(classified, injected)
+                    self.assertEqual(classified is not None, recognized)
 
     async def test_only_genuine_same_topic_reply_captures_a_quote(self):
         from companion_v2.adapters.astrbot.telegram_references import message_references
@@ -1232,6 +1250,174 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
                 self.assertEqual(call.kwargs.get("message_thread_id"), str(topic) if topic else None)
             self.platform.client.send_message.reset_mock()
 
+    async def test_group_command_uses_current_topic_and_sender_standing(self):
+        from astrbot_host.group_command import receive_group_llm_command
+        from companion_v2.execution.models import require
+        platform, controller = self.platform, self.controller
+        platform.client.get_chat_member = AsyncMock()
+        topic_creator = Message(23, date=datetime.now(timezone.utc),
+                                chat=Chat(-100400, "supergroup", is_forum=True),
+                                from_user=User(platform.client.id, "Bot", True),
+                                forum_topic_created=ForumTopicCreated("Topic", 0))
+        for status, text in (("administrator", "陪伴群 关闭LLM"), ("creator", "陪伴群 开启LLM")):
+            platform.client.get_chat_member.return_value = NS(user=NS(id=OWNER), status=status)
+            event = await group_event(platform, -100400, "supergroup", 23, text=text,
+                                      reply_to_message=topic_creator)
+            result = require(await receive_group_llm_command(controller, event))
+            self.assertIn("只有安装管理员", result["text"])
+        authority = controller.authority
+        context = authority.context("tg-owner", "role-tg")
+        authority.provision_scope(authority.settings.target("tg-owner"), context.scope,
+                                  context.role_binding.role, core_admin=True)
+        for status, text, expected in (
+                ("administrator", "陪伴群 关闭LLM", "已临时封锁"),
+                ("member", "陪伴群 开启LLM", "未执行"),
+                ("administrator", "陪伴群 关闭LLM", "已经处于临时封锁"),
+                ("creator", "陪伴群 LLM状态", "临时封锁"),
+                ("administrator", "陪伴群 开启LLM", "已恢复"),
+                ("administrator", "陪伴群 关闭生图", "已关闭"),
+                ("creator", "陪伴群 开启生图", "已开启"),
+                ("member", "陪伴群 开启生图", "未执行"),
+                ("member", "陪伴群 关闭LLM", "未执行"),
+                (None, "陪伴群 开启LLM", "未执行")):
+            platform.client.get_chat_member.return_value = NS(user=NS(id=OWNER), status=status)
+            event = await group_event(platform, -100400, "supergroup", 23, text=text,
+                                      reply_to_message=topic_creator)
+            result = require(await receive_group_llm_command(controller, event))
+            self.assertIn(expected, result["text"])
+            kwargs = platform.client.send_message.await_args.kwargs
+            self.assertEqual((kwargs["chat_id"], kwargs["message_thread_id"]), ("-100400", "23"))
+
+    async def test_group_voice_language_rechecks_standing_before_each_write(self):
+        from datetime import timedelta
+        from astrbot_host import functional_commands as commands
+
+        controller = self.controller
+        authority = controller.authority
+        owner = authority.context("tg-owner", "role-tg")
+        lookup = self.platform.client.get_chat_member = AsyncMock()
+        for number, (core, status, language, expected) in enumerate((
+                (False, "administrator", "日语", "未执行"),
+                (True, "administrator", "日语", "已切换"),
+                (True, "member", "英语", "未执行"),
+                (True, None, "英语", "未执行"),
+                (True, "creator", "日语", "没有更改")), 100):
+            with self.subTest(core=core, status=status):
+                if number == 101:
+                    authority.provision_scope(authority.settings.target("tg-owner"), owner.scope,
+                                              owner.role_binding.role, core_admin=True)
+                self.clock.advance(timedelta(seconds=3))
+                lookup.return_value = NS(user=NS(id=OWNER), status=status)
+                event = await group_event(self.platform, -100400, "supergroup", 23, message_id=number,
+                    text=f"@synthetic_bot 陪伴群 切换语种 {language}", entities=[MessageEntity("mention", 0, 14)])
+                event.created_at = self.clock.now().timestamp()
+                admission = require(await controller.group_reply_candidate(event))
+                prepared = require(await controller.prepare_core_reply(event, group_admission=admission))
+                command = commands.classify_functional_command(event, channel="group")
+                lookup.reset_mock()
+                await commands.prepare_telegram_voice_language_receipt(event, command, controller.session, prepared)
+                receipt = commands.functional_command_receipt(event, command, application=controller.session.application,
+                                                               context=prepared["context"])
+                self.assertIn(expected, receipt)
+                lookup.assert_awaited_once_with(chat_id=-100400, user_id=OWNER)
+
+    async def test_group_room_only_sends_ticket_to_requester(self):
+        from astrbot_host.native_extensions.together.rooms_methods import TogetherRoomsMethods
+        from companion_v2.together.models import RoomTicketStore
+        from companion_v2.together.provider import OperationStore
+        from tests.test_together_room_creation import FakePlugin, provider_with, request
+
+        class Plugin(FakePlugin, TogetherRoomsMethods):
+            def issue_room_ticket(self, *, mode, user_id, native_v2):
+                self.issued = self.ticket_store.issue(mode=mode, user_id=user_id)
+                return self.issued
+
+        plugin = Plugin()
+        plugin.controller = self.controller
+        plugin.ticket_store = RoomTicketStore()
+        provider = provider_with(plugin)
+        value = request(kind="group")
+        value["context"]["audience"]["scope"].update(platform="tg-main", account_id="tg-main",
+            bot_id="bot-tg", session_id="-100400#23", native_scope_id="-100400#23")
+        value["host_persona"].update(account_id="tg-main", bot_id="bot-tg")
+        for refused, revoked, expected in (
+                (False, True, ("succeeded", "committed")),
+                (True, True, ("failed", "not_committed")),
+                (True, False, ("unknown", "unknown"))):
+            async def send(**kwargs):
+                if str(kwargs["chat_id"]) == str(OWNER):
+                    if not revoked:
+                        plugin.ticket_store.consume(plugin.issued.token)
+                    if refused:
+                        raise Forbidden("private chat unavailable")
+                return NS(message_id=77)
+
+            self.platform.client.send_message.side_effect = send
+            result = await provider._create_room(value, "scope", {"id": "op"}, user_id=str(OWNER))
+            response = provider._response(dict(action="together.room.create", invocation_id="call", origin_key="test",
+                arguments_hash="hash", binding={}), result)
+            self.assertEqual((response["state"], response["effect"]), expected)
+            self.assertNotIn(plugin.issued.token, json.dumps(response))
+            calls = self.platform.client.send_message.await_args_list
+            self.assertEqual(str(calls[0].kwargs["chat_id"]), str(OWNER))
+            self.assertIn("/join/", calls[0].kwargs["text"])
+            if refused and revoked:
+                self.assertIsNone(response["result"])
+                self.assertEqual(str(calls[1].kwargs["chat_id"]), "-100400")
+                self.assertEqual(str(calls[1].kwargs["message_thread_id"]), "23")
+                self.assertIn("私聊启动", calls[1].kwargs["text"])
+                self.assertNotIn("/join/", calls[1].kwargs["text"])
+                self.assertFalse(OperationStore._is_reclaimable_failure(result))
+            self.assertEqual(len(calls), 2 if refused and revoked else 1)
+            self.platform.client.send_message.reset_mock()
+            self.assertEqual(plugin.ticket_store.get(plugin.issued.token) is None, refused)
+
+    async def test_group_event_invite_uses_requesters_private_chat(self):
+        from astrbot_host.native_extensions.together.rooms_methods import TogetherRoomsMethods
+
+        service = TogetherRoomsMethods()
+        service.controller = self.controller
+        event = await group_event(self.platform, -100400, "supergroup", 23)
+        self.platform.client.send_message.return_value = NS(message_id=77)
+        invite = "https://example.invalid/join/a__b_C-d?mode=call"
+        self.assertTrue(await service._send_private_room_link(event, invite))
+        send = self.platform.client.send_message
+        send.assert_awaited_once()
+        self.assertEqual(str(send.await_args.kwargs["chat_id"]), str(OWNER))
+        self.assertEqual(send.await_args.kwargs["text"], invite)
+        self.assertIsNone(send.await_args.kwargs.get("parse_mode"))
+        self.assertNotIn("message_thread_id", {k: v for k, v in send.await_args.kwargs.items() if v is not None})
+
+    async def test_repeat_sends_the_configured_interruption_into_the_topic(self):
+        from companion_v2.configuration.models import ConfigLayer, ConfigTarget
+        from companion_v2.conversation.participation import (
+            CONFIG_GROUP, GroupParticipationConfigurationOwner, configuration_fields,
+        )
+
+        async def event(number, text):
+            value = await group_event(self.platform, -100400, "supergroup", 23, text=text, message_id=number)
+            value.created_at = self.clock.now().timestamp()
+            return value
+
+        context = require(await self.controller.observe_group_early(await event(10, "初始化")))
+        target = ConfigTarget(context.scope.installation_id, ConfigLayer.WINDOW, context.role_binding.role, context.scope)
+        owner = GroupParticipationConfigurationOwner(self.controller.runtime)
+        fields = configuration_fields()
+        settings = {"group_repeat_trigger_threshold": 3, "group_repeat_follow_probability": 0,
+                    "group_repeat_interrupt_probability": .8, "group_repeat_interrupt_text": "暂停复读"}
+        owner.write(target, fields, changes={CONFIG_GROUP + "." + k: v for k, v in settings.items()},
+                    reset=(), expected_revision=owner.read(target, fields).revision, observed_at=self.clock.now())
+        for number in (11, 12, 13):
+            self.clock.advance(timedelta(seconds=1))
+            current = await event(number, "合成测试")
+            admission = require(await self.controller.group_reply_candidate(current))
+        self.assertEqual(admission["reason"], "repeat")
+        with patch("companion_v2.conversation.repeat_actions.random.random", return_value=.1):
+            require(await self.controller.receive_group_repeat(current, admission))
+        self.platform.client.send_message.assert_awaited_once()
+        kwargs = self.platform.client.send_message.await_args.kwargs
+        self.assertEqual((kwargs["text"], kwargs["chat_id"], kwargs["message_thread_id"]), ("暂停复读", "-100400", "23"))
+
     def bot_topic(self, message_id=23, **fields):
         return Message(message_id, date=datetime.now(timezone.utc), chat=Chat(-100400, "supergroup", is_forum=True),
                        from_user=User(self.platform.client.id, "Bot", True), is_topic_message=True,
@@ -1336,6 +1522,177 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
         self.platform.client.send_message.assert_not_awaited()
 
 
+class TelegramGroupRoomToolTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_topic_tool_creates_room_and_replays_private_receipt(self):
+        from astrbot.core.agent.message import Message as AgentMessage, ToolCall
+        from astrbot_host.core_reply import prepare_core_reply_event
+        from astrbot_host.core_reply_tools import close_core_reply_tools, inject_core_reply_tools, native_tool_name
+        from astrbot_host.native_extensions.together.rooms_methods import TogetherRoomsMethods
+        from companion_v2.capabilities import CapabilityAuthorizationState, CapabilityRepository
+        from companion_v2.product import PRODUCT_VERSION
+        from companion_v2.together.models import RoomTicketStore
+        from companion_v2.together.provider import NativeTogetherProvider
+        from tests.native_internal_support import internal_lease
+        from tests.test_together_room_creation import FakePlugin
+
+        class Plugin(FakePlugin, TogetherRoomsMethods):
+            issue_room_ticket = TogetherRoomsMethods.issue_room_ticket
+
+        plugin = Plugin()
+        plugin.rooms = {}
+        plugin.detached_rooms = {}
+        plugin.ticket_store = RoomTicketStore()
+        provider = NativeTogetherProvider(plugin, self.root, version=PRODUCT_VERSION)
+        lease = internal_lease(provider)
+        config = self.controller.config
+        config["multi_host"]["group_targets"] = [dict(target_id=f"topic-{topic}", platform_id="tg-main",
+            account_id="tg-main", bot_id="bot-tg", group_id=f"-100400#{topic}") for topic in (23, 24)]
+        self.window_personas["tg-main:GroupMessage:-100400#23"] = "original"
+        self.window_personas["tg-main:GroupMessage:-100400#24"] = "original"
+        self.controller = plugin.controller = self.make_controller(config)
+        with patch("astrbot_host.multi_controller.create_bundled_extensions", return_value=((lease,), ())):
+            app = await self.start_host()
+        self.addAsyncCleanup(close_core_reply_tools, app)
+        self.platform.client.send_chat_action = AsyncMock()
+        self.platform.client.send_message = AsyncMock(return_value=NS(message_id=77))
+        event = await group_event(self.platform, -100400, "supergroup", 23, text="@synthetic_bot 开房",
+                                  from_user=User(OWNER + 1, "Member", False), entities=[MessageEntity("mention", 0, 14)])
+        event.created_at = self.clock.now().timestamp()
+        admission = require(await self.controller.group_reply_candidate(event))
+        prepared = require(await self.controller.prepare_core_reply(event, group_admission=admission))
+        context = prepared["context"]
+        repo = CapabilityRepository(app.runtime)
+        create = "together.room.create"
+        close = "together.room.close"
+        package = lease.manifest.package
+        require(repo.acquire(extension_id="together", package_id=package.package_id,
+            package_version=package.package_version, expected_revision=0, observed_at=self.clock.now()))
+        require(repo.set_role_enabled(extension_id="together", role=context.role_binding.role,
+            bot_id=context.scope.bot_id, enabled=True, expected_revision=0, observed_at=self.clock.now()))
+        self.assertNotIn(create, {tool.action for tool in app.tools.catalog_for(context)})
+        self.assertNotIn(close, {tool.action for tool in app.tools.catalog_for(context)})
+        for capability in package.capabilities:
+            require(repo.set_authorization(extension_id="together", capability_id=capability,
+                subject=context.actor.subject, scope=context.scope, state=CapabilityAuthorizationState.ACTIVE,
+                expected_revision=0, observed_at=self.clock.now()))
+        self.assertEqual({tool.action for tool in app.tools.catalog_for(context)
+                          if tool.action.startswith("together.")}, {create, close})
+
+        groups = self.controller.session.bridge.groups
+        with patch.dict(groups.platforms, {"tg-main": (self.native.platforms["qq-main"], None)}):
+            self.assertFalse({create, close} & {tool.action for tool in app.tools.catalog_for(context)})
+
+        async def authorize(state):
+            return await self.controller.authorize_core_reply(event, state)
+
+        prepare_core_reply_event(event, prepared, authorize=authorize)
+        request = NS(func_tool=None, system_prompt="")
+        inject_core_reply_tools(event, request, application=app)
+        name = native_tool_name(create)
+        tool = request.func_tool.get_tool(name)
+        self.assertIsNotNone(tool)
+        async def invoke(identifier, mode="call"):
+            call = ToolCall(id=identifier, function=ToolCall.FunctionBody(name=name, arguments=json.dumps({"mode": mode})))
+            wrapper = NS(context=NS(event=event), messages=[AgentMessage(role="assistant", tool_calls=[call])])
+            return json.loads(await tool.call(wrapper, mode=mode))
+
+        for _ in range(2):
+            result = await invoke("room-call")
+            self.assertEqual(result["state"], "succeeded", result)
+            material = json.loads(result["payload"])["native"]["result"]
+            self.assertTrue(material["delivered_privately"])
+            self.assertNotIn("room", material)
+        self.platform.client.send_message.assert_awaited_once()
+        sent = self.platform.client.send_message.await_args.kwargs
+        self.assertEqual(str(sent["chat_id"]), str(OWNER + 1))
+        token = sent["text"].split("/join/")[1].split("?")[0]
+        self.assertNotIn(token, json.dumps(result))
+        ticket = plugin.ticket_store.get(token)
+        self.assertEqual(ticket.user_id, str(OWNER + 1))
+        binding = ticket.native_v2
+        self.assertEqual((binding.persona_id, binding.session_id, binding.scope_kind),
+                         ("original", "-100400#23", "group"))
+        self.assertTrue(binding.model_provider_id)
+
+        self.platform.client.send_message.reset_mock()
+        self.platform.client.send_message.side_effect = [Forbidden("private chat unavailable"), None]
+        for _ in range(2):
+            result = await invoke("refused-room-call")
+            self.assertEqual(result["state"], "failed", result)
+        private, notice = self.platform.client.send_message.await_args_list
+        self.assertEqual(str(private.kwargs["chat_id"]), str(OWNER + 1))
+        refused = private.kwargs["text"].split("/join/")[1].split("?")[0]
+        self.assertIsNone(plugin.ticket_store.get(refused))
+        self.assertEqual(str(notice.kwargs["chat_id"]), "-100400")
+        self.assertEqual(str(notice.kwargs["message_thread_id"]), "23")
+        self.assertIn("私聊启动", notice.kwargs["text"])
+        self.assertNotIn(refused, notice.kwargs["text"] + json.dumps(result))
+
+        self.platform.client.send_message.reset_mock()
+        self.platform.client.send_message.side_effect = TimeoutError("Telegram acknowledgement lost")
+        for _ in range(2):
+            result = await invoke("uncertain-room-call", mode="watch")
+            self.assertEqual(result["state"], "unknown", result)
+        self.platform.client.send_message.assert_awaited_once()
+        private = self.platform.client.send_message.await_args.kwargs
+        self.assertEqual(str(private["chat_id"]), str(OWNER + 1))
+        uncertain = private["text"].split("/join/")[1].split("?")[0]
+        self.assertIsNotNone(plugin.ticket_store.get(uncertain))
+        self.assertNotIn(uncertain, json.dumps(result))
+
+        async def close_from(source, offered, identifier):
+            close_name = native_tool_name(close)
+            call = ToolCall(id=identifier, function=ToolCall.FunctionBody(name=close_name, arguments="{}"))
+            wrapper = NS(context=NS(event=source), messages=[AgentMessage(role="assistant", tool_calls=[call])])
+            return json.loads(await offered.func_tool.get_tool(close_name).call(wrapper))
+
+        # Even with close permission, a different requester or topic cannot spend either link.
+        for index, (member, topic) in enumerate(((OWNER + 2, 23), (OWNER + 1, 24))):
+            other = await group_event(self.platform, -100400, "supergroup", topic, text="@synthetic_bot 关房",
+                                      message_id=30 + index, from_user=User(member, "Member", False),
+                                      entities=[MessageEntity("mention", 0, 14)])
+            other.created_at = self.clock.now().timestamp()
+            admission = require(await self.controller.group_reply_candidate(other))
+            turn = require(await self.controller.prepare_core_reply(other, group_admission=admission))
+            other_context = turn["context"]
+            require(repo.set_authorization(extension_id="together", capability_id=close,
+                subject=other_context.actor.subject, scope=other_context.scope, state=CapabilityAuthorizationState.ACTIVE,
+                expected_revision=0, observed_at=self.clock.now()))
+            prepare_core_reply_event(other, turn, authorize=lambda state: self.controller.authorize_core_reply(other, state))
+            offered = NS(func_tool=None, system_prompt="")
+            inject_core_reply_tools(other, offered, application=app)
+            denied = await close_from(other, offered, f"foreign-close-{index}")
+            self.assertEqual(denied["state"], "failed", denied)
+            self.assertIsNotNone(plugin.ticket_store.get(uncertain))
+            self.assertIsNotNone(plugin.ticket_store.get(token))
+
+        for _ in range(2):
+            closed = await close_from(event, request, "close-uncertain")
+            self.assertEqual(closed["state"], "succeeded", closed)
+            result = json.loads(closed["payload"])["native"]["result"]
+            self.assertTrue(result["ticket_revoked"])
+            self.assertNotIn(uncertain, json.dumps(closed))
+            self.assertNotIn("/join/", json.dumps(closed))
+            self.assertIsNone(plugin.ticket_store.get(uncertain))
+            self.assertIsNotNone(plugin.ticket_store.get(token))
+        self.assertEqual((await invoke("uncertain-room-call", mode="watch"))["state"], "unknown")
+        self.platform.client.send_message.assert_awaited_once()
+
+        # Redeeming the older delivered ticket makes its room the next close target.
+        redeemed = plugin.ticket_store.consume(token)
+        room = NS(room_id="redeemed-room", ticket_token=token, user_id=redeemed.user_id,
+                  integration_closed=False, native_v2=redeemed.native_v2, created_at=redeemed.created_at)
+        plugin.rooms[room.room_id] = room
+        plugin.close_room = AsyncMock()
+        for _ in range(2):
+            closed = await close_from(event, request, "close-redeemed")
+            self.assertEqual(closed["state"], "succeeded", closed)
+            self.assertEqual(json.loads(closed["payload"])["native"]["result"]["room_id"], room.room_id)
+            self.assertNotIn(token, json.dumps(closed))
+        plugin.close_room.assert_awaited_once_with(room)
+
+
+
 class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         await self.start_host()
@@ -1399,6 +1756,268 @@ class TelegramDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCas
         self.assertEqual(receipt["state"], "delivered")
         self.assertNotIn(token, " ".join(logs.output))
         self.assertIn("[redacted]", " ".join(logs.output))
+
+    def reply_to_prompt(self, message_id, prompt_id, text="可以"):
+        event = telegram_event(self.platform, message_id, text)
+        raw = event.message_obj.raw_message.message
+        with raw._unfrozen():
+            raw.reply_to_message = Message(prompt_id, raw.date, raw.chat, text="permission")
+        return event
+
+    def private_relay_task(self, state, confirm, prompt_id=None, question_id=None):
+        from time import time
+        from astrbot_host.relay_pending import add_task
+        return add_task(self.controller.runtime, dict(kind="private_receipt", state=state,
+            target_user_id=str(OWNER), source_id=str(OWNER), confirm_before_report=confirm,
+            reply_text="private answer", question_message_id=question_id, prompt_message_id=prompt_id, expires_at=time()+60, telegram_account=["tg-main", "tg-main"]))
+
+    async def test_private_relay_unknown_prompt_and_report_are_terminal(self):
+        from astrbot_host.relay_pending import _read
+        target = self.controller.settings.target("tg-owner")
+        message_ids = iter(range(20, 26))
+        for state, confirm in (("waiting_reply", True), ("waiting_permission", True), ("waiting_reply", False)):
+            with self.subTest(state=state, confirm=confirm):
+                task_id = self.private_relay_task(state, confirm, prompt_id=11)
+                self.platform.client.send_message.side_effect = TimeoutError()
+                for _ in range(2):
+                    event = (self.reply_to_prompt(next(message_ids), 11) if state == "waiting_permission"
+                             else telegram_event(self.platform, next(message_ids), "可以"))
+                    await self.controller.process_private_relay_receipts(event, target)
+                self.assertEqual(_read(self.controller.runtime)["tasks"][task_id]["state"], "unknown")
+                self.platform.client.send_message.assert_awaited_once()
+                self.platform.client.send_message.reset_mock()
+
+    async def test_forwarded_private_reply_leaves_receipts_waiting(self):
+        from telegram import MessageOriginHiddenUser
+        from astrbot_host.relay_pending import _read
+        target = self.controller.settings.target("tg-owner")
+        event = telegram_event(self.platform, 1, "forwarded answer")
+        raw = event.message_obj.raw_message.message
+        with raw._unfrozen():
+            raw.forward_origin = MessageOriginHiddenUser(raw.date, "Synthetic")
+        self.platform.client.send_message.return_value = NS(message_id=6)
+        for answer_id, confirm in ((2, False), (3, True)):
+            with self.subTest(confirm=confirm):
+                task_id = self.private_relay_task("waiting_reply", confirm)
+                await self.controller.process_private_relay_receipts(event, target)
+                self.platform.client.send_message.assert_not_awaited()
+                self.assertEqual(_read(self.controller.runtime)["tasks"][task_id]["state"], "waiting_reply")
+                await self.controller.process_private_relay_receipts(telegram_event(self.platform, answer_id, "my answer"), target)
+                self.platform.client.send_message.assert_awaited_once()
+                self.platform.client.send_message.reset_mock()
+                task = _read(self.controller.runtime)["tasks"][task_id]
+                self.assertEqual(task["state"], "waiting_permission" if confirm else "reported")
+                if confirm:
+                    self.assertEqual(task["reply_text"], "my answer")
+
+    async def test_private_relay_permission_requires_an_explicit_new_answer(self):
+        from astrbot_host.relay_pending import _read
+
+        target = self.controller.settings.target("tg-owner")
+        first = self.private_relay_task("waiting_permission", True, prompt_id=72)
+        receive = self.controller.process_private_relay_receipts
+        await receive(telegram_event(self.platform, 80, "今天心情很好"), target)
+        self.assertEqual(_read(self.controller.runtime)["tasks"][first]["state"], "waiting_permission")
+        await receive(telegram_event(self.platform, 79, "可以"), target)
+        self.assertEqual(_read(self.controller.runtime)["tasks"][first]["state"], "waiting_permission")
+        self.platform.client.send_message.assert_not_awaited()
+        await receive(self.reply_to_prompt(81, 72, "不同意"), target)
+        self.assertEqual(_read(self.controller.runtime)["tasks"][first]["state"], "declined")
+        self.platform.client.send_message.assert_not_awaited()
+        second = self.private_relay_task("waiting_permission", True, prompt_id=75)
+        answer = self.reply_to_prompt(82, 75, "可以。")
+        await receive(answer, target)
+        self.assertEqual(_read(self.controller.runtime)["tasks"][second]["state"], "reported")
+        third = self.private_relay_task("waiting_permission", True)
+        await receive(answer, target)
+        self.assertEqual(_read(self.controller.runtime)["tasks"][third]["state"], "waiting_permission")
+        self.platform.client.send_message.assert_awaited_once()
+
+    async def test_private_receipt_does_not_report_to_removed_source_topic(self):
+        from time import time
+        from astrbot_host.relay_pending import _read, add_task
+        target = self.controller.settings.target("tg-owner")
+        task = add_task(self.controller.runtime, dict(kind="private_receipt", state="waiting_reply",
+            target_user_id=str(OWNER), source_kind="group", source_id="-100941#54", confirm_before_report=False,
+            question_message_id=71, expires_at=time()+60, telegram_account=["tg-main", "tg-main"]))
+        self.platform.send_by_session = AsyncMock(wraps=self.platform.send_by_session)
+        await self.controller.process_private_relay_receipts(telegram_event(self.platform, 72, "private reply"), target)
+        self.assertEqual(_read(self.controller.runtime)["tasks"][task]["state"], "failed")
+        self.platform.client.send_message.assert_not_awaited()
+        self.platform.send_by_session.assert_not_awaited()
+
+    async def test_early_consent_waits_for_the_native_prompt_receipt(self):
+        from astrbot_host.relay_pending import _read
+        from astrbot_host.relay_pending_events import process_private_receipts
+        target = self.controller.settings.target("tg-owner")
+        task = self.private_relay_task("waiting_reply", True, question_id=70)
+        receive = self.controller.process_private_relay_receipts
+        dispatched, acknowledge = asyncio.Event(), asyncio.Event()
+
+        async def send(**kwargs):
+            if not dispatched.is_set():
+                dispatched.set()
+                await acknowledge.wait()
+                return NS(message_id=80)
+            return NS(message_id=82)
+
+        self.platform.client.send_message.side_effect = send
+        answer = asyncio.create_task(receive(self.reply_to_prompt(71, 70, "my reply"), target))
+        try:
+            await asyncio.wait_for(dispatched.wait(), 60)
+            with patch("astrbot_host.relay_pending_events.process_private_receipts",
+                       wraps=process_private_receipts) as handler:
+                consent = asyncio.create_task(receive(self.reply_to_prompt(81, 80), target))
+                await asyncio.sleep(0)
+                handled_before_ack = handler.await_count
+                acknowledge.set()
+                await asyncio.gather(answer, consent)
+        finally:
+            acknowledge.set()
+        self.assertEqual(handled_before_ack, 0)
+        self.assertEqual(_read(self.controller.runtime)["tasks"][task]["state"], "reported")
+        self.assertEqual(self.platform.client.send_message.await_count, 2)
+
+    async def test_attachment_without_caption_leaves_relay_question_waiting(self):
+        from astrbot_host.relay_pending import _read
+        target = self.controller.settings.target("tg-owner")
+        task = self.private_relay_task("waiting_reply", False, question_id=91)
+        event = telegram_event(self.platform, 92, "")
+        event.message_str = "[图片]"
+        await self.controller.process_private_relay_receipts(event, target)
+        self.assertEqual(_read(self.controller.runtime)["tasks"][task]["state"], "waiting_reply")
+        self.platform.client.send_message.assert_not_awaited()
+        caption = telegram_event(self.platform, 93, "")
+        with caption.message_obj.raw_message.message._unfrozen():
+            caption.message_obj.raw_message.message.caption = "my own caption"
+        await self.controller.process_private_relay_receipts(caption, target)
+        self.platform.client.send_message.assert_awaited_once()
+        self.assertIn("my own caption", self.platform.client.send_message.await_args.kwargs["text"])
+
+    async def test_telegram_question_accepts_only_subsequent_ordinary_messages(self):
+        from astrbot_host.relay_pending import _read
+
+        target = self.controller.settings.target("tg-owner")
+        task = self.private_relay_task("waiting_reply", False, question_id=101)
+        receive = self.controller.process_private_relay_receipts
+        await receive(telegram_event(self.platform, 99, "earlier private message"), target)
+        self.assertEqual(_read(self.controller.runtime)["tasks"][task]["state"], "waiting_reply")
+        external = telegram_event(self.platform, 102, "answer to a different chat")
+        raw = external.message_obj.raw_message.message
+        with raw._unfrozen():
+            raw.external_reply = NS()
+        await receive(external, target)
+        self.assertEqual(_read(self.controller.runtime)["tasks"][task]["state"], "waiting_reply")
+        self.platform.client.send_message.assert_not_awaited()
+        await receive(telegram_event(self.platform, 103, "my answer"), target)
+        self.assertEqual(_read(self.controller.runtime)["tasks"][task]["state"], "reported")
+        self.platform.client.send_message.assert_awaited_once()
+
+    async def test_cancelled_telegram_claim_can_replay_without_sending_twice(self):
+        import threading
+        from astrbot_host.relay_pending import _read, claim_telegram_receipt
+        task = self.private_relay_task("waiting_reply", False, question_id=101)
+        event = telegram_event(self.platform, 102, "my answer")
+        receive = self.started_plugin().receive_companion_message
+        loop = asyncio.get_running_loop()
+        entered = asyncio.Event()
+        release = threading.Event()
+
+        def claim(*args, **kwargs):
+            result = claim_telegram_receipt(*args, **kwargs)
+            loop.call_soon_threadsafe(entered.set)
+            if not release.wait(5):
+                raise AssertionError("claim was never released")
+            return result
+
+        with patch("astrbot_host.relay_pending_events.claim_telegram_receipt", claim):
+            handling = asyncio.create_task(receive(event))
+            try:
+                await asyncio.wait_for(entered.wait(), 5)
+                handling.cancel()
+                await asyncio.sleep(0)
+                handling.cancel()
+                await asyncio.sleep(0)
+            finally:
+                release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await handling
+        self.assertEqual(_read(self.controller.runtime)["tasks"][task]["state"], "waiting_reply")
+        self.platform.client.send_message.assert_not_awaited()
+        await receive(event)
+        await receive(event)
+        self.platform.client.send_message.assert_awaited_once()
+        self.assertEqual(_read(self.controller.runtime)["tasks"][task]["state"], "reported")
+
+    async def test_multiple_waiting_telegram_questions_need_an_addressed_answer(self):
+        from astrbot_host.relay_pending import _read
+
+        target = self.controller.settings.target("tg-owner")
+        first = self.private_relay_task("waiting_reply", False, question_id=80)
+        second = self.private_relay_task("waiting_reply", False, question_id=81)
+        receive = self.controller.process_private_relay_receipts
+        await receive(telegram_event(self.platform, 82, "ambiguous"), target)
+        self.platform.client.send_message.assert_not_awaited()
+        await receive(self.reply_to_prompt(83, 81, "for the second requester"), target)
+        tasks = _read(self.controller.runtime)["tasks"]
+        self.assertEqual((tasks[first]["state"], tasks[second]["state"]), ("waiting_reply", "reported"))
+
+    async def test_unaddressed_reply_during_permission_cannot_answer_another_relay(self):
+        from astrbot_host.relay_pending import _read
+
+        target = self.controller.settings.target("tg-owner")
+        prompt = self.private_relay_task("waiting_permission", True, prompt_id=80)
+        question = self.private_relay_task("waiting_reply", False, question_id=81)
+        receive = self.controller.process_private_relay_receipts
+        await receive(telegram_event(self.platform, 82, "请勿转告"), target)
+        self.platform.client.send_message.assert_not_awaited()
+        tasks = _read(self.controller.runtime)["tasks"]
+        self.assertEqual((tasks[prompt]["state"], tasks[question]["state"]), ("waiting_permission", "waiting_reply"))
+        await receive(self.reply_to_prompt(83, 81, "answer to the question"), target)
+        self.platform.client.send_message.assert_awaited_once()
+
+    async def test_private_receipt_consent_selects_the_replied_to_prompt(self):
+        from astrbot_host.relay_pending import _read
+
+        target = self.controller.settings.target("tg-owner")
+        receive = self.controller.process_private_relay_receipts
+        first = self.private_relay_task("waiting_reply", True)
+        self.platform.client.send_message.return_value = NS(message_id=100)
+        await receive(telegram_event(self.platform, 90, "first answer"), target)
+        self.assertEqual(_read(self.controller.runtime)["tasks"][first]["prompt_message_id"], 100)
+        second = self.private_relay_task("waiting_reply", True, question_id=101)
+        self.platform.client.send_message.return_value = NS(message_id=103)
+        await receive(self.reply_to_prompt(102, 101, "可以"), target)
+        self.assertEqual(_read(self.controller.runtime)["tasks"][second]["prompt_message_id"], 103)
+        self.platform.client.send_message.reset_mock()
+        await receive(telegram_event(self.platform, 107, "可以"), target)
+        self.platform.client.send_message.assert_not_awaited()
+
+        await receive(self.reply_to_prompt(106, 105), target)
+        self.platform.client.send_message.assert_not_awaited()
+        allowed = self.reply_to_prompt(104, 103)
+        await receive(allowed, target)
+        await receive(allowed, target)
+        self.platform.client.send_message.assert_awaited_once()
+        tasks = _read(self.controller.runtime)["tasks"]
+        self.assertEqual((tasks[first]["state"], tasks[second]["state"]), ("waiting_permission", "reported"))
+        self.assertIn("可以", self.platform.client.send_message.await_args.kwargs["text"])
+
+    async def test_only_direct_telegram_words_can_grant_private_relay_permission(self):
+        from telegram import MessageOriginHiddenUser
+        from astrbot_host.relay_pending import _read
+        target = self.controller.settings.target("tg-owner")
+        task_id = self.private_relay_task("waiting_permission", True, prompt_id=1)
+        event = self.reply_to_prompt(3, 1)
+        raw = event.message_obj.raw_message.message
+        with raw._unfrozen():
+            raw.forward_origin = MessageOriginHiddenUser(raw.date, "Synthetic")
+        await self.controller.process_private_relay_receipts(event, target)
+        self.platform.client.send_message.assert_not_awaited()
+        self.assertEqual(_read(self.controller.runtime)["tasks"][task_id]["state"], "waiting_permission")
+        await self.controller.process_private_relay_receipts(self.reply_to_prompt(4, 1), target)
+        self.platform.client.send_message.assert_awaited_once()
+        self.assertEqual(_read(self.controller.runtime)["tasks"][task_id]["state"], "reported")
 
     async def test_relay_receipt_uses_the_telegram_client_without_an_event_lease(self):
         from astrbot_host.relay_pending_events import _send_private

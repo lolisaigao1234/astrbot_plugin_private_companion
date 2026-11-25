@@ -92,7 +92,8 @@ class CoreReplyToolsTests(CoreReplyToolFixture, unittest.IsolatedAsyncioTestCase
     def test_group_tool_manifest_is_static_and_ordered(self):
         offered = tuple(NS(spec=NS(action=action)) for action in (
             "news.lookup", "group.memory.query", "slang.search",
-            "group.participation.choose", "group.behavior.learn", "turn.evidence"))
+            "group.participation.choose", "group.behavior.learn", "turn.evidence",
+            "together.room.create", "together.room.close"))
         lean = [item.spec.action for item in group_tool_manifest(offered, "lean")]
         self.assertEqual(lean, ["group.participation.choose", "group.memory.query", "slang.search"])
         standard = [item.spec.action for item in group_tool_manifest(offered, "standard")]

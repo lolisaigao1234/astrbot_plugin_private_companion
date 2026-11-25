@@ -16,8 +16,7 @@ from companion_v2.execution.models import TaskError
 from companion_v2.foundation.outcome import Outcome
 from companion_v2.foundation.refs import ScopeKind
 
-from .binding import message_text
-from .functional_commands import GROUP_CONTROL_INTENTS, parse_functional_command
+from .functional_commands import GROUP_CONTROL_INTENTS, functional_command_text, parse_functional_command
 from .private_notice import send_text_notice
 from .recalls import authenticate_notice_route
 
@@ -109,7 +108,7 @@ async def _set_group_image(controller, session, target, route, enable, at):
 
 async def receive_group_llm_command(controller, event, *, target=None):
     """Return None when this is not a handled group LLM command."""
-    command = parse_group_control(message_text(event))
+    command = parse_group_control(functional_command_text(event, channel="group"))
     if command is None:
         return None
     route = authenticate_notice_route(controller, event, ScopeKind.GROUP, expected_post="message")
@@ -126,7 +125,15 @@ async def receive_group_llm_command(controller, event, *, target=None):
                           bot_id=target.bot_id, group_id=target.group_id)
     block = GroupLLMBlock(session.runtime, now=controller.now)
     at = controller.now()
-    if command.intent in ("group_image_enable", "group_image_disable"):
+    telegram = getattr(route, "platform_name", "") == "telegram"
+    if telegram:
+        from .group_standing import resolve_group_standing
+        standing = await resolve_group_standing(event, session.group_standing_cache,
+                                                fresh=command.intent != "group_llm_status")
+        session.bridge.connections.assert_current(route.connection_lease)
+    if telegram and (not standing or standing["role"] not in {"owner", "admin"}):
+        text = "未执行：只有群主或群管理员可以使用本群管理命令。"
+    elif command.intent in ("group_image_enable", "group_image_disable"):
         if not _core_sender(session, route, target, at=at):
             text = "未执行：只有安装管理员可以更改本群生图权限。"
         else:
