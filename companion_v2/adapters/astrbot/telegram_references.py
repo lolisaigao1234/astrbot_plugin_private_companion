@@ -21,7 +21,7 @@ class TelegramReferences:
 
     @property
     def forward_origin(self):
-        return redact_text(prompt_label(self.origin.label)) if self.origin else ""
+        return (redact_text(prompt_label(self.origin.label)) or "未知") if self.origin else ""
 
     @property
     def forward_marker(self):
