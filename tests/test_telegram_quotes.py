@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 import unittest
 from unittest.mock import AsyncMock, patch
+import wave
 
 from tests.test_telegram_platform import OWNER, TelegramHostFixture
 from telegram import Document, PhotoSize, Update
@@ -149,10 +150,11 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
     async def test_forwarded_voice_survives_until_the_burst_reply_ends(self):
         from astrbot.core.message.components import Record
         from astrbot.core.platform.astr_message_event import event_context
+        from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
         from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA
 
         plugin = self.started_plugin()
-        paths, heard = [], []
+        paths, recorded, heard = [], [], []
 
         async def receive(event):
             with event_context(event):
@@ -162,7 +164,7 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
                         event.track_temporary_local_file(part.file)
                 await plugin.receive_companion_message(event)
                 if event.get_extra(CORE_REPLY_CONTEXT_EXTRA):
-                    heard.extend((part.file, Path(part.file).exists())
+                    heard.extend(base64.b64decode(part.file.removeprefix("base64://"))
                                  for part in event.message_obj.message if isinstance(part, Record))
 
         tasks = []
@@ -170,14 +172,18 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
             event = await self.event(number=number, text="forwarded words", forward_origin={
                 "type": "hidden_user", "sender_user_name": "Ada", "date": 1700000000})
             if number < 93:
-                path = self.root / f"voice-{number}.wav"
-                path.write_bytes(b"RIFF")
+                path = Path(get_astrbot_temp_path()) / f"voice-{number}.wav"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with wave.open(str(path), "wb") as stream:
+                    stream.setnchannels(1), stream.setsampwidth(2), stream.setframerate(8000)
+                    stream.writeframes(bytes([number, 0]) * 800)
+                recorded.append(path.read_bytes())
                 paths.append(str(path))
-                event.message_obj.message = [Record(file=str(path))]
+                event.message_obj.message = [Record(file=str(path), url=str(path), path=str(path))]
             tasks.append(asyncio.create_task(receive(event)))
             await asyncio.sleep(0.2)
         await asyncio.gather(*tasks)
-        self.assertEqual(heard, [(path, True) for path in paths])
+        self.assertEqual(heard, recorded)
         self.assertFalse(any(Path(path).exists() for path in paths))
 
     async def test_comment_folded_into_a_pending_forward_stays_the_senders_words(self):
