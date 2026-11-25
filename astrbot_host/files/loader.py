@@ -42,7 +42,8 @@ async def load_native_file(locator, *, client, scope, maximum_bytes, maximum_cha
     if type(locator) is not NativeFileLocator:
         raise TaskError("host_file_location_invalid", "file intake requires a frozen native attachment")
     suffix = Path(locator.name).suffix.lower()
-    if isinstance(locator.locator, TelegramFile) and isinstance(formats, frozenset):
+    telegram = isinstance(locator.locator, TelegramFile)
+    if telegram and isinstance(formats, frozenset):
         # The capture bridge supplies selected suffixes. The worker takes one CLI mode.
         if suffix not in formats:
             raise TaskError("host_file_format_unsupported", "document format is not selected")
@@ -72,10 +73,13 @@ async def load_native_file(locator, *, client, scope, maximum_bytes, maximum_cha
         try:
             content = await fetch_attachment(value, maximum_bytes=maximum_bytes)
         except AttachmentReadError as error:
+            if not telegram:
+                # Other platforms keep their own timeout and failure notices.
+                raise error.__cause__ or error
             code = "host_file_limit" if error.code == "host_image_limit" else "host_file_unavailable"
             raise FileExtractionError(code, error.bytes_read) from None
         except TaskError as error:
-            if error.code == "host_image_limit":
+            if telegram and error.code == "host_image_limit":
                 raise TaskError("host_file_limit", "file exceeds its original byte budget") from None
             raise
     if not 0 < len(content) <= maximum_bytes:
@@ -83,5 +87,7 @@ async def load_native_file(locator, *, client, scope, maximum_bytes, maximum_cha
     try:
         return await decode_document(content, locator, maximum_chars=maximum_chars, formats=formats)
     except Exception as exc:
+        if not telegram:
+            raise
         code = exc.code if isinstance(exc, TaskError) else "host_file_invalid"
         raise FileExtractionError(code, len(content)) from None
