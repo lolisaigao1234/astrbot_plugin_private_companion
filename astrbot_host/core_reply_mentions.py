@@ -4,7 +4,7 @@ from collections.abc import Mapping
 import logging
 import re
 
-from companion_v2.adapters.astrbot.telegram_reply import telegram_has_reply_prefix
+from companion_v2.adapters.astrbot.telegram_reply import telegram_has_reply_prefix, telegram_plain_text
 from companion_v2.conversation.group_timing import SELF_MENTION
 from companion_v2.sources.privacy import redact_text
 
@@ -127,9 +127,11 @@ def restore_group_mentions(event, request, native_input, native_context):
     applied_prefix = prefix if prefix and prompt.startswith(prefix) else ""
     if applied_prefix:
         prompt = prompt[len(applied_prefix):]
-    if prefix or telegram_has_reply_prefix(event):
-        plain = event.message_obj.message_str
-    if original == plain:
+    if prefix:
+        plain = telegram_plain_text(event, event.message_obj.message_str)
+    # A custom wake prefix leaves the marker AstrBot adds for a reply in the prompt.
+    marked = event.message_obj.message_str if telegram_has_reply_prefix(event) else plain
+    if original == plain == marked:
         return
     config = {}
     getter = getattr(native_context, "get_config", None)
@@ -138,7 +140,8 @@ def restore_group_mentions(event, request, native_input, native_context):
     provider = config.get("provider_settings", {}) if isinstance(config, Mapping) else {}
     prefixes = list(config.get("wake_prefix", ())) if getattr(event, "is_at_or_wake_command", False) else []
     prefixes.append(provider.get("wake_prefix", ""))
-    variants = [(plain, original), (plain.strip(), original.strip())]
+    variants = [(plain, original), (plain.strip(), original.strip()),
+                (marked, original), (marked.strip(), original.strip())]
     if not plain.strip():
         variants.append((BARE_MENTION_SENTINEL_PROMPT, original))
     if not plain.strip() and any(
