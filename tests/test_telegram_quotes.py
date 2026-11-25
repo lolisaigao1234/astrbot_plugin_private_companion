@@ -115,6 +115,11 @@ class TelegramQuoteTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual([(row["event_id"], row["owner"]) for row in rows],
                          [("80", reference), ("81", reference), ("81", reference),
                           ("82", reference), ("83", "conversation.native_input")])
+        from companion_v2.conversation.private_reply_context import capture_private_reply_context
+        # The comment is current input even when one of the forwards leads the turn.
+        dialogue = capture_private_reply_context(
+            session.application.messages, context, replace(original, event_id="80"), at=self.clock.now())
+        self.assertNotIn("my-comment", json.dumps(dialogue["before_input"], ensure_ascii=False))
 
     async def test_comment_folded_into_a_pending_forward_stays_the_senders_words(self):
         from astrbot_host.core_reply import CORE_REPLY_CONTEXT_EXTRA, inject_core_reply_prompt
