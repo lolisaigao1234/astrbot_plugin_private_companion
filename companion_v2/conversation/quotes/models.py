@@ -74,7 +74,7 @@ class CapturedQuote:
 
 def prompt_label(label):
     """Keep a platform-supplied name from forging another prompt section."""
-    return " ".join(label.splitlines()).replace("[", "［").replace("]", "］")
+    return " ".join(label.splitlines()).strip().replace("[", "［").replace("]", "］")
 
 
 @dataclass(frozen=True)

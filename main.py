@@ -648,6 +648,8 @@ class PrivateCompanionV2StagingPlugin(Star):
                                           *, reason="private_debounce_merged"):
         if manager.superseded_by_same_event(reservation, event):
             return False
+        from .astrbot_host.telegram_forward_burst import keep_burst_files
+        keep_burst_files(event, reservation.pending.owner)
         self._suppress_merged_private_event(event, target, event_ref, reason=reason)
         return True
 
