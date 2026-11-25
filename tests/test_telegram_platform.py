@@ -1458,7 +1458,9 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
                 (["/"], "继续", reply, {}, "native_quote", "继续"),
                 (["/"], "问 @synthetic_bot 继续", root, mention, "mention", f"问 {SELF_MENTION} 继续"),
                 (["/"], "问 @synthetic_bot 继续", reply, mention, "mention", f"问 {SELF_MENTION} 继续"),
-                (["小爱"], "问 @synthetic_bot 继续", reply, mention, "mention", f"问 {SELF_MENTION} 继续")):
+                (["小爱"], "问 @synthetic_bot 继续", reply, mention, "mention", f"问 {SELF_MENTION} 继续"),
+                (["小爱"], "@synthetic_bot", reply, {"entities": [MessageEntity("mention", 0, 14)]}, "mention",
+                 SELF_MENTION)):
             with self.subTest(prefixes=prefixes, text=text, reply=original is reply):
                 event = await self.waking_event(prefixes, text, original, **fields)
                 admissions, candidate = [], self.controller.group_reply_candidate
@@ -1472,6 +1474,7 @@ class TelegramGroupHostTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCa
                 self.assertEqual([item["reason"] for item in admissions], [reason])
                 self.assertEqual(admissions[0]["trigger_facts"]["native_wakeup"], bool(reason))
                 self.assertEqual(event.call_llm, not reason)
+                self.assertFalse(event.message_str.startswith("/"))
                 if reason:
                     native = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)["prepared"]["native_input"]
                     request = NS(prompt=event.message_str)
