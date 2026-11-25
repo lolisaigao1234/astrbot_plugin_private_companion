@@ -95,7 +95,7 @@ class TelegramForwardOrigin:
         return digest(fields)
 
     def attribution(self, sender):
-        return f"转发者 {sender}，转发来源 {self.kind}：{prompt_label(self.label)}，来源时间 {self.sent_at}"
+        return f"转发者 {sender}，转发来源 {self.kind}：{prompt_label(self.label) or '未知'}，来源时间 {self.sent_at}"
 
 
 @dataclass(frozen=True)
