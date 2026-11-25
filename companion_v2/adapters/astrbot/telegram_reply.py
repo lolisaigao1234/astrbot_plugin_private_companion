@@ -42,15 +42,21 @@ def telegram_plain_text(event, text):
 
 def align_group_wake(event, native_context):
     """Wake on real replies to the bot; in a topic the bot created, judge only what was typed."""
-    if telegram_reply_to_bot(event):
+    reply = telegram_reply_to_bot(event)
+    if reply:
         event.is_at_or_wake_command = True
-    elif telegram_has_reply_prefix(event):
-        # AstrBot has put its reply marker in front of the text before looking for a wake prefix.
-        message = event.message_obj
-        text = message.raw_message.message.text.strip()
-        mentioned = any(str(getattr(part, "qq", "")) == message.self_id for part in message.message)
-        prefixes = native_context.get_config(umo=event.unified_msg_origin).get("wake_prefix", ())
-        typed = next((prefix for prefix in prefixes if text.startswith(prefix)), None)
-        event.is_at_or_wake_command = mentioned or typed is not None
-        if typed is not None and not mentioned:
-            event.message_str = text[len(typed):].strip()
+    if not telegram_has_reply_prefix(event):
+        return
+    # AstrBot put its reply marker in front of the text before looking for a wake prefix.
+    message = event.message_obj
+    if event.message_str.strip() == message.message_str.strip():
+        event.message_str = telegram_plain_text(event, message.message_str).strip()
+    if reply:
+        return
+    text = message.raw_message.message.text.strip()
+    mentioned = any(str(getattr(part, "qq", "")) == message.self_id for part in message.message)
+    prefixes = native_context.get_config(umo=event.unified_msg_origin).get("wake_prefix", ())
+    typed = next((prefix for prefix in prefixes if text.startswith(prefix)), None)
+    event.is_at_or_wake_command = mentioned or typed is not None
+    if typed is not None and not mentioned:
+        event.message_str = text[len(typed):].strip()
