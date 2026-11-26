@@ -4,7 +4,7 @@ from dataclasses import replace
 import unittest
 
 from companion_v2.execution.models import TaskError, digest
-from tests.test_telegram_platform import OWNER, TelegramHostFixture
+from tests.test_telegram_fork_platform import OWNER, TelegramHostFixture
 
 EARLIER = "onebot-user:200"
 

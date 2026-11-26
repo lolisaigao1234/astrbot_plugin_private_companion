@@ -33,10 +33,10 @@ SUPPORTED_VERSIONS = frozenset(("4.27.2", "4.28.2", "4.29.0", "4.29.1"))
 # eagerly, and a real surface change fails loudly at import instead of being
 # guessed from a version string. An unreviewed host only earns one warning.
 VERIFIED_SERIES = frozenset(("4.27", "4.28", "4.29"))
-# Native routing is verified for the OneBot reverse-WS adapter and the two
-# QQ Official adapter names AstrBot exposes.  Keeping the allow-list here
-# prevents an arbitrary adapter from inheriting route privileges by accident.
-SUPPORTED_PLATFORM_NAMES = frozenset(("aiocqhttp", "qq_official", "qq_official_webhook", "lark", "weixin_oc", "wechat_native", "telegram"))
+# Only adapters with a native account and participant projection can use these routes.
+SUPPORTED_PLATFORM_NAMES = frozenset((
+    "aiocqhttp", "qq_official", "qq_official_webhook", "lark", "weixin_oc", "wechat_native", "telegram",
+))
 OFFICIAL_PLATFORM_NAMES = frozenset(("qq_official", "qq_official_webhook"))
 _REPORTED_UNVERIFIED = set()
 NATIVE_LOOKUP_TIMEOUT_SECONDS = 20
@@ -189,24 +189,15 @@ def event_platform_id(event):
 def event_account_id(event):
     """Return the stable account key for one admitted native event.
 
-    OneBot identifies a login by ``message.self_id``.  QQ Official exposes a
-    synthetic self id on C2C/direct events, so the configured platform
-    instance id is the stable account projection there.
+    OneBot uses ``message.self_id``. The other adapters use the configured
+    platform instance ID, regardless of how the adapter represents the bot.
     """
     message = getattr(event, "message_obj", None)
     name = event_platform_name(event)
-    if official_platform_name(name):
+    if official_platform_name(name) or name in {"lark", "weixin_oc", "wechat_native", "telegram"}:
         return route_id(event_platform_id(event))
     if name == "aiocqhttp":
         return account_number(getattr(message, "self_id", None))
-    if name == "lark":
-        # Lark (Feishu) has no stable numeric self id on the event; the
-        # configured platform instance id is the account key, same as QQ Official.
-        return route_id(event_platform_id(event))
-    if name in {"weixin_oc", "wechat_native", "telegram"}:
-        # Personal WeChat exposes an openid/wxid and Telegram a renamable bot
-        # username; the configured adapter instance is the stable account key.
-        return route_id(event_platform_id(event))
     raise ValueError("unsupported native event platform")
 
 
@@ -267,10 +258,10 @@ def event_session_id(event):
 
 
 def event_native_client(platform, event):
-    if event_platform_name(event) == "telegram":
-        # AstrBot's Telegram event carries its bot as ``client``, not ``bot``.
+    name = event_platform_name(event)
+    if name == "telegram":
         return getattr(event, "client", None)
-    if event_platform_name(event) != "wechat_native":
+    if name != "wechat_native":
         return getattr(event, "bot", None)
     if platform is None or getattr(event, "adapter", None) is not platform:
         return None
@@ -595,6 +586,13 @@ class NativePrivateBridge:
         account = self.account(scope)
         platform = self.connections.acquire(account, connected=False).platform
         meta = platform.meta()
+        if meta.name == "telegram":
+            if scope.kind is not ScopeKind.PRIVATE:
+                raise TaskError("host_route_mismatch", "the native group platform is unsupported")
+            try:
+                account_number(scope.session_id)
+            except ValueError:
+                raise TaskError("host_route_mismatch", "Telegram private routes require a numeric user ID") from None
         if meta.name == "wechat_native":
             from .wechat_native import session_target
             try:

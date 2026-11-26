@@ -19,7 +19,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 
 from astrbot_host.audio.loader import load_native_audio
 from tests.audio_support import audio_bytes
-from tests.test_telegram_platform import OWNER, TelegramHostFixture, telegram_event
+from tests.test_telegram_fork_platform import OWNER, TelegramHostFixture, telegram_event
 
 
 class TelegramCaptureTests(TelegramHostFixture, unittest.IsolatedAsyncioTestCase):
@@ -595,7 +595,7 @@ class TelegramWireTests(unittest.IsolatedAsyncioTestCase):
         from astrbot.core.message.message_event_result import MessageChain
         from astrbot_host.core_reply_media_delivery import native_reply_messages, native_wire_message
         from tests.test_conversation_images import image_bytes
-        from tests.test_telegram_platform import TelegramPlatform
+        from tests.test_telegram_fork_platform import TelegramPlatform
 
         platform = TelegramPlatform()
         event = telegram_event(platform)
@@ -618,7 +618,7 @@ class TelegramWireTests(unittest.IsolatedAsyncioTestCase):
     async def test_provider_request_drops_credentials_from_sdk_placeholders(self):
         from astrbot.core.agent.message import TextPart
         from astrbot.core.provider.entities import ProviderRequest
-        from tests.test_telegram_platform import TelegramPlatform
+        from tests.test_telegram_fork_platform import TelegramPlatform
         from tests.test_main_no_reply import ENTRY
 
         event = telegram_event(TelegramPlatform())
@@ -636,7 +636,7 @@ class TelegramWireTests(unittest.IsolatedAsyncioTestCase):
         from astrbot.core.message.components import Face, At
         from astrbot.core.message.message_event_result import MessageChain
         from astrbot_host.core_reply_media_delivery import native_reply_messages, native_wire_message
-        from tests.test_telegram_platform import TelegramPlatform
+        from tests.test_telegram_fork_platform import TelegramPlatform
 
         platform = TelegramPlatform()
         event = telegram_event(platform)

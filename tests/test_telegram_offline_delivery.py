@@ -11,7 +11,7 @@ from telegram import Chat, Message, Update, User
 from telegram.ext import ExtBot
 from telegram.request import HTTPXRequest
 
-from tests.test_telegram_platform import OWNER, TelegramHostFixture, telegram_event
+from tests.test_telegram_fork_platform import OWNER, TelegramHostFixture, telegram_event
 from astrbot.core.message.components import Plain
 from astrbot.core.message.message_event_result import MessageChain, MessageEventResult, ResultContentType
 from companion_v2.adapters.astrbot.platform_sender import AstrBotPlatformSender
@@ -215,7 +215,7 @@ class TelegramOfflineDeliveryTests(TelegramHostFixture, unittest.IsolatedAsyncio
     async def test_subclass_sends_keep_override_state_and_isolate_typing(self):
         from astrbot.core.platform.sources.telegram.tg_event import TelegramPlatformEvent
         from companion_v2.adapters.astrbot.telegram_send import send_private_session, suppress_private_event_typing
-        from tests.test_telegram_platform import TelegramPlatform
+        from tests.test_telegram_fork_platform import TelegramPlatform
 
         class Adapter(TelegramPlatform):
             async def send_by_session(self, session, message):

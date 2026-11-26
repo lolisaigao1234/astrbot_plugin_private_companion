@@ -7,7 +7,7 @@ from types import SimpleNamespace as NS
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from tests.test_telegram_platform import OWNER, TelegramHostFixture
+from tests.test_telegram_fork_platform import OWNER, TelegramHostFixture
 from tests.audio_support import audio_bytes
 from tests.test_conversation_images import image_bytes
 from tests.video_support import video_bytes
