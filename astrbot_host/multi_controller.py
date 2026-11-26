@@ -649,8 +649,10 @@ class AstrBotMultiController:
         return {"confirmed": True, "binding": self.binding_state()}
 
     def handles_binding(self, event):
+        from .core_reply_forwards import telegram_private_forward
         from .recalls import is_notice_event
-        return (not is_notice_event(event) and is_private_message(event)
+        # A forwarded command holds someone else's words and never binds this account.
+        return (not is_notice_event(event) and is_private_message(event) and not telegram_private_forward(event)
                 and parse_bind_command(message_text(event)).kind != "ignore")
 
     async def receive_binding(self, event):
