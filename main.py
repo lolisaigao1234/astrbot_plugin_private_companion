@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import inspect
 import asyncio
 import base64
 import time
@@ -703,7 +704,12 @@ class PrivateCompanionV2StagingPlugin(Star):
         """
         target_for_event = getattr(self.staging, "target_for_event", None)
         try:
-            return bool(callable(target_for_event) and target_for_event(event) is not None)
+            if not callable(target_for_event):
+                return False
+            # Ownership is the configured route; a disconnected bot still owns its chats.
+            if "connected" in inspect.signature(target_for_event).parameters:
+                return target_for_event(event, connected=False) is not None
+            return target_for_event(event) is not None
         except Exception:
             return False
 

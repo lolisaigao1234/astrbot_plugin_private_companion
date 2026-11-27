@@ -586,9 +586,8 @@ class NativePrivateBridge:
         account = self.account(scope)
         platform = self.connections.acquire(account, connected=False).platform
         meta = platform.meta()
-        if meta.name == "telegram":
-            if scope.kind is not ScopeKind.PRIVATE:
-                raise TaskError("host_route_mismatch", "the native group platform is unsupported")
+        if meta.name == "telegram" and scope.kind is ScopeKind.PRIVATE:
+            # Groups and topics are checked by the group route; a private route names one user.
             try:
                 account_number(scope.session_id)
             except ValueError:

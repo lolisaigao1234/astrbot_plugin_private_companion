@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 
-from tests.test_telegram_fork_platform import OWNER, TelegramPlatform, group_event
+from tests.test_telegram_platform import OWNER, TelegramPlatform, group_event
 
 
 class TelegramAdministrationTests(unittest.IsolatedAsyncioTestCase):
@@ -108,7 +108,7 @@ class TelegramAdministrationTests(unittest.IsolatedAsyncioTestCase):
         from astrbot_host.relay_pending import _read
         from companion_v2.conversation.relay_tools import SEND_ACTION
         from tests.test_relay_tools import NOW
-        from tests.test_telegram_fork_platform import telegram_event
+        from tests.test_telegram_platform import telegram_event
 
         fixture, platform, invoke = await self.relay_fixture()
         args = dict(destination_id="家人甲", text="Question", need_receipt=True)

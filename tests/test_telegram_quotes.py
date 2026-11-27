@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 import wave
 
-from tests.test_telegram_fork_platform import OWNER, TelegramHostFixture
+from tests.test_telegram_platform import OWNER, TelegramHostFixture
 from telegram import Document, PhotoSize, Update
 from astrbot.core.platform.sources.telegram.tg_event import TelegramPlatformEvent
 from astrbot.core.message.components import File, Image, Reply
