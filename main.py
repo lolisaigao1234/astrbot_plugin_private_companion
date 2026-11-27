@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import inspect
 import asyncio
 import base64
 import time
@@ -45,13 +46,19 @@ from .astrbot_host.core_reply import (
     adopt_core_reply_event,
     finish_core_reply_presence,
     inject_core_reply_prompt,
+    is_core_sendable_message,
     prepare_core_reply_event,
     repair_tool_call_history,
     restore_core_reply_event,
     restore_core_reply_prepared,
 )
-from .astrbot_host.core_reply_tools import inject_core_reply_tools, inject_core_turn_notes
+from .astrbot_host.core_reply_tools import (
+    inject_core_reply_tools,
+    inject_core_reply_tools_async,
+    inject_core_turn_notes,
+)
 from .astrbot_host.core_reply_preparation import measure_core_preparation
+from .astrbot_host.core_reply_presence import agent_presence_begin, agent_presence_done, observe_native_reply_presence
 from .astrbot_host.core_reply_decision import prepare_core_reply_decision
 from .astrbot_host.core_reply_closing import prepare_private_closing_decision
 from .astrbot_host.native import warm_session_settings
@@ -111,7 +118,7 @@ from .astrbot_host.functional_commands import (
 )
 from .astrbot_host.group_command import receive_group_llm_command
 from .astrbot_host.reset_command import receive_reset_command
-from .astrbot_host.phone_command import receive_phone_confirmation
+from .astrbot_host.phone_command import receive_phone_command
 from companion_v2.conversation.group_llm_block import GroupLLMBlock
 from companion_v2.conversation.group_timing import SELF_MENTION
 from companion_v2.conversation import debounce_log
@@ -453,7 +460,8 @@ class PrivateCompanionV2StagingPlugin(Star):
     def _private_debounce_manager(self):
         manager = getattr(self, "_private_debounce", None)
         if manager is None:
-            manager = PrivateDebounce()
+            from .astrbot_host.private_semantic_debounce import classifier_from_config
+            manager = PrivateDebounce(semantic=classifier_from_config(getattr(self, "config", None) or {}))
             self._private_debounce = manager
         return manager
 
@@ -504,7 +512,7 @@ class PrivateCompanionV2StagingPlugin(Star):
             followups.finish_event(event)
         finish_core_reply_tracking(event, log_completion=False)
         if isinstance(prepared, dict):
-            phase = "completed" if reason == "follow_up_captured" else "failed"
+            phase = "absorbed" if reason == "follow_up_captured" else "failed"
             self._observe_core_phase(prepared, phase)
         restore_core_reply_event(event)
         finish_core_reply_presence(event, force=True)
@@ -696,7 +704,12 @@ class PrivateCompanionV2StagingPlugin(Star):
         """
         target_for_event = getattr(self.staging, "target_for_event", None)
         try:
-            return bool(callable(target_for_event) and target_for_event(event) is not None)
+            if not callable(target_for_event):
+                return False
+            # Ownership is the configured route; a disconnected bot still owns its chats.
+            if "connected" in inspect.signature(target_for_event).parameters:
+                return target_for_event(event, connected=False) is not None
+            return target_for_event(event) is not None
         except Exception:
             return False
 
@@ -734,6 +747,7 @@ class PrivateCompanionV2StagingPlugin(Star):
         return lock
 
     async def initialize(self) -> None:
+        self._private_debounce_manager()
         if self._session_settings_warm_task is None or self._session_settings_warm_task.done():
             self._session_settings_warm_task = asyncio.create_task(
                 warm_session_settings(), name="companion-v2-session-settings-warmup")
@@ -1062,9 +1076,11 @@ class PrivateCompanionV2StagingPlugin(Star):
                 finish_core_reply_telemetry(event)
             else:
                 observe_core_reply_delivery(event, stage)
+                if stage in {"started", "stream_started", "returned"}:
+                    presence_stage = "returned" if stage == "returned" else "delivering"
+                    observe_native_reply_presence(getattr(session, "application", None), prepared, presence_stage)
 
         def finish_core_reply_end():
-            from .astrbot_host.core_reply_presence import observe_native_reply_presence
             application = getattr(getattr(self.staging, "session", None), "application", None)
             observe_native_reply_presence(application, prepared, "finished")
 
@@ -1292,7 +1308,7 @@ class PrivateCompanionV2StagingPlugin(Star):
                                       channel=channel, event_ref=event_ref, stage="admission")
                 return
         if channel == "private" and not forwarded:
-            phone_command = await receive_phone_confirmation(self.staging, event, target=target)
+            phone_command = await receive_phone_command(self.staging, event, target=target)
             if phone_command is not None:
                 suppress_default_reply(event)
                 if phone_command.failure is not None:
@@ -1345,9 +1361,21 @@ class PrivateCompanionV2StagingPlugin(Star):
                 return
         debounce_manager = None
         debounce_pending = None
+        trailing_image_coalesced = False
         if plain_text is not None and isinstance(target_key, str) and target_key:
             debounce_manager = self._private_debounce_manager()
             debounce_pending = debounce_manager.reserve(target_key, event, plain_text)
+        elif (channel == "private" and not is_calendar_command
+              and isinstance(target_key, str) and target_key):
+            candidate_manager = self._private_debounce_manager()
+            if candidate_manager.has_pending_text(target_key):
+                trailing_text = PrivateDebounce.private_trailing_image_text(event)
+                if trailing_text is not None:
+                    debounce_pending = candidate_manager.reserve(
+                        target_key, event, trailing_text, seal_media=True)
+                    if debounce_pending is not None:
+                        debounce_manager = candidate_manager
+                        trailing_image_coalesced = True
         forward_parse_task = None
         if event_has_forward and not forwarded:
             if debounce_pending is not None:
@@ -1550,7 +1578,11 @@ class PrivateCompanionV2StagingPlugin(Star):
                             native_context=getattr(self.staging, "context", None),
                         )
                         if not apply_debounced_private_merge(
-                                event, merged_text, has_forwards=aggregated_forwards is not None):
+                                event,
+                                merged_text,
+                                has_forwards=aggregated_forwards is not None,
+                                preserve_components=trailing_image_coalesced,
+                        ):
                             suppress_default_reply(event)
                             self._record_no_reply(event, "private_debounce_merge_failed", origin_key=origin_key,
                                                   channel="private", event_ref=event_ref, stage="intake",
@@ -1691,7 +1723,12 @@ class PrivateCompanionV2StagingPlugin(Star):
         media = getattr(observer, "media", None)
         if callable(media):
             try:
-                media(event, prepared)
+                media(event, prepared, collection_only=True)
+            except TypeError:
+                try:
+                    media(event, prepared)
+                except Exception:
+                    pass
             except Exception:
                 pass
         if channel == "group" and group_admission is not None:
@@ -1975,7 +2012,7 @@ class PrivateCompanionV2StagingPlugin(Star):
         if application is not None:
             try:
                 with measure_core_preparation(event, "tool_injection", now=self.staging.now):
-                    inject_core_reply_tools(event, req, application=application)
+                    await inject_core_reply_tools_async(event, req, application=application)
             except Exception as error:
                 logger.warning("[CompanionV2] V2 工具暂不可用，保留 AstrBot 核心工具 error_type=%s",
                                type(error).__name__)
@@ -2320,6 +2357,7 @@ class PrivateCompanionV2StagingPlugin(Star):
 
     @filter.on_agent_begin(priority=-1000000)
     async def observe_companion_core_agent_begin(self, event: AstrMessageEvent, run_context):
+        agent_presence_begin(event)
         from .astrbot_host.core_reply_media_prompt import finalize_core_reply_media_prompt
         finalize_core_reply_media_prompt(event, run_context)
         from .astrbot_host.core_reply_voice_authoring import prepare_core_voice_authoring
@@ -2349,6 +2387,7 @@ class PrivateCompanionV2StagingPlugin(Star):
         close_core_reply_tool_guard(event, run_context)
         restore_core_tool_dispatch(event, run_context)
         observe_core_agent_done(event, run_context, response)
+        agent_presence_done(event, response)
         state = event.get_extra(CORE_REPLY_CONTEXT_EXTRA)
         prepared = state.get("prepared") if isinstance(state, dict) else None
         self._observe_core_phase(prepared, "completed" if getattr(response, "role", None) == "assistant" else "failed")
@@ -2358,6 +2397,37 @@ class PrivateCompanionV2StagingPlugin(Star):
         followup_guard = getattr(self, "_core_followup_guard", None)
         if followup_guard is not None:
             followup_guard.finish_turn(event)
+        self._watch_empty_core_reply(event, state, prepared, response)
+
+    def _watch_empty_core_reply(self, event, state, prepared, response):
+        if (not isinstance(prepared, dict) or prepared.get("channel") != "private"
+                or not prepared.get("event_ref") or getattr(response, "role", None) != "assistant"
+                or getattr(response, "tools_call_name", None)
+                or is_core_sendable_message(getattr(response, "completion_text", ""))
+                or is_core_sendable_message(getattr(response, "result_chain", None))):
+            return
+
+        # An empty result can skip after_message_sent. Let the native message
+        # task finish first, so any remaining delivery can still be observed.
+        owner = state.get("_delivery_net_task")
+        if owner is None or owner.done():
+            return
+
+        def record_if_unsent(task):
+            if (task.cancelled() or event.is_stopped()
+                    or event.get_extra(CORE_REPLY_CONTEXT_EXTRA) is not state
+                    or state.get("prepared") is not prepared
+                    or state.get("silent_suppressed") or state.get("denial_notified")
+                    or state.get("_text_presentation_removed")
+                    or state.get("group_participation", {}).get("mode") == "skip"
+                    or state.get("send_attempts") or getattr(event, "_has_send_oper", False)):
+                return
+            event_ref = prepared["event_ref"]
+            self._record_no_reply(event, "core_reply_no_delivery", origin_key=prepared.get("origin_key"),
+                                  channel="private", event_ref=event_ref, stage="delivery",
+                                  turn=event_ref, code="empty_result")
+
+        owner.add_done_callback(record_if_unsent)
 
     @filter.on_using_llm_tool()
     async def observe_companion_core_tool_begin(self, event: AstrMessageEvent, tool, tool_args):

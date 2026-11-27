@@ -1,26 +1,43 @@
 """Proactive reactions share the owned catalog and confirmed delivery accounting."""
 
 from dataclasses import replace
+import base64
 import json
 import unittest
 from unittest.mock import Mock, patch
 
+from companion_v2.capabilities.models import CapabilityAuthorizationState
+from companion_v2.capabilities.repositories import CapabilityRepository
 from companion_v2.configuration.models import ConfigLayer, ConfigTarget
 from companion_v2.delivery.media import ImageDeliveryEnvelope, image_manifest, manifest_hash
 from companion_v2.delivery.service import DeliveryRequest
+from companion_v2.execution.models import digest
+from companion_v2.model_gateway.models import Amount, BudgetPolicy
+from tests.native_image_support import NativeImageFixture
 from tests.proactive_support import ContactFixture
+from tests.test_conversation_images import image_bytes
 from tests.test_role_tool_loop import answered
 from tests.test_semantic_integration import SemanticPort, animation, picture
 
 
-class ProactiveReactionTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
-    async def enabled_reactions(self, *, proactive=True, return_host=False):
+class ProactiveReactionTests(NativeImageFixture, ContactFixture, unittest.IsolatedAsyncioTestCase):
+    async def enabled_reactions(self, *, proactive=True, generated_limit=1, judge=False, return_host=False,
+                                **host_options):
         self.sender = replace(self.sender, supports_images=True)
-        host = self.host()
+        if judge:
+            from companion_v2.configuration.registry import FieldRegistry
+            from companion_v2.model_gateway.routing import configuration_fields as model_fields
+            from companion_v2.proactive.service import persona_judge_profile
+            self.profiles += (persona_judge_profile("primary", max_output_tokens=100),)
+            self.registry = FieldRegistry(version="contact-test.v1", fields=model_fields(self.profiles))
+        host = self.host(**host_options)
         self.semantic = host.application.attach_semantics(SemanticPort())
         await self.start(host)
         app = host.application
-        self.settings(app, {"enabled": True}).unwrap()
+        changes = {"enabled": True}
+        if judge:
+            changes.update(enable_llm_proactive_persona_judge=True, proactive_persona_judge_threshold=60)
+        self.settings(app, changes).unwrap()
         self.semantic.store.configure({"reactions_proactive_enabled": proactive,
                                        "reactions_trigger_probability": 1.0,
                                        "reactions_cooldown_seconds": 0}, 0)
@@ -32,8 +49,9 @@ class ProactiveReactionTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
                                           observed_at=self.clock.now()).unwrap()
         app.configuration.patch(self.core, target=target, group_id=IMAGE_OUTPUT_GROUP,
             expected_edit_token=snapshot.edit_token,
-            changes={IMAGE_OUTPUT_GROUP + ".proactive_probability": 1.0,
-                     IMAGE_OUTPUT_GROUP + ".proactive_max_daily": 1},
+            changes={IMAGE_OUTPUT_GROUP + ".proactive_enabled": judge,
+                     IMAGE_OUTPUT_GROUP + ".proactive_probability": 1.0,
+                     IMAGE_OUTPUT_GROUP + ".proactive_max_daily": generated_limit},
             operation=self.operation(target.authorization_scope, owner=IMAGE_OUTPUT_GROUP),
             observed_at=self.clock.now()).unwrap()
         return (app, host) if return_host else app
@@ -65,7 +83,7 @@ class ProactiveReactionTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.uses(), 0)
 
     async def test_original_image_and_history_are_bound_to_confirmed_contact(self):
-        app = await self.enabled_reactions()
+        app = await self.enabled_reactions(generated_limit=0)
         original = picture()
         item = self.import_reaction(original)
         self.choose_reaction()
@@ -93,6 +111,99 @@ class ProactiveReactionTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
         self.assertIn(text.text, [part["text"] for part in history])
         self.assertEqual(app.record_receipt(self.receipt(envelope)).unwrap(), "delivered")
         self.assertEqual(self.uses(), 1)
+
+    async def test_reaction_can_share_the_text_message(self):
+        app = await self.enabled_reactions()
+        self.semantic.store.configure({"reactions_delivery_mode": "same_message"}, 1)
+        self.import_reaction()
+        self.choose_reaction()
+
+        task = (await self.contact(app)).unwrap().task
+        await self.delivery_state(app, task.task_id, "delivered")
+
+        envelope, = self.sent
+        self.assertIsInstance(envelope, ImageDeliveryEnvelope)
+        self.assertEqual(envelope.text, "我在这里。")
+        self.assertEqual(self.uses(), 1)
+
+    async def test_reaction_before_text_still_delivers_text_during_reaction_cooldown(self):
+        app = await self.enabled_reactions()
+        self.semantic.store.configure({"reactions_delivery_mode": "separate_before",
+                                       "reactions_cooldown_seconds": 3600}, 1)
+        self.import_reaction()
+        self.choose_reaction()
+
+        task = (await self.contact(app)).unwrap().task
+        await self.until(lambda: len(self.sent) == 2)
+        await self.delivery_state(app, task.task_id, "delivered")
+
+        envelope, text = self.sent
+        self.assertIsInstance(envelope, ImageDeliveryEnvelope)
+        self.assertNotIsInstance(text, ImageDeliveryEnvelope)
+        self.assertEqual((envelope.text, text.text), ("", "我在这里。"))
+        self.assertEqual(self.uses(), 1)
+        history = app.background_history.recent(self.contact_context()).unwrap()
+        self.assertEqual([part["text"] for part in history], ["", "我在这里。"])
+
+    async def test_new_image_uses_the_generation_route_only_after_persona_approval(self):
+        registry = self.create_image_port(self.root.parent / "proactive-image-native", self.clock.now)
+        context = self.contact_context()
+        package = registry.declarations()[0].descriptor.package
+        repo = CapabilityRepository(self.runtime)
+        now = self.clock.now()
+        repo.register_descriptor(package, registered_at=now).unwrap()
+        repo.acquire(extension_id=package.extension_id, package_id=package.package_id,
+                     package_version=package.package_version, expected_revision=0, observed_at=now).unwrap()
+        repo.set_role_enabled(extension_id=package.extension_id, bot_id=context.scope.bot_id,
+                              role=context.role_binding.role, enabled=True, expected_revision=0, observed_at=now).unwrap()
+        for capability in package.capabilities:
+            repo.set_authorization(extension_id=package.extension_id, capability_id=capability,
+                subject=context.actor.subject, scope=context.scope, state=CapabilityAuthorizationState.ACTIVE,
+                expected_revision=0, observed_at=now).unwrap()
+        budget = BudgetPolicy(*(Amount(100000, 100000) for _ in range(5)), enabled=False)
+        app = await self.enabled_reactions(proactive=False, judge=True, tool_port=registry, budget=budget)
+        execute = self.image_backend.execute
+
+        async def generate(invocation, references, before_dispatch):
+            return await invocation.model_call("nai", invocation.operation,
+                lambda dispatch: execute(invocation, references, dispatch), before_dispatch)
+
+        async def respond(envelope):
+            if ("点评一条已写好的主动消息" in envelope.task_prompt
+                    or "score" in envelope.original.instruction):
+                self.assertEqual(self.image_backend.calls, [])
+                return answered('{"decision":"send","score":92,"reason":"语气自然"}')
+            self.assertIn("image_prompt", envelope.original.user_instruction)
+            return answered(json.dumps({"decision": "send", "text": "刚想到一个窗边静物的画面。",
+                                        "image_prompt": "窗边的书和热茶，水彩插画。"}, ensure_ascii=False))
+
+        self.image_backend.execute = generate
+        self.model_behavior = respond
+        opportunity = self.opportunity("generated-image")
+        intent = self.intent(opportunity, sources=(self.source(app, "generated-image-source"),))
+        app.contact_schedule.validate_origin = Mock()
+        app.contact_schedule._origin = Mock(return_value=(None, {"role_instruction": "原角色"}, None))
+        task = (await app.proactive.contact(context, opportunity, (intent,), role_instruction="原角色",
+            selection_seed="generated-image", automatic_origin={
+                "batch_id": "generated-image-batch", "role_hash": digest("原角色"),
+            })).unwrap().task
+        await self.until(lambda: len(self.sent) == 2)
+        await self.delivery_state(app, task.task_id, "delivered")
+        self.assertEqual(len(self.image_backend.calls), 1)
+        self.assertIn("窗边的书和热茶，水彩插画。", self.image_backend.calls[0][0].prompt)
+        self.assertIsInstance(self.sent[1], ImageDeliveryEnvelope)
+        self.assertEqual(self.sent[1].images[0].parent.owner, "image.native")
+        self.assertEqual(base64.b64decode(self.sent[1].images[0].data_base64), image_bytes("red"))
+        self.assertEqual(self.runtime.read_one("""SELECT count(*) FROM model_calls
+            WHERE json_extract(provider_json, '$.provider')='image.nai'""", ())[0], 1)
+        observation = app.proactive.observe(context, task.task_id).unwrap()
+        self.assertTrue(observation["judge_allowed"])
+        self.assertEqual(observation["stage_metrics"]["image_generation"]["state"], "passed")
+        self.assertFalse(observation["stage_metrics"]["image_attachment"]["attached"])
+        history = app.background_history.recent(context).unwrap()
+        self.assertEqual([part["text"] for part in history], [self.sent[0].text, ""])
+        self.assertEqual(self.uses(), 0)
+        self.assertFalse(app.proactive.images.available(context, self.clock.now(), "second-contact"))
 
     async def test_confirmed_image_diagnostic_delivers_original_when_daily_auto_images_are_off(self):
         app = await self.enabled_reactions(proactive=False)
@@ -221,6 +332,7 @@ class ProactiveReactionTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
         from companion_v2.configuration.registry import FieldRegistry
         from companion_v2.model_gateway.routing import configuration_fields as model_fields
         from companion_v2.proactive.service import persona_judge_profile
+        from tests.test_proactive_contacts import ProactiveContactTests
 
         self.sender = replace(self.sender, supports_images=True)
         self.profiles += (persona_judge_profile("primary", max_output_tokens=100),)
@@ -231,6 +343,10 @@ class ProactiveReactionTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
         app = host.application
         self.settings(app, {"enabled": True, "enable_llm_proactive_persona_judge": True,
                             "proactive_persona_judge_threshold": 60}).unwrap()
+        ProactiveContactTests.presentation_settings(self, app, {
+            "enabled": True, "llm_controlled": True, "rules_enabled": False,
+            "part_gap_mode": "fixed", "part_gap_ms": 0,
+        }).unwrap()
         self.semantic.store.configure({"reactions_proactive_enabled": True,
                                        "reactions_trigger_probability": 1.0,
                                        "reactions_cooldown_seconds": 0}, 0)
@@ -248,11 +364,12 @@ class ProactiveReactionTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
             observed_at=self.clock.now()).unwrap()
         original = picture()
         item = self.import_reaction(original, label="安慰")
+        texts = ("我在这里。", "陪你一会儿。")
 
         async def respond(envelope):
             if "主动消息复核" in envelope.task_prompt or "点评一条已写好的主动消息" in envelope.task_prompt or "score" in envelope.original.instruction:
                 return answered('{"decision":"send","score":92,"reason":"语气自然"}')
-            return answered(json.dumps({"decision": "send", "text": "我在这里陪你。",
+            return answered(json.dumps({"decision": "send", "text": "<<PRIVATE_COMPANION_SPLIT>>".join(texts),
                                         "reaction_intent": "安慰"}, ensure_ascii=False))
         self.model_behavior = respond
 
@@ -268,17 +385,23 @@ class ProactiveReactionTests(ContactFixture, unittest.IsolatedAsyncioTestCase):
             role_instruction="原角色", selection_seed="judged-reaction",
             administrator_test=True, diagnostic_source_backed=True,
             diagnostic_origin=diagnostic_origin)).unwrap().task
-        row = await self.delivery_state(app, task.task_id, "delivered")
         await self.until(lambda: self.uses() == 1)
-        envelope = self.sent[0]
+        row = await self.delivery_state(app, task.task_id, "delivered")
+        first, last, envelope = self.sent
+        self.assertEqual((first.text, last.text), texts)
+        self.assertNotIsInstance(first, ImageDeliveryEnvelope)
+        self.assertNotIsInstance(last, ImageDeliveryEnvelope)
         self.assertIsInstance(envelope, ImageDeliveryEnvelope)
+        self.assertEqual(envelope.text, "")
         self.assertEqual(envelope.images[0].descriptor.content_hash, item["id"])
         contact = self.runtime.read_one("SELECT * FROM proactive_contacts WHERE task_id=?", (task.task_id,))
         record = json.loads(contact["record_json"])
         self.assertEqual(record["judge"]["decision"], "send")
         self.assertNotIn("pending_reaction_intent", record)
-        self.assertEqual(record["reaction"]["manifest"], image_manifest(envelope.images[0]))
-        self.assertEqual(contact["payload_hash"], row["payload_hash"])
+        manifest = image_manifest(envelope.images[0])
+        self.assertEqual(record["reaction"]["manifest"], manifest)
+        self.assertEqual(contact["payload_hash"], manifest_hash("".join(texts), (manifest,)))
+        self.assertEqual(row["payload_hash"], manifest_hash("", (manifest,)))
         observation = app.proactive.observe(context, task.task_id).unwrap()
         self.assertEqual(observation["stage_metrics"]["media"]["reaction"], "attached")
         self.assertEqual(observation["stage_metrics"]["media"]["voice"], "not_selected")

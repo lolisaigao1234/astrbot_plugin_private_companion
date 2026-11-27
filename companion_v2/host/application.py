@@ -125,7 +125,8 @@ from companion_v2.references.wardrobe import (WardrobeConfigurationOwner, Wardro
     configuration_fields as wardrobe_configuration_fields)
 from companion_v2.qzone.configuration import (QzoneConfigurationOwner, QzoneSettings,
     configuration_fields as qzone_configuration_fields)
-from companion_v2.device.configuration import (PhoneConfigurationOwner,
+from companion_v2.qzone.life_images import QzoneLifeImageGenerator
+from companion_v2.device.configuration import (PhoneConfigurationOwner, PhoneSettingsReader,
     configuration_fields as phone_configuration_fields)
 from companion_v2.qzone.service import QzoneService
 from companion_v2.system_prompts.configuration import (
@@ -363,12 +364,14 @@ class CompanionApplication:
         self.state_maintenance = StateMaintenance(runtime)
         self.calendar_planning = CalendarPlanning(runtime, weather_port=weather_port)
         self.daily_outfit = DailyOutfitPhotos(runtime, weather_port)
+        self.qzone_life_images = QzoneLifeImageGenerator(runtime)
         self.growth_progress = GrowthProgressService(runtime)
         self.self_review = SelfReviewService(runtime)
         self.expression_style = ExpressionStyleService(runtime)
         self.expression_draft_review = ExpressionDraftReview(runtime)
         self.agenda = AgendaService(runtime)
-        self.phone_actions = PhoneActionService(runtime, notify=self.notify)
+        self.phone_settings = PhoneSettingsReader(self.configuration, fallback_root=runtime.data_root)
+        self.phone_actions = PhoneActionService(runtime, notify=self.notify, settings_reader=self.phone_settings)
         self.outbound = OutboundDelivery(runtime, sender, (
             DeliveryOwner(AGENDA_OWNER, "reminder.deliver", lambda request, at: self.agenda_background.delivery_text(request, at),
                 lambda request, at: self.agenda_background.history_text(request, at)),
@@ -398,7 +401,7 @@ class CompanionApplication:
                 side_effect=SideEffect.MESSAGE_DELIVERY, binding=sender.binding, timeout_seconds=30,
                 max_attempts=1, concurrency=self.worker_limit), lambda spec, at: self.delivery.validate(spec, at)),
         ) + self.poke_reply_model.registrations + self.journal_writer.registrations + self.memory_reflection.registrations + self.role_reader.registrations + self.state_maintenance.registrations + self.calendar_planning.registrations + self.growth_progress.registrations + self.self_review.registrations + self.expression_style.registrations + self.proactive.registrations + self.outbound.registrations + self.image_review_service.registrations + self.context_image_caption.registrations + self.image_narration.registrations + self.video_narration.registrations + self.screen_interpretation.registrations + self.screen_peek.registrations + self.phone_actions.registrations + self.authoring.registrations + (external.registrations if external is not None else ())
-        registrations += self.expression_draft_review.registrations + self.daily_outfit.registrations
+        registrations += self.expression_draft_review.registrations + self.daily_outfit.registrations + self.qzone_life_images.registrations
         self.tasks = TaskSupervisor(runtime, registrations, limits=limits, now=self.now)
         # Reference material shares this runtime and the supervisor that owns it, so
         # it is constructed here rather than with the other settings readers above.
@@ -497,8 +500,8 @@ class CompanionApplication:
                                   default_provider_resolver=default_provider_resolver,
                                   provider_lookup=provider_lookup)
         self.gateway = LocalModelGateway(self.router, BudgetLedger(runtime, budget, budget_soft), self.tasks)
-        self.authoring.attach(self.gateway, require_running=self.require_running)
         self.background_waiting = BackgroundTaskQueue(self.tasks)
+        self.authoring.attach(self.gateway, require_running=self.require_running, waiting=self.background_waiting)
         self.poke_reply_model.attach(self)
         self.image_review = GroupImageReview(self.messages)
         self.image_review_service.attach_review(self.image_review)
@@ -523,6 +526,7 @@ class CompanionApplication:
         self.state_maintenance.attach(self)
         self.calendar_planning.attach(self)
         self.daily_outfit.attach(self)
+        self.qzone_life_images.attach(self)
         self.growth_progress.attach(self)
         self.self_review.attach(self)
         self.expression_style.attach(self)
@@ -530,6 +534,7 @@ class CompanionApplication:
         self.journal_writer.attach(self.gateway, require_running=self.require_running, waiting=self.background_waiting)
         self.memory_reflection.attach(self.memory, self.gateway, require_running=self.require_running)
         self.proactive.attach(self.gateway, self.outbound, require_running=self.require_running, notify=self.notify)
+        self.proactive.images.quota = self.messages.image_quota
         self.proactive.history = self.background_history
         self.messages.proactive_inspirations = self.proactive.inspirations
         # The contact worker reads the same memory the reply path reads, so a
@@ -543,6 +548,8 @@ class CompanionApplication:
         self.contact_schedule = ContactSchedule(self.proactive, self.messages, role_life=self.role_life,
                                                 role_growth=self.role_growth,
                                                 role_journal=self.role_journal, calendar=self.calendar,
+                                                role_bindings=lambda: self.state_maintenance.bindings,
+                                                daily_outfit=self.daily_outfit,
                                                 relationships=self.relationship_memories,
                                                 role_state=self.role_state, weather_port=weather_port,
                                                 weather_alert_port=weather_alert_port, balance_port=balance_port,
@@ -610,6 +617,8 @@ class CompanionApplication:
         self._closing = asyncio.Lock()
         from companion_v2.delivery.presence import PresenceCoordinator
         self.presence = PresenceCoordinator(self, presence_port) if presence_port is not None else None
+        if self.presence is not None:
+            self.contact_schedule.rhythm.native_reply_activity = self.presence.native_reply_activity
 
     def require_running(self):
         if self.state != "running":
@@ -1296,6 +1305,7 @@ class CompanionApplication:
             self.state_maintenance.cancel_running()
             self.calendar_planning.cancel_running()
             self.daily_outfit.cancel_running()
+            self.qzone_life_images.cancel_running()
             self.growth_progress.cancel_running()
             self.self_review.cancel_running()
             self.expression_style.cancel_running()
@@ -1318,6 +1328,7 @@ class CompanionApplication:
         return ((self.semantics.active_handles if self.semantics else ()) + self.runner.active_handles + self.journal_writer.active_handles + self.memory_reflection.active_handles
                 + self.role_reader.active_handles + self.life_runtime.active_handles
                 + self.state_maintenance.active_handles + self.calendar_planning.active_handles + self.daily_outfit.active_handles
+                + self.qzone_life_images.active_handles
                 + self.growth_progress.active_handles
                 + self.self_review.active_handles
                 + self.expression_style.active_handles
@@ -1333,7 +1344,7 @@ class CompanionApplication:
                 + self.screen_interpretation.active_handles
                 + self.screen_peek.active_handles
                 + self.phone_actions.active_handles
-                + (self.authoring.runner.active_handles if self.authoring.runner else ())
+                + self.authoring.active_handles
                 + (self.external.runner.active_handles if self.external else ()))
 
     async def close(self, *, grace_seconds=0.1):
@@ -1372,6 +1383,7 @@ class CompanionApplication:
             await self.state_maintenance.close()
             await self.calendar_planning.close()
             await self.daily_outfit.close()
+            await self.qzone_life_images.close()
             await self.growth_progress.close()
             await self.self_review.close()
             await self.expression_style.close()
